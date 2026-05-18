@@ -151,7 +151,7 @@ def main() -> int:
     )
 
     out.write_text("\n".join(lines), encoding="utf-8")
-    print(f"✓ {out.relative_to(repo)} regenerated with {len(domains)} domains")
+    print(f"OK: regenerated {out.relative_to(repo)} regenerated with {len(domains)} domains")
     return 0
 
 

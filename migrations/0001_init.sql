@@ -83,7 +83,6 @@ CREATE TABLE datasets (
 
 CREATE INDEX datasets_domain_idx       ON datasets (domain_id);
 CREATE INDEX datasets_tier_idx         ON datasets (tier) WHERE tier IN ('platinum', 'gold');
-CREATE INDEX datasets_cached_idx       ON datasets (cached) WHERE cached;
 CREATE INDEX datasets_tsv_idx          ON datasets USING GIN (tsv);
 CREATE INDEX datasets_last_modified_idx ON datasets (last_modified_at DESC);
 
