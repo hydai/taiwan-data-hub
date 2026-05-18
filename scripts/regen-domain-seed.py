@@ -34,8 +34,11 @@ except ModuleNotFoundError:
 
 
 ALLOWED_KINDS = {"topical", "meta", "horizontal"}
-# Slug must be kebab-case: starts with letter, ends with alphanumeric,
-# only lowercase letters / digits / hyphens in between.
+# Slug must be kebab-case: 2+ chars, starts with a letter, ends with an
+# alphanumeric, only lowercase letters / digits / hyphens in between.
+# The 2-char minimum is intentional — every realistic domain slug is at
+# least a word — and lets the regex enforce the trailing-char rule
+# without an alternation for the single-char case.
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
 
 
@@ -53,7 +56,8 @@ def validate(domain: object, idx: int) -> dict:
     slug = domain.get("slug")
     if not isinstance(slug, str) or not SLUG_RE.match(slug):
         raise SystemExit(
-            f"domains[{idx}]: slug must be kebab-case [a-z0-9-], got {slug!r}"
+            f"domains[{idx}]: slug must be kebab-case (2+ chars, "
+            f"[a-z][a-z0-9-]*[a-z0-9]), got {slug!r}"
         )
     kind = domain.get("kind")
     if kind not in ALLOWED_KINDS:
