@@ -5,7 +5,9 @@
 #   kind:        topical | meta | horizontal — controls section grouping
 #   sort_order:  display order within its kind (lower first)
 #   name:        i18n map; zh-TW required, en recommended
-#   description: optional short tagline shown on the domain card
+#   description: optional. If present, must be a mapping with a non-empty
+#                zh-TW string (and optionally en, etc.) — validated by
+#                scripts/regen-domain-seed.py before SQL emission.
 #
 # Block-style mappings (not flow `{k: v, …}`) because the en values
 # contain commas which would confuse YAML's flow-map parser.

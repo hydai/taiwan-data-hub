@@ -26,6 +26,14 @@ CREATE TABLE domains (
         jsonb_typeof(name_i18n) = 'object'
         AND name_i18n ? 'zh-TW'
         AND jsonb_typeof(name_i18n -> 'zh-TW') = 'string'
+    ),
+    CONSTRAINT domains_description_shape CHECK (
+        description_i18n IS NULL
+        OR (
+            jsonb_typeof(description_i18n) = 'object'
+            AND description_i18n ? 'zh-TW'
+            AND jsonb_typeof(description_i18n -> 'zh-TW') = 'string'
+        )
     )
 );
 
@@ -78,6 +86,14 @@ CREATE TABLE datasets (
         jsonb_typeof(title_i18n) = 'object'
         AND title_i18n ? 'zh-TW'
         AND jsonb_typeof(title_i18n -> 'zh-TW') = 'string'
+    ),
+    CONSTRAINT datasets_description_shape CHECK (
+        description_i18n IS NULL
+        OR (
+            jsonb_typeof(description_i18n) = 'object'
+            AND description_i18n ? 'zh-TW'
+            AND jsonb_typeof(description_i18n -> 'zh-TW') = 'string'
+        )
     )
 );
 

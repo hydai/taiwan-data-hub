@@ -126,13 +126,17 @@ def main() -> int:
         slug_lit = sql_quote(d["slug"])
         kind_lit = sql_quote(d["kind"])
         so = d["sort_order"]
-        # Dollar-quoting protects JSON literals from any embedded ' or ".
-        name_lit = "$json$" + json.dumps(d["name"], ensure_ascii=False) + "$json$::jsonb"
+        # Use a single-quoted SQL literal with apostrophe doubling instead of
+        # dollar quoting — a translation containing the substring '$json$'
+        # would otherwise terminate the literal early. JSON strings never
+        # contain bare apostrophes, only escaped Unicode + quoted strings,
+        # so the sql_quote() pass is straightforward.
+        name_lit = sql_quote(json.dumps(d["name"], ensure_ascii=False)) + "::jsonb"
         desc = d.get("description")
         desc_lit = (
             "NULL"
             if desc is None
-            else "$json$" + json.dumps(desc, ensure_ascii=False) + "$json$::jsonb"
+            else sql_quote(json.dumps(desc, ensure_ascii=False)) + "::jsonb"
         )
         rows.append(
             f"    ({slug_lit}, {kind_lit}, {so}, {name_lit}, {desc_lit})"
