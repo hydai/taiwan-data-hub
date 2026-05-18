@@ -1,0 +1,15 @@
+[package]
+name = "etl-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "cron-driven ETL worker that mirrors upstream data sources"
+
+[lints]
+workspace = true
+
+[dependencies]

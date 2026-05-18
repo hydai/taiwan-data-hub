@@ -1,0 +1,15 @@
+[package]
+name = "mcp-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "MCP 2025-11-25 protocol types and tool dispatcher"
+
+[lints]
+workspace = true
+
+[dependencies]
