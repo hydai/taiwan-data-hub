@@ -28,8 +28,11 @@ duplicate work.
 
 ## Code of conduct
 
-This project follows the [Contributor Covenant 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
-Be respectful. Discrimination, harassment, and bad-faith arguments are not
+This project adopts the [Contributor Covenant 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/)
+— see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), which lists the deviations
+from the canonical text (the enforcement contact and a CC BY 4.0 attribution
+note). Report violations to the enforcement address listed there. Be
+respectful. Discrimination, harassment, and bad-faith arguments are not
 welcome.
 
 ## Developer Certificate of Origin (DCO)
@@ -148,9 +151,10 @@ patch-1
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
-     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm check`, `pnpm lint` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
+       - Rust gates (`.github/workflows/ci.yml` → `rust` job): `cargo fmt --check`, `cargo clippy --release --locked --all-targets -- -D warnings`, `cargo test --release --locked`
+       - Web gates (`.github/workflows/ci.yml` → `web` job): `pnpm install --frozen-lockfile`, `pnpm check`, `pnpm lint`, `pnpm build` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
      - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
-     - Run the planned commands locally as a pre-push habit until CI catches up
+     - Run all of the above locally as a pre-push habit so CI is rarely your first signal
    - **Copilot first-pass review** — maintainers assign GitHub Copilot.
      Expect a 2–4-minute turnaround per round. Address comments you
      agree with (push fixes); reply with rationale on the ones you
@@ -178,9 +182,9 @@ patch-1
 
 | Concern | Bar |
 |---|---|
-| Rust lints | `cargo clippy --release -- -D warnings` |
+| Rust lints | `cargo clippy --release --locked --all-targets -- -D warnings` |
 | Rust format | `cargo fmt --check` |
-| Rust tests | `cargo test --release` pass (release builds only per project rule) |
+| Rust tests | `cargo test --release --locked` pass (release builds only per project rule) |
 | Frontend lint | `pnpm check` + `pnpm lint` (root scripts forward to `--filter web`) |
 | Lighthouse (frontend) | perf ≥ 85, a11y ≥ 95, best-practices ≥ 90, SEO ≥ 90 |
 | Security | Never log secrets; OAuth tokens stored AES-GCM encrypted; query_rows SQL via AST whitelist |
