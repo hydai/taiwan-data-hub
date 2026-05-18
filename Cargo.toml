@@ -53,7 +53,10 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-# unwind (default) — server panics return errors instead of crashing the process.
+# panic = "unwind" (Cargo default) is kept intentionally: it lets axum/tower
+# middleware `catch_unwind` a handler panic and return 500 instead of letting
+# the whole process die. With panic = "abort" the runtime would terminate on
+# the first uncaught panic anywhere.
 
 [profile.test]
 opt-level = 1
