@@ -1,0 +1,28 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+**/node_modules/
+.svelte-kit/
+**/.svelte-kit/
+web/build/
+
+# Env / IDE
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Docs build artefacts (large)
+target-doc/
+
+# CI / local-only
+.github/workflows/*.log

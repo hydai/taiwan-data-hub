@@ -1,0 +1,22 @@
+# Same Rust 1.95 stable used by gateway.
+FROM rust:1.95-slim-bookworm AS builder
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+
+RUN cargo build --release --locked -p etl-worker
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10002 --no-create-home --shell /usr/sbin/nologin tdh
+
+COPY --from=builder /app/target/release/etl-worker /usr/local/bin/etl-worker
+
+USER tdh:tdh
+# No EXPOSE — etl-worker is a cron-driven process, not an HTTP service.
+ENTRYPOINT ["etl-worker"]

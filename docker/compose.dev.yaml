@@ -1,0 +1,54 @@
+# Dev overrides for the default compose.yaml.
+#
+# Mounts the workspace into the build containers and runs `cargo watch`
+# / `pnpm dev` so edits on the host hot-reload inside the container.
+# Keeps the same postgres service from compose.yaml.
+#
+# Run: docker compose -f docker/compose.yaml -f docker/compose.dev.yaml up
+
+services:
+  gateway:
+    # Re-use the builder stage so cargo + rustup are already present.
+    build:
+      target: builder
+    command:
+      - sh
+      - -c
+      - "cargo install cargo-watch --locked && cargo watch -x 'run --release --locked -p gateway'"
+    volumes:
+      - ../crates:/app/crates
+      - ../Cargo.toml:/app/Cargo.toml
+      - ../Cargo.lock:/app/Cargo.lock
+      - ../rust-toolchain.toml:/app/rust-toolchain.toml
+      # Persisted target/ + registry between restarts.
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+
+  etl-worker:
+    build:
+      target: builder
+    command:
+      - sh
+      - -c
+      - "cargo install cargo-watch --locked && cargo watch -x 'run --release --locked -p etl-worker'"
+    volumes:
+      - ../crates:/app/crates
+      - ../Cargo.toml:/app/Cargo.toml
+      - ../Cargo.lock:/app/Cargo.lock
+      - ../rust-toolchain.toml:/app/rust-toolchain.toml
+      - cargo-cache:/usr/local/cargo/registry
+      - target-cache:/app/target
+
+  web:
+    build:
+      target: builder
+    command: ["pnpm", "--filter", "web", "dev", "--host", "0.0.0.0"]
+    volumes:
+      - ../web:/app/web
+      - ../package.json:/app/package.json
+      - ../pnpm-workspace.yaml:/app/pnpm-workspace.yaml
+      - ../pnpm-lock.yaml:/app/pnpm-lock.yaml
+
+volumes:
+  cargo-cache:
+  target-cache:
