@@ -7,8 +7,10 @@ migration and its source of truth stay in lockstep.
 
 Validates every row before emitting SQL — refuses to write a broken
 migration if `slug` / `kind` / `name` / `description` don't match the
-expected shape. String literals are escaped (single quotes doubled)
-for the few places that don't use dollar-quoted strings.
+expected shape. Every SQL literal (slug, kind, JSON for the i18n
+columns) is written as a single-quoted string with embedded
+apostrophes doubled, so arbitrary translation content stays safe
+regardless of punctuation.
 
 Requires PyYAML (`pip install pyyaml` or use a venv).
 """
