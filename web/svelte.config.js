@@ -10,10 +10,13 @@ const config = {
 	kit: {
 		// adapter-node so we can ship a single Node binary inside Docker
 		// (self-hosted is our deploy target — see docs/DESIGN.md §4.7).
+		// Default env var names (PORT, HOST, ORIGIN, …) are kept so standard
+		// container orchestrators (Docker, k8s, Fly, Render) work without
+		// custom config. We can introduce an envPrefix later if/when we have
+		// an actual conflict with the wider TDH_* env namespace.
 		adapter: adapter({
 			out: 'build',
-			precompress: true,
-			envPrefix: 'TDH_'
+			precompress: true
 		})
 	}
 };

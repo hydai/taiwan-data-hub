@@ -1,42 +1,69 @@
-# sv
+# `web/` — Taiwan Data Hub frontend
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+SvelteKit 2 + Svelte 5 (Runes) + Tailwind 4 (CSS-first) + shadcn-svelte 1 with bits-ui 2. See [`docs/DESIGN.md`](../docs/DESIGN.md) for the full system design.
 
-## Creating a project
+This package is part of the [Taiwan Data Hub](../README.md) pnpm
+workspace. Run commands from the **repo root** unless noted; the root
+`package.json` forwards them with `pnpm --filter web ...`.
 
-If you're seeing this, you've probably already done this step. Congrats!
+## Develop
 
-```sh
-# create a new project
-npx sv create my-app
+```bash
+pnpm install              # at repo root (installs all workspaces)
+pnpm dev                  # → http://localhost:3000  (strictPort)
 ```
 
-To recreate this project with the same configuration:
+The dev server binds to port **3000** (not SvelteKit's default 5173) so
+it matches the Docker Compose mapping that lands in `#0.3`.
 
-```sh
-# recreate this project
-npx sv@0.15.3 create --template minimal --types ts --add tailwindcss="plugins:none" prettier eslint --no-install web
+## Quality gates (must pass before merge)
+
+```bash
+pnpm check                # svelte-check (typecheck Svelte + TS)
+pnpm lint                 # prettier --check && eslint
+pnpm format               # auto-fix formatting
+pnpm build                # adapter-node production build → web/build/
 ```
 
-## Developing
+## Layout
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
-
-```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+```
+web/
+├── src/
+│   ├── app.d.ts                # SvelteKit ambient types
+│   ├── app.html                # HTML shell
+│   ├── lib/
+│   │   ├── components/ui/      # shadcn-svelte components (added per-issue)
+│   │   ├── index.ts            # public lib exports
+│   │   └── utils.ts            # cn(), WithElementRef, WithoutChild*
+│   └── routes/
+│       ├── +layout.svelte      # global layout
+│       ├── +page.svelte        # placeholder home (replaced in M2)
+│       └── layout.css          # Tailwind @import + @theme tokens
+├── static/                     # favicon, robots.txt, etc.
+├── components.json             # shadcn-svelte config
+├── svelte.config.js            # adapter-node, Runes mode
+├── vite.config.ts              # Tailwind v4 Vite plugin + port 3000
+├── tsconfig.json
+└── package.json
 ```
 
-## Building
+## Adding a shadcn-svelte component
 
-To create a production version of your app:
-
-```sh
-npm run build
+```bash
+cd web
+pnpm dlx shadcn-svelte@latest add <component>   # e.g. button, dialog
 ```
 
-You can preview the production build with `npm run preview`.
+Generated files land under `src/lib/components/ui/<component>/`. They
+import the `cn` / `WithElementRef` helpers from `$lib/utils.ts` (see
+`components.json` aliases).
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+## Notes for contributors
+
+- Use Svelte 5 **Runes** (`$state` / `$derived` / `$effect` / `$props`).
+  `$:` reactive statements and `export let` props are not used.
+- Tailwind 4 uses **CSS-first config** via `@theme` in `src/routes/layout.css`.
+  Do not add a `tailwind.config.js`.
+- We ship via `@sveltejs/adapter-node`, not `adapter-auto`. The build
+  honors standard `PORT` / `HOST` / `ORIGIN` env vars.
