@@ -13,3 +13,11 @@ description = "HTTP + MCP gateway (Axum + tower) for Taiwan Data Hub"
 workspace = true
 
 [dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
