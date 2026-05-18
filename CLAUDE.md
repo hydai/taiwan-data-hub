@@ -244,7 +244,12 @@ docs/refine-mcp-quickstart
 2. Commit with conventional format (hook enforces locally)
 3. Push and open PR — title must also follow conventional format (GHA enforces)
 4. **Merge prerequisites (run in parallel, all must clear):**
-   - **CI green**: fmt + clippy + test + svelte-check + prettier + (later) lighthouse — kicked off automatically on every push
+   - **CI green** — fires automatically on every push:
+     - Currently shipping: DCO sign-off (`.github/workflows/dco.yml`)
+       + Conventional Commits PR title (`.github/workflows/pr-title.yml`)
+     - Planned in #0.5: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
+     - Planned in #2.10: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
+     - Run them locally as a pre-push habit until CI catches up
    - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
    - **Maintainer review** approves (where applicable)
 5. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)

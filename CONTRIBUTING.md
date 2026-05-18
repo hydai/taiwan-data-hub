@@ -145,13 +145,12 @@ patch-1
 3. **Push** and **open PR** — title must also be conventional (GHA enforces).
 4. **Merge prerequisites (run in parallel; all three must clear):**
    - **CI green** — fires automatically on every push:
-     - `cargo fmt --check`
-     - `cargo clippy --release -- -D warnings`
-     - `cargo test --release`
-     - `pnpm --filter web check`
-     - `pnpm prettier --check`
-     - DCO sign-off check
-     - Lighthouse budget (frontend PRs only): perf ≥ 85, a11y ≥ 95
+     - **Currently shipping**:
+       - DCO sign-off (`.github/workflows/dco.yml`)
+       - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
+     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
+     - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
+     - Run the planned commands locally as a pre-push habit until CI catches up
    - **Copilot first-pass review** — maintainers assign GitHub Copilot.
      Expect a 2–4-minute turnaround per round. Address comments you
      agree with (push fixes); reply with rationale on the ones you
