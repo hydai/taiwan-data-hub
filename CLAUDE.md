@@ -93,10 +93,10 @@ versions before copy-pasting from blog posts or AI training data:
 ### Build / test (once crates exist)
 
 ```bash
-# Rust (always release builds per project rule)
-cargo build --release
-cargo clippy --release -- -D warnings
-cargo test --release
+# Rust — release + --locked everywhere; --all-targets for clippy only
+cargo build --release --locked
+cargo clippy --release --locked --all-targets -- -D warnings
+cargo test --release --locked
 cargo fmt --check
 
 # SvelteKit
@@ -123,9 +123,9 @@ python3 scripts/populate-project.py
 
 ```bash
 # Replace path/to/file with your changed files (or pass several).
-lineguard path/to/file                     # format / line-ending check
-cargo clippy --release -- -D warnings      # release flag matches the PR-blocking quality bar
-pnpm lint                                  # root forwards to --filter web (prettier + eslint)
+lineguard path/to/file                                        # format / line-ending check
+cargo clippy --release --locked --all-targets -- -D warnings  # mirrors the CI gate
+pnpm lint                                                      # root forwards to --filter web (prettier + eslint)
 ```
 
 A PreToolUse hook in `~/.claude/settings.json` auto-runs these before `git commit`.
@@ -249,9 +249,10 @@ docs/refine-mcp-quickstart
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
-     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm check`, `pnpm lint` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
+       - Rust gates (`.github/workflows/ci.yml` → `rust` job): `cargo fmt --check`, `cargo clippy --release --locked --all-targets -- -D warnings`, `cargo test --release --locked`
+       - Web gates (`.github/workflows/ci.yml` → `web` job): `pnpm install --frozen-lockfile`, `pnpm check`, `pnpm lint`, `pnpm build`
      - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
-     - Run the planned commands locally as a pre-push habit until CI catches up
+     - Run all of the above locally as a pre-push habit so CI is rarely your first signal
    - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
    - **Maintainer review** approves (where applicable)
 5. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
@@ -346,8 +347,8 @@ The per-round commit messages (`fix: address Copilot 2nd-pass…`) disappear fro
 
 ## Quality bars (PR-blocking)
 
-- `cargo clippy --release -- -D warnings` — no warnings
-- `cargo test --release` — all pass
+- `cargo clippy --release --locked --all-targets -- -D warnings` — no warnings
+- `cargo test --release --locked` — all pass
 - `cargo fmt --check` — formatted
 - `pnpm check` — Svelte type-checks (root forwards to `--filter web check`)
 - `pnpm lint` — prettier + eslint (root forwards to `--filter web lint`)

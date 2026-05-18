@@ -1,0 +1,106 @@
+name: Dataset request
+description: Suggest a new dataset or data source the Hub should mirror.
+title: "feat(etl): "
+labels:
+  - etl
+  - community
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a dataset! See `docs/DESIGN.md §4.5`
+        for how ETL connectors are structured. Most fields below
+        help the ETL maintainer estimate connector complexity.
+  - type: input
+    id: dataset
+    attributes:
+      label: Dataset name (zh-TW preferred)
+      placeholder: 全國公廁分布資料
+    validations:
+      required: true
+  - type: input
+    id: publisher
+    attributes:
+      label: Publisher / Source agency
+      placeholder: 內政部營建署
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: Canonical URL of the dataset
+      description: The page you would link to from the dataset detail.
+      placeholder: https://data.gov.tw/dataset/24007
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source system
+      options:
+        - data.gov.tw
+        - TWSE
+        - MOEA Business Registry
+        - CWA (Central Weather Administration)
+        - Fishery (MOA)
+        - Other (specify below)
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Primary file format
+      options:
+        - CSV
+        - JSON / JSONL
+        - XML
+        - Parquet
+        - PDF (will need extraction)
+        - Multiple / mixed
+        - Unknown
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Best-fit domain
+      description: One of the 20 marketplace domains. Pick "unsure" if it doesn't obviously fit.
+      options:
+        - realestate-land
+        - economy-business
+        - procurement-subsidy
+        - public-finance
+        - tax-revenue
+        - transport
+        - public-safety
+        - judicial-legal
+        - legislature
+        - health-food
+        - environment
+        - education-research
+        - agriculture-fisheries
+        - labor-employment
+        - social-population
+        - culture-tourism-sport
+        - foreign-affairs
+        - gov-publication
+        - geo-basemap
+        - utilities-telecom
+        - unsure
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: License (SPDX identifier preferred)
+      placeholder: OGDL-Taiwan-1.0
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is this dataset valuable?
+      description: Real questions an AI agent could answer with it, or apps that would consume it.
+    validations:
+      required: true
+  - type: textarea
+    id: gotchas
+    attributes:
+      label: Known gotchas
+      description: API rate limits, paywall, requires API key, schema drift, PDF-only, language quirks, etc.
