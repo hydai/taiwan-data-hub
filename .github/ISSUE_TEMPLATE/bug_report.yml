@@ -1,6 +1,6 @@
 name: Bug report
 description: Something is broken or behaves unexpectedly in the gateway, web, etl-worker, MCP tools, or docker stack.
-title: "bug: "
+title: "fix: "
 labels:
   - bug
 body:

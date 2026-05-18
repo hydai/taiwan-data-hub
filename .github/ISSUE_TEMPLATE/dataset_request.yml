@@ -1,6 +1,6 @@
 name: Dataset request
 description: Suggest a new dataset or data source the Hub should mirror.
-title: "data: "
+title: "feat(etl): "
 labels:
   - etl
   - community
