@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#
+# prepare-commit-msg hook — auto-append a DCO Signed-off-by trailer.
+#
+# Skipped for merges, squashes, and fixups so we don't disturb special
+# commit shapes. Uses git-interpret-trailers so the trailer lands in the
+# canonical trailer block at the end, not mid-body.
+#
+# To bypass for a single commit:  git commit --no-signoff
+# To disable repo-wide:            git config core.hooksPath ''
+#                                  (or just delete this file)
+
+set -eu
+
+COMMIT_MSG_FILE="$1"
+COMMIT_SOURCE="${2:-}"
+
+# Skip merge / squash / template-from-commit; let git own those.
+case "$COMMIT_SOURCE" in
+  merge|squash|commit) exit 0 ;;
+esac
+
+NAME="$(git config user.name || true)"
+EMAIL="$(git config user.email || true)"
+
+# Don't block if identity not configured — let commit proceed; CI will catch.
+if [ -z "$NAME" ] || [ -z "$EMAIL" ]; then
+  exit 0
+fi
+
+# Use git interpret-trailers; addIfDifferent avoids duplicate sign-offs.
+git interpret-trailers \
+  --in-place \
+  --if-exists addIfDifferent \
+  --trailer "Signed-off-by: $NAME <$EMAIL>" \
+  "$COMMIT_MSG_FILE"

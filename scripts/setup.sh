@@ -18,16 +18,17 @@ echo "  ✓ commit-msg hook activated (.githooks/commit-msg)"
 git config commit.template .gitmessage
 echo "  ✓ commit template set (.gitmessage)"
 
-# Encourage DCO via -s by default — contributors can override if they wish.
-# Set BOTH knobs: format.signOff covers format-patch; commit.signOff (git 2.36+)
-# covers `git commit`. Older git silently ignores the unsupported one.
+# Auto DCO via the prepare-commit-msg hook (real, hook-driven mechanism).
+# format.signOff still covers format-patch for patch-via-email workflows.
 if [ "$(git config --get format.signOff || true)" != "true" ]; then
   git config format.signOff true
   echo "  ✓ format.signOff = true (auto -s for format-patch)"
 fi
-if [ "$(git config --get commit.signOff || true)" != "true" ]; then
-  git config commit.signOff true
-  echo "  ✓ commit.signOff = true (auto -s for git commit, git 2.36+)"
+# Clear the bogus commit.signOff knob if it was set by a previous setup —
+# git does not actually honor this config.
+if [ -n "$(git config --get commit.signOff || true)" ]; then
+  git config --unset commit.signOff || true
+  echo "  ✓ removed obsolete commit.signOff config"
 fi
 
 # Helpful aliases
