@@ -87,11 +87,7 @@ impl ServerHandler for McpServer {
         // see `null` for a legitimate no-arg call.
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
         match self.dispatcher.call_tool(&request.name, args).await {
-            Ok(value) => {
-                let text = serde_json::to_string(&value)
-                    .unwrap_or_else(|_| "<unserializable result>".into());
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
+            Ok(value) => Ok(CallToolResult::success(vec![value_to_content(value)])),
             Err(ToolError::NotFound(name)) => Err(McpError::invalid_params(
                 format!("unknown tool: {name}"),
                 None,
@@ -102,12 +98,45 @@ impl ServerHandler for McpServer {
     }
 }
 
+/// Render a tool's `serde_json::Value` result as MCP text content.
+///
+/// `Value::String("hi")` becomes the literal text `hi`. Any other variant
+/// gets JSON-serialized so structured results survive the transport
+/// faithfully. Serialization is infallible for `Value`, but we guard
+/// defensively because `to_string` returns a `Result`.
+fn value_to_content(value: serde_json::Value) -> Content {
+    match value {
+        serde_json::Value::String(s) => Content::text(s),
+        other => {
+            let text =
+                serde_json::to_string(&other).unwrap_or_else(|_| "<unserializable result>".into());
+            Content::text(text)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn test_impl() -> Implementation {
         Implementation::new("test-server", "0.0.1")
+    }
+
+    #[test]
+    fn string_values_render_as_plain_text_not_quoted_json() {
+        let content = value_to_content(json!("hello"));
+        assert_eq!(content.as_text().map(|t| t.text.as_str()), Some("hello"));
+    }
+
+    #[test]
+    fn structured_values_render_as_json() {
+        let content = value_to_content(json!({"count": 7}));
+        assert_eq!(
+            content.as_text().map(|t| t.text.as_str()),
+            Some(r#"{"count":7}"#),
+        );
     }
 
     #[test]
