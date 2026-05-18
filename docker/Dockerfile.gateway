@@ -1,5 +1,7 @@
-# Build stage — same Rust version as rust-toolchain.toml (channel = stable).
-# Pinned at the latest stable as of 2026-05 to match local builds.
+# Build stage — Rust 1.95 pinned for reproducible container builds.
+# Local builds track rust-toolchain.toml (channel = stable), which will
+# drift to newer stables; CI / Docker pins this exact version so
+# image hashes stay stable. Bump together when stable advances.
 FROM rust:1.95-slim-bookworm AS builder
 WORKDIR /app
 

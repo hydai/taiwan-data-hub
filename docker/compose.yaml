@@ -6,8 +6,9 @@
 #   - web        — SvelteKit adapter-node app (waits for gateway healthy)
 #   - etl-worker — placeholder cron-style binary (waits for postgres healthy)
 #
-# Profiles `full` and `obs` are activated by compose.obs.yaml and add
-# optional dependencies (dragonfly, meilisearch, seaweedfs, otel, prometheus).
+# Profile `obs` is activated by compose.obs.yaml and adds opentelemetry-collector
+# and prometheus. Future overlays (e.g. `full` for dragonfly + meilisearch +
+# seaweedfs) will land as those services become required by upstream issues.
 # Dev overrides (bind mounts + cargo watch) live in compose.dev.yaml.
 #
 # Build contexts use `..` (repo root) so Dockerfiles can see the whole
@@ -18,6 +19,13 @@ name: taiwan-data-hub
 services:
   postgres:
     image: postgres:18-bookworm
+    # WARNING: the defaults below (POSTGRES_USER/_PASSWORD/_DB = tdh) are
+    # for **local development only**. For any deployment beyond a laptop:
+    #   1. Put real values in a .env file next to this compose.yaml
+    #      (POSTGRES_PASSWORD=$(openssl rand -base64 24)), and
+    #   2. Make sure that .env is .gitignore'd.
+    # Compose will pick up .env automatically; the ${VAR:-default} syntax
+    # only falls back to the literal "tdh" when the env var is unset.
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-tdh}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tdh}
