@@ -48,7 +48,8 @@ delete this section.
 
 ## Conventions checklist
 
-- [ ] PR title is Conventional Commits (`<type>(<scope>)?!?: <subject> (#<sub-issue-id>)?`)
+- [ ] PR title follows Conventional Commits:
+      `<type>: <subject>` — optional scope as `<type>(<scope>): <subject>` — optional `!` after the type/scope to mark a breaking change — optional trailing `(#<sub-issue-id>)` (e.g. `#0.7`, `#5a.2`)
 - [ ] Branch name follows `<type>/<short-description>` or `<type>/<gh-issue>-<short-desc>`
 - [ ] Every commit has `Signed-off-by:` (DCO) — `git commit -s` or our prepare-commit-msg hook does this automatically
 - [ ] PR is attached to the correct milestone (M0 – M7 / M5a / M5b) and bears the right labels (component + estimate)
