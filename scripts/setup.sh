@@ -19,9 +19,15 @@ git config commit.template .gitmessage
 echo "  ✓ commit template set (.gitmessage)"
 
 # Encourage DCO via -s by default — contributors can override if they wish.
-if [[ "$(git config --get format.signOff || true)" != "true" ]]; then
+# Set BOTH knobs: format.signOff covers format-patch; commit.signOff (git 2.36+)
+# covers `git commit`. Older git silently ignores the unsupported one.
+if [ "$(git config --get format.signOff || true)" != "true" ]; then
   git config format.signOff true
-  echo "  ✓ format.signOff = true (auto -s for git commit & format-patch)"
+  echo "  ✓ format.signOff = true (auto -s for format-patch)"
+fi
+if [ "$(git config --get commit.signOff || true)" != "true" ]; then
+  git config commit.signOff true
+  echo "  ✓ commit.signOff = true (auto -s for git commit, git 2.36+)"
 fi
 
 # Helpful aliases
