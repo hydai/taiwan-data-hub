@@ -6,6 +6,14 @@ on:
     # affect the code, and combined with cancel-in-progress that would
     # also kill in-flight code-validation runs for cosmetic edits.
     # PR-title-format and DCO-sign-off workflows still observe `edited`.
+    #
+    # Known trade-off: PR base-branch retargets also fire `edited`. With
+    # the activity excluded, retargeting a PR does NOT re-trigger CI, so
+    # an old green check could carry over to a new merge target. We
+    # accept this because the project only has the `main` branch and
+    # retargeting is essentially impossible. When we grow long-lived
+    # branches (e.g. release/*), revisit this to add an `edited`-with-
+    # base-change guard.
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
