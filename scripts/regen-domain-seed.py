@@ -5,12 +5,18 @@ Regenerate migrations/0002_seed_domains.sql from config/domains.yaml.
 Run after editing the YAML; commit both files together so the seed
 migration and its source of truth stay in lockstep.
 
+Validates every row before emitting SQL — refuses to write a broken
+migration if `slug`/`kind` don't match the expected shape. String
+literals are escaped (single quotes doubled) for the few places that
+don't use dollar-quoted strings.
+
 Requires PyYAML (`pip install pyyaml` or use a venv).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,17 +31,60 @@ except ModuleNotFoundError:
     sys.exit(1)
 
 
+ALLOWED_KINDS = {"topical", "meta", "horizontal"}
+# Slug must be kebab-case: starts with letter, ends with alphanumeric,
+# only lowercase letters / digits / hyphens in between.
+SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*[a-z0-9]$")
+
+
+def sql_quote(s: str) -> str:
+    """Escape a single-quoted SQL literal. Doubles embedded apostrophes."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def validate(domain: dict, idx: int) -> None:
+    slug = domain.get("slug")
+    if not isinstance(slug, str) or not SLUG_RE.match(slug):
+        raise SystemExit(
+            f"domains[{idx}]: slug must be kebab-case [a-z0-9-], got {slug!r}"
+        )
+    kind = domain.get("kind")
+    if kind not in ALLOWED_KINDS:
+        raise SystemExit(
+            f"domains[{idx}]: kind must be one of {sorted(ALLOWED_KINDS)}, got {kind!r}"
+        )
+    so = domain.get("sort_order")
+    if not isinstance(so, int):
+        raise SystemExit(f"domains[{idx}]: sort_order must be int, got {so!r}")
+    name = domain.get("name")
+    if not isinstance(name, dict) or "zh-TW" not in name:
+        raise SystemExit(
+            f"domains[{idx} {slug}]: name must be a mapping with a zh-TW key"
+        )
+    if not isinstance(name["zh-TW"], str) or not name["zh-TW"]:
+        raise SystemExit(f"domains[{idx} {slug}]: name.zh-TW must be a non-empty string")
+
+
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent
     src = repo / "config" / "domains.yaml"
     out = repo / "migrations" / "0002_seed_domains.sql"
 
-    domains = yaml.safe_load(src.read_text())
-    if not isinstance(domains, list) or not domains:
+    raw = yaml.safe_load(src.read_text())
+    if not isinstance(raw, list) or not raw:
         sys.stderr.write(f"{src} produced no domains\n")
         return 1
 
-    domains.sort(key=lambda d: d["sort_order"])
+    for i, d in enumerate(raw):
+        validate(d, i)
+
+    seen: set[str] = set()
+    for d in raw:
+        if d["slug"] in seen:
+            raise SystemExit(f"duplicate slug: {d['slug']!r}")
+        seen.add(d["slug"])
+
+    domains = sorted(raw, key=lambda d: (d["sort_order"], d["slug"]))
 
     lines: list[str] = [
         "-- M0 #0.8 — seed the 20 marketplace domains.",
@@ -52,9 +101,10 @@ def main() -> int:
 
     rows: list[str] = []
     for d in domains:
-        slug = d["slug"]
-        kind = d["kind"]
-        sort_order = d["sort_order"]
+        slug_lit = sql_quote(d["slug"])
+        kind_lit = sql_quote(d["kind"])
+        so = d["sort_order"]
+        # Dollar-quoting protects JSON literals from any embedded ' or ".
         name_lit = "$json$" + json.dumps(d["name"], ensure_ascii=False) + "$json$::jsonb"
         desc = d.get("description")
         desc_lit = (
@@ -63,7 +113,7 @@ def main() -> int:
             else "$json$" + json.dumps(desc, ensure_ascii=False) + "$json$::jsonb"
         )
         rows.append(
-            f"    ('{slug}', '{kind}', {sort_order}, {name_lit}, {desc_lit})"
+            f"    ({slug_lit}, {kind_lit}, {so}, {name_lit}, {desc_lit})"
         )
     lines.append(",\n".join(rows))
 

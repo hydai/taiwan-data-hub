@@ -22,7 +22,11 @@ CREATE TABLE domains (
     description_i18n JSONB,
 
     -- zh-TW is the project's source language; require it on every row.
-    CONSTRAINT name_has_zh_tw CHECK (jsonb_typeof(name_i18n -> 'zh-TW') = 'string')
+    CONSTRAINT name_has_zh_tw CHECK (
+        jsonb_typeof(name_i18n) = 'object'
+        AND name_i18n ? 'zh-TW'
+        AND jsonb_typeof(name_i18n -> 'zh-TW') = 'string'
+    )
 );
 
 CREATE INDEX domains_kind_sort_idx ON domains (kind, sort_order);
@@ -30,7 +34,7 @@ CREATE INDEX domains_kind_sort_idx ON domains (kind, sort_order);
 COMMENT ON TABLE domains IS
     'Marketplace dataset domains — 20 rows, populated from config/domains.yaml via 0002_seed_domains.sql.';
 COMMENT ON COLUMN domains.kind IS
-    'topical (16) | meta (1) | horizontal (2) — controls section grouping on /data';
+    'topical (17) | meta (1) | horizontal (2) — controls section grouping on /data';
 COMMENT ON COLUMN domains.name_i18n IS
     'JSONB shape {"zh-TW":"…","en":"…",…}; read with COALESCE(name_i18n->>$lang, name_i18n->>''zh-TW'')';
 
@@ -70,7 +74,11 @@ CREATE TABLE datasets (
     tsv                 TSVECTOR,
 
     CONSTRAINT datasets_unique_per_source UNIQUE (source, source_id),
-    CONSTRAINT title_has_zh_tw CHECK (jsonb_typeof(title_i18n -> 'zh-TW') = 'string')
+    CONSTRAINT title_has_zh_tw CHECK (
+        jsonb_typeof(title_i18n) = 'object'
+        AND title_i18n ? 'zh-TW'
+        AND jsonb_typeof(title_i18n -> 'zh-TW') = 'string'
+    )
 );
 
 CREATE INDEX datasets_domain_idx       ON datasets (domain_id);

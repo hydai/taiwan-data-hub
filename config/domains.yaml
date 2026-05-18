@@ -13,7 +13,7 @@
 # Re-run scripts/regen-domain-seed.py after editing; commit both
 # files together so the seed migration stays in lockstep with the YAML.
 
-# ── Topical (16) ─────────────────────────────────────────────────────
+# ── Topical (17) ─────────────────────────────────────────────────────
 - slug: realestate-land
   kind: topical
   sort_order: 10
