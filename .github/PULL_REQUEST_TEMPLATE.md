@@ -21,8 +21,20 @@ Closes #<!-- N -->.
 
 <!-- What this PR does NOT do. Helps reviewers calibrate. -->
 
+## Breaking changes
+
+<!--
+If this PR introduces a breaking change, mark the box below and
+describe the migration path. Otherwise leave the box unchecked and
+delete this section.
+-->
+
+- [ ] This PR introduces a breaking change (also mark the type with `!` in the title, e.g. `refactor(backend)!: …`)
+- Migration notes (only if the box above is checked):
+
 ## Test plan
 
+- [ ] `lineguard <changed files>` passes (format / line-endings)
 - [ ] `cargo fmt --check` passes
 - [ ] `cargo clippy --release --locked --all-targets -- -D warnings` passes
 - [ ] `cargo test --release --locked` passes
@@ -36,8 +48,9 @@ Closes #<!-- N -->.
 
 ## Conventions checklist
 
-- [ ] PR title is Conventional Commits (`<type>(<scope>)?: <subject> (#<sub-issue-id>)?`)
+- [ ] PR title is Conventional Commits (`<type>(<scope>)?!?: <subject> (#<sub-issue-id>)?`)
 - [ ] Branch name follows `<type>/<short-description>` or `<type>/<gh-issue>-<short-desc>`
 - [ ] Every commit has `Signed-off-by:` (DCO) — `git commit -s` or our prepare-commit-msg hook does this automatically
+- [ ] PR is attached to the correct milestone (M0 – M7 / M5a / M5b) and bears the right labels (component + estimate)
 - [ ] Updated `docs/DESIGN.md` if architecture or scope changed
 - [ ] Updated `CLAUDE.md` / `CONTRIBUTING.md` if conventions changed
