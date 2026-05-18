@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+    # Intentionally excludes `edited` — title/body/label edits do not
+    # affect the code, and combined with cancel-in-progress that would
+    # also kill in-flight code-validation runs for cosmetic edits.
+    # PR-title-format and DCO-sign-off workflows still observe `edited`.
+    #
+    # Known trade-off: PR base-branch retargets also fire `edited`. With
+    # the activity excluded, retargeting a PR does NOT re-trigger CI, so
+    # an old green check could carry over to a new merge target. We
+    # accept this because the project only has the `main` branch and
+    # retargeting is essentially impossible. When we grow long-lived
+    # branches (e.g. release/*), revisit this to add an `edited`-with-
+    # base-change guard.
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Concurrency rules:
+#   - For PRs: group by PR number so a fresh push cancels the in-flight run
+#     for the same PR (cancel-in-progress: true).
+#   - For push to main: group by commit SHA so every commit has its own
+#     unique slot and runs to completion — important since GitHub
+#     concurrency keeps only 1 running + 1 pending per group, so a shared
+#     group would drop intermediate main commits even with
+#     cancel-in-progress: false.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      # Reads rust-toolchain.toml automatically (channel = stable).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Share cache between fmt/clippy/test invocations in this job.
+          # Only save fresh artifacts on main-branch runs so PR forks
+          # don't fight over the cache.
+          shared-key: rust-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      # --locked rejects PRs that change Cargo.toml without also
+      # committing the matching Cargo.lock update, so CI tracks the
+      # exact dep resolution the contributor tested locally.
+      - name: cargo clippy --release --locked --all-targets -- -D warnings
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: cargo test --release --locked
+        run: cargo test --release --locked
+
+  web:
+    name: Web (check / lint / build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm/action-setup picks up the version from package.json's
+      # `packageManager` field (pnpm@10.13.1) — single source of truth.
+      # Must run before setup-node so the latter's cache: pnpm finds it.
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: pnpm check (svelte-check)
+        run: pnpm check
+      - name: pnpm lint (prettier + eslint)
+        run: pnpm lint
+      - name: pnpm build (adapter-node)
+        run: pnpm build
