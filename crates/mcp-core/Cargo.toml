@@ -13,3 +13,12 @@ description = "MCP 2025-11-25 protocol types and tool dispatcher"
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rmcp = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

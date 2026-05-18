@@ -13,3 +13,9 @@ description = "stdio MCP shim for local AI clients (Claude Desktop, Cursor, Clin
 workspace = true
 
 [dependencies]
+mcp-core = { path = "../mcp-core" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rmcp = { workspace = true }
