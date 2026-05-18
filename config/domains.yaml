@@ -1,0 +1,219 @@
+# Source of truth for the 20 dataset domains shown in the marketplace UI.
+#
+# Schema:
+#   slug:        stable kebab-case identifier; matches /data/<slug> URL
+#   kind:        topical | meta | horizontal — controls section grouping
+#   sort_order:  display order within its kind (lower first)
+#   name:        i18n map; zh-TW required, en recommended
+#   description: optional. If present, must be a mapping with a non-empty
+#                zh-TW string (and optionally en, etc.) — validated by
+#                scripts/regen-domain-seed.py before SQL emission.
+#
+# Block-style mappings (not flow `{k: v, …}`) because the en values
+# contain commas which would confuse YAML's flow-map parser.
+#
+# Re-run scripts/regen-domain-seed.py after editing; commit both
+# files together so the seed migration stays in lockstep with the YAML.
+
+# ── Topical (17) ─────────────────────────────────────────────────────
+- slug: realestate-land
+  kind: topical
+  sort_order: 10
+  name:
+    zh-TW: 不動產與土地
+    en: Real estate & land
+  description:
+    zh-TW: 實價登錄、地價、土地公告現值
+    en: Transaction prices, land valuations, public-notice values
+
+- slug: economy-business
+  kind: topical
+  sort_order: 20
+  name:
+    zh-TW: 經濟與產業
+    en: Economy & industry
+  description:
+    zh-TW: 公司登記、產業統計、進出口
+    en: Company registry, industry stats, import/export
+
+- slug: procurement-subsidy
+  kind: topical
+  sort_order: 30
+  name:
+    zh-TW: 政府採購與補助
+    en: Procurement & subsidies
+  description:
+    zh-TW: 政府採購得標、補助核定
+    en: Awarded contracts, granted subsidies
+
+- slug: public-finance
+  kind: topical
+  sort_order: 40
+  name:
+    zh-TW: 公共財政
+    en: Public finance
+  description:
+    zh-TW: 預算、決算、債務
+    en: Budgets, accounts, public debt
+
+- slug: tax-revenue
+  kind: topical
+  sort_order: 50
+  name:
+    zh-TW: 稅收
+    en: Tax revenue
+  description:
+    zh-TW: 各稅目徵起、退稅、欠稅
+    en: Tax collections, refunds, arrears
+
+- slug: transport
+  kind: topical
+  sort_order: 60
+  name:
+    zh-TW: 交通
+    en: Transport
+  description:
+    zh-TW: 公路、鐵路、空運、海運
+    en: Roads, rail, aviation, maritime
+
+- slug: public-safety
+  kind: topical
+  sort_order: 70
+  name:
+    zh-TW: 公共安全
+    en: Public safety
+  description:
+    zh-TW: 警政、消防、災害統計
+    en: Police, fire, disaster statistics
+
+- slug: judicial-legal
+  kind: topical
+  sort_order: 80
+  name:
+    zh-TW: 司法與法務
+    en: Judicial & legal
+  description:
+    zh-TW: 法院裁判、檢察統計
+    en: Court rulings, prosecution stats
+
+- slug: legislature
+  kind: topical
+  sort_order: 90
+  name:
+    zh-TW: 立法
+    en: Legislature
+  description:
+    zh-TW: 議案、發言、表決
+    en: Bills, speeches, votes
+
+- slug: health-food
+  kind: topical
+  sort_order: 100
+  name:
+    zh-TW: 衛福與食安
+    en: Health & food safety
+  description:
+    zh-TW: 醫療、健保、食品稽查
+    en: Medical care, NHI, food inspection
+
+- slug: environment
+  kind: topical
+  sort_order: 110
+  name:
+    zh-TW: 環境
+    en: Environment
+  description:
+    zh-TW: 空品、水質、廢棄物
+    en: Air quality, water, waste
+
+- slug: education-research
+  kind: topical
+  sort_order: 120
+  name:
+    zh-TW: 教育與研究
+    en: Education & research
+  description:
+    zh-TW: 各級學校、學位、研究經費
+    en: Schools, degrees, R&D funding
+
+- slug: agriculture-fisheries
+  kind: topical
+  sort_order: 130
+  name:
+    zh-TW: 農林漁牧
+    en: Agriculture & fisheries
+  description:
+    zh-TW: 農產、漁業、林業
+    en: Farm products, fisheries, forestry
+
+- slug: labor-employment
+  kind: topical
+  sort_order: 140
+  name:
+    zh-TW: 勞動與就業
+    en: Labor & employment
+  description:
+    zh-TW: 薪資、失業、勞動統計
+    en: Wages, unemployment, labor stats
+
+- slug: social-population
+  kind: topical
+  sort_order: 150
+  name:
+    zh-TW: 社會與人口
+    en: Social & population
+  description:
+    zh-TW: 戶籍、出生、婚姻
+    en: Household registry, births, marriages
+
+- slug: culture-tourism-sport
+  kind: topical
+  sort_order: 160
+  name:
+    zh-TW: 文化、觀光、體育
+    en: Culture, tourism, sport
+  description:
+    zh-TW: 文化資產、遊客、賽事
+    en: Heritage, tourism, sporting events
+
+- slug: foreign-affairs
+  kind: topical
+  sort_order: 170
+  name:
+    zh-TW: 外交與國際
+    en: Foreign affairs
+  description:
+    zh-TW: 邦交、援外、簽證
+    en: Diplomatic ties, aid, visas
+
+# ── Meta (1) ─────────────────────────────────────────────────────────
+- slug: gov-publication
+  kind: meta
+  sort_order: 200
+  name:
+    zh-TW: 政府刊物
+    en: Government publications
+  description:
+    zh-TW: 公報、年鑑、白皮書
+    en: Gazettes, yearbooks, white papers
+
+# ── Horizontal (2) ───────────────────────────────────────────────────
+- slug: geo-basemap
+  kind: horizontal
+  sort_order: 300
+  name:
+    zh-TW: 地理底圖
+    en: Geographic basemaps
+  description:
+    zh-TW: 行政區界、地形、地名
+    en: Admin boundaries, terrain, gazetteers
+
+- slug: utilities-telecom
+  kind: horizontal
+  sort_order: 310
+  name:
+    zh-TW: 公用事業與電信
+    en: Utilities & telecom
+  description:
+    zh-TW: 電力、自來水、通訊
+    en: Electricity, water, telecom

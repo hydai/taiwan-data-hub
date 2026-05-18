@@ -27,7 +27,7 @@
 ### 2.1 必須對等的功能
 | 功能 | 規模 | 備註 |
 |---|---|---|
-| Dataset marketplace | 20 個 domain × 52,960 筆 dataset | Topical 16 / Meta 1 / Horizontal 2；含白金/金 tier、3 個 curated collection |
+| Dataset marketplace | 20 個 domain × 52,960 筆 dataset | Topical 17 / Meta 1 / Horizontal 2 = 20；含白金/金 tier、3 個 curated collection |
 | MCP server | 5 個 base tool | `list_domains` / `search_datasets` / `get_dataset` / `query_rows` / `materialize_dataset` |
 | Utility tools | 53 個 | TW-specific 為主（身分證、統編、ROC 年、地址、行政區、MRT、銀行代碼、郵遞區號、節氣、農曆…） |
 | Connectors registry | 8 個 | Playwright / Chrome DevTools / n8n / Notion / Sentry / Google / Sequential Thinking / Context7（只是安裝指南，非代理） |
@@ -135,7 +135,7 @@ erDiagram
 
 **關鍵欄位設計**：
 - 多語欄位一律 `jsonb`（`{"zh-TW":"…","en":"…"}`），避免每張表 join 翻譯表。
-- `datasets.source` 列舉：`data_gov_tw` / `twse` / `moea` / `cwa` / `user_contrib`。
+- `datasets.source` 列舉：`data_gov_tw` / `twse` / `moea` / `cwa` / `fishery_moa` / `user_contrib`。
 - `datasets.tier`：`platinum / gold / silver / bronze`（可手動 override）。
 - `dataset_files.uri` 抽象 storage：`file://`, `s3://`, `https://`。
 - `usage_records` 月分區，免費也記用於濫用偵測 + 公開統計。
