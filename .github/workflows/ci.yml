@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs to save Actions minutes, but never cancel
+# main-branch runs (we want every commit on main verified).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      # Reads rust-toolchain.toml automatically (channel = stable).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Share cache between fmt/clippy/test invocations in this job.
+          # Only save fresh artifacts on main-branch runs so PR forks
+          # don't fight over the cache.
+          shared-key: rust-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy --release --all-targets -- -D warnings
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: cargo test --release
+        run: cargo test --release
+
+  web:
+    name: Web (check / lint / build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm/action-setup must run BEFORE setup-node so cache: pnpm finds it.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: pnpm check (svelte-check)
+        run: pnpm check
+      - name: pnpm lint (prettier + eslint)
+        run: pnpm lint
+      - name: pnpm build (adapter-node)
+        run: pnpm build
