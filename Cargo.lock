@@ -493,7 +493,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "mcp-core",
- "rmcp",
  "tokio",
  "tracing",
  "tracing-subscriber",
