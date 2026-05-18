@@ -245,11 +245,12 @@ docs/refine-mcp-quickstart
 3. Push and open PR — title must also follow conventional format (GHA enforces)
 4. **Merge prerequisites (run in parallel, all must clear):**
    - **CI green** — fires automatically on every push:
-     - Currently shipping: DCO sign-off (`.github/workflows/dco.yml`)
-       + Conventional Commits PR title (`.github/workflows/pr-title.yml`)
-     - Planned in #0.5: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
-     - Planned in #2.10: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
-     - Run them locally as a pre-push habit until CI catches up
+     - **Currently shipping**:
+       - DCO sign-off (`.github/workflows/dco.yml`)
+       - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
+     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
+     - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
+     - Run the planned commands locally as a pre-push habit until CI catches up
    - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
    - **Maintainer review** approves (where applicable)
 5. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
@@ -261,11 +262,17 @@ Every PR gets a first-pass review from GitHub Copilot as the automated reviewer 
 
 ### Assigning Copilot
 
+Substitute your PR number for `123` in the examples below — `<PR#>` would be
+interpreted as shell redirection + comment, so we use a literal placeholder or
+a shell variable instead.
+
 ```bash
+PR=123          # ← your PR number
+
 # Use the bot slug, NOT the display name "Copilot".
 # (gh CLI lowercases --add-reviewer input before lookup, so "Copilot"
 # becomes "copilot" which 404s.)
-gh pr edit <PR#> --add-reviewer copilot-pull-request-reviewer
+gh pr edit "$PR" --add-reviewer copilot-pull-request-reviewer
 ```
 
 Copilot takes 2–4 minutes to post its review.
@@ -285,10 +292,10 @@ Either way: reply on the thread (so reviewers understand your reasoning) and res
 # argument on `reviewThreads`, so filtering happens client-side.
 # Bump `first` or paginate via the connection's `pageInfo` for PRs
 # with > 50 threads (rare):
-gh api graphql -f query='
-query {
+gh api graphql -F pr="$PR" -f query='
+query($pr: Int!) {
   repository(owner: "hydai", name: "taiwan-data-hub") {
-    pullRequest(number: <PR#>) {
+    pullRequest(number: $pr) {
       reviewThreads(first: 50) {
         nodes {
           id  isResolved
@@ -300,12 +307,14 @@ query {
 }' | jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)'
 
 # Reply to a comment (REST, by databaseId):
-gh api -X POST /repos/hydai/taiwan-data-hub/pulls/<PR#>/comments/<comment_id>/replies \
+COMMENT_ID=...     # the databaseId of the comment you are replying to
+gh api -X POST "/repos/hydai/taiwan-data-hub/pulls/$PR/comments/$COMMENT_ID/replies" \
   -f 'body=Your reasoning here.'
 
 # Resolve the thread (GraphQL, by thread node id):
-gh api graphql -f query='
-mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
+THREAD_ID=...      # the thread `id` from the query above
+gh api graphql -F tid="$THREAD_ID" -f query='
+mutation($tid: ID!) { resolveReviewThread(input: {threadId: $tid}) { thread { isResolved } } }'
 ```
 
 ### Triggering the next review round
@@ -313,7 +322,7 @@ mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isRe
 Copilot does NOT auto-re-review on subsequent pushes. After pushing fixes, re-assign:
 
 ```bash
-gh pr edit <PR#> --add-reviewer copilot-pull-request-reviewer
+gh pr edit "$PR" --add-reviewer copilot-pull-request-reviewer
 ```
 
 Then wait another 2–4 minutes. Copilot's review summary explicitly says either:
@@ -324,10 +333,10 @@ Then wait another 2–4 minutes. Copilot's review summary explicitly says either
 ### Squash-merge with curated message
 
 ```bash
-gh pr merge <PR#> --squash --delete-branch \
-  --subject "feat(scope): subject (#<sub-issue-id>)" \
+gh pr merge "$PR" --squash --delete-branch \
+  --subject 'feat(scope): subject (#sub-issue-id)' \
   --body "$(cat <<'EOF'
-…curated summary, references "Closes #<gh-issue>", trailers…
+…curated summary, references "Closes #N" for the GitHub issue, trailers…
 EOF
 )"
 ```
