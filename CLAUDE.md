@@ -122,9 +122,10 @@ python3 scripts/populate-project.py
 ### Pre-commit checks
 
 ```bash
-lineguard <changed-files>                  # format / line-ending check
-cargo clippy -- -D warnings                # before any Rust commit
-pnpm prettier --check 'web/**/*'           # before any frontend commit
+# Replace path/to/file with your changed files (or pass several).
+lineguard path/to/file                     # format / line-ending check
+cargo clippy --release -- -D warnings      # release flag matches the PR-blocking quality bar
+pnpm lint                                  # root forwards to --filter web (prettier + eslint)
 ```
 
 A PreToolUse hook in `~/.claude/settings.json` auto-runs these before `git commit`.
@@ -243,17 +244,113 @@ docs/refine-mcp-quickstart
 1. Branch from `main`
 2. Commit with conventional format (hook enforces locally)
 3. Push and open PR — title must also follow conventional format (GHA enforces)
-4. CI must be green: fmt + clippy + test + svelte-check + prettier + (later) lighthouse
-5. Squash-merge — PR title becomes the merged commit subject; PR body becomes the body
+4. **Merge prerequisites (run in parallel, all must clear):**
+   - **CI green** — `pull_request` workflows fire on every PR open / push to the PR branch:
+     - **Currently shipping**:
+       - DCO sign-off (`.github/workflows/dco.yml`)
+       - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
+     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm check`, `pnpm lint` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
+     - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
+     - Run the planned commands locally as a pre-push habit until CI catches up
+   - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
+   - **Maintainer review** approves (where applicable)
+5. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
 6. Delete branch after merge
+
+## Code review with GitHub Copilot
+
+Every PR gets a first-pass review from GitHub Copilot as the automated reviewer that runs in parallel with CI and human review (see the PR flow above). Copilot is good at catching cross-file consistency drift (docs vs code, hook vs CI rules, version pins vs lockfiles) — exactly the noise we don't want surfacing in human review.
+
+### Assigning Copilot
+
+Substitute your PR number for `123` in the examples below — `<PR#>` would be
+interpreted as shell redirection + comment, so we use a literal placeholder or
+a shell variable instead.
+
+```bash
+PR=123          # ← your PR number
+
+# Use the bot slug, NOT the display name "Copilot".
+# (gh CLI lowercases --add-reviewer input before lookup, so "Copilot"
+# becomes "copilot" which 404s.)
+gh pr edit "$PR" --add-reviewer copilot-pull-request-reviewer
+```
+
+Copilot takes 2–4 minutes to post its review.
+
+### Processing comments
+
+For each inline comment, decide:
+
+- **Reasonable** → fix it in code, push the fix
+- **Wrong / not applicable** → reply explaining why, then resolve anyway
+
+Either way: reply on the thread (so reviewers understand your reasoning) and resolve the thread. The `resolveReviewThread` mutation is only on GraphQL, not REST.
+
+```bash
+# Fetch the first 50 review threads (with their resolved state) and
+# filter to unresolved with jq — the GraphQL API has no isResolved
+# argument on `reviewThreads`, so filtering happens client-side.
+# Bump `first` or paginate via the connection's `pageInfo` for PRs
+# with > 50 threads (rare):
+gh api graphql -F pr="$PR" -f query='
+query($pr: Int!) {
+  repository(owner: "hydai", name: "taiwan-data-hub") {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 50) {
+        nodes {
+          id  isResolved
+          comments(first: 1) { nodes { databaseId path line body } }
+        }
+      }
+    }
+  }
+}' | jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)'
+
+# Reply to a comment (REST, by databaseId):
+COMMENT_ID=...     # the databaseId of the comment you are replying to
+gh api -X POST "/repos/hydai/taiwan-data-hub/pulls/$PR/comments/$COMMENT_ID/replies" \
+  -f 'body=Your reasoning here.'
+
+# Resolve the thread (GraphQL, by thread node id):
+THREAD_ID=...      # the thread `id` from the query above
+gh api graphql -F tid="$THREAD_ID" -f query='
+mutation($tid: ID!) { resolveReviewThread(input: {threadId: $tid}) { thread { isResolved } } }'
+```
+
+### Triggering the next review round
+
+Copilot does NOT auto-re-review on subsequent pushes. After pushing fixes, re-assign:
+
+```bash
+gh pr edit "$PR" --add-reviewer copilot-pull-request-reviewer
+```
+
+Then wait another 2–4 minutes. Copilot's review summary explicitly says either:
+
+- *"Copilot reviewed N of M files and generated K comments"* — keep iterating
+- *"Copilot reviewed N of M files and generated no new comments"* — loop terminates; proceed to squash-merge
+
+### Squash-merge with curated message
+
+```bash
+gh pr merge "$PR" --squash --delete-branch \
+  --subject 'feat(scope): subject (#sub-issue-id)' \
+  --body "$(cat <<'EOF'
+…curated summary, references "Closes #N" for the GitHub issue, trailers…
+EOF
+)"
+```
+
+The per-round commit messages (`fix: address Copilot 2nd-pass…`) disappear from `main`; only the curated squash message lands. Copilot iteration history remains visible in the PR conversation.
 
 ## Quality bars (PR-blocking)
 
 - `cargo clippy --release -- -D warnings` — no warnings
 - `cargo test --release` — all pass
 - `cargo fmt --check` — formatted
-- `pnpm --filter web check` — Svelte type-checks
-- `pnpm prettier --check` — formatted
+- `pnpm check` — Svelte type-checks (root forwards to `--filter web check`)
+- `pnpm lint` — prettier + eslint (root forwards to `--filter web lint`)
 - Lighthouse perf ≥ 85, a11y ≥ 95, best-practices ≥ 90, SEO ≥ 90 (frontend PRs only)
 - Test coverage for new logic (no hard threshold; reviewer judgement)
 
