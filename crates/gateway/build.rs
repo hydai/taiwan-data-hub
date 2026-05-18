@@ -5,10 +5,17 @@
 use std::process::Command;
 
 fn main() {
-    // Re-run only when HEAD moves; the contents-of-tree case is handled
-    // by the dependency on .git/HEAD's pointer file when on a branch.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/index");
+    // `cargo:rerun-if-changed` paths are resolved relative to the
+    // package root (crates/gateway/), so we step up two levels to the
+    // workspace root where .git lives. Two files cover the cases:
+    //   - .git/HEAD       → branch switches (HEAD itself moves)
+    //   - .git/logs/HEAD  → new commits on any branch (the HEAD reflog
+    //                       gets an entry; .git/HEAD itself is unchanged
+    //                       when committing on a checked-out branch)
+    // Together they bust the cache exactly when the embedded SHA would
+    // become stale, without triggering a rerun on unrelated edits.
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
 
     let sha = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
