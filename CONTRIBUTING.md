@@ -153,7 +153,7 @@ patch-1
      - DCO sign-off check
      - Lighthouse budget (frontend PRs only): perf ≥ 85, a11y ≥ 95
    - **Copilot first-pass review** — maintainers assign GitHub Copilot.
-     Expect 2–4 minute turnaround per round. Address comments you
+     Expect a 2–4-minute turnaround per round. Address comments you
      agree with (push fixes); reply with rationale on the ones you
      don't. Resolve threads when settled. Iterate until Copilot posts
      *"generated no new comments"*. Maintainers run the loop — you

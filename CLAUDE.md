@@ -252,7 +252,7 @@ docs/refine-mcp-quickstart
 
 ## Code review with GitHub Copilot
 
-Every PR gets a first-pass review from GitHub Copilot before maintainer review. Copilot is good at catching cross-file consistency drift (docs vs code, hook vs CI rules, version pins vs lockfiles) — exactly the noise we don't want surfacing in human review.
+Every PR gets a first-pass review from GitHub Copilot as the automated reviewer that runs in parallel with CI and human review (see the PR flow above). Copilot is good at catching cross-file consistency drift (docs vs code, hook vs CI rules, version pins vs lockfiles) — exactly the noise we don't want surfacing in human review.
 
 ### Assigning Copilot
 
@@ -275,9 +275,11 @@ For each inline comment, decide:
 Either way: reply on the thread (so reviewers understand your reasoning) and resolve the thread. The `resolveReviewThread` mutation is only on GraphQL, not REST.
 
 ```bash
-# Fetch all review threads (with their resolved state) and filter
-# to unresolved with jq — the GraphQL API has no isResolved argument
-# on `reviewThreads`, so filtering happens client-side:
+# Fetch the first 50 review threads (with their resolved state) and
+# filter to unresolved with jq — the GraphQL API has no isResolved
+# argument on `reviewThreads`, so filtering happens client-side.
+# Bump `first` or paginate via the connection's `pageInfo` for PRs
+# with > 50 threads (rare):
 gh api graphql -f query='
 query {
   repository(owner: "hydai", name: "taiwan-data-hub") {
