@@ -151,11 +151,18 @@ patch-1
    - `pnpm prettier --check`
    - DCO sign-off check
    - Lighthouse budget (frontend PRs only): perf ≥ 85, a11y ≥ 95
-5. **Code review** — at least one approving review from a maintainer.
-6. **Squash-merge** — PR title becomes the merged commit subject; PR body
-   becomes the commit body. This keeps `main` history linear and
-   conventional.
-7. **Delete branch** after merge.
+5. **Copilot first-pass review** — maintainers assign GitHub Copilot to
+   every PR. Expect 2–4 minute turnaround per round. Address comments
+   you agree with (push fixes), and reply with rationale on the ones
+   you don't. Resolve threads when settled. Iterate until Copilot
+   posts *"generated no new comments"*. Maintainers run the loop —
+   you don't need to assign Copilot yourself.
+6. **Human review** — at least one approving review from a maintainer.
+7. **Squash-merge** — PR title becomes the merged commit subject; the
+   maintainer composes a curated body that summarises what landed
+   (the per-round commits get rolled up). Keeps `main` history linear
+   and conventional.
+8. **Delete branch** after merge.
 
 ## Where to look
 

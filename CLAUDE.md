@@ -243,9 +243,86 @@ docs/refine-mcp-quickstart
 1. Branch from `main`
 2. Commit with conventional format (hook enforces locally)
 3. Push and open PR — title must also follow conventional format (GHA enforces)
-4. CI must be green: fmt + clippy + test + svelte-check + prettier + (later) lighthouse
-5. Squash-merge — PR title becomes the merged commit subject; PR body becomes the body
-6. Delete branch after merge
+4. **Assign GitHub Copilot for code review** (see next section)
+5. Iterate on Copilot's comments until it returns "generated no new comments"
+6. CI must be green: fmt + clippy + test + svelte-check + prettier + (later) lighthouse
+7. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
+8. Delete branch after merge
+
+## Code review with GitHub Copilot
+
+Every PR gets a first-pass review from GitHub Copilot before maintainer review. Copilot is good at catching cross-file consistency drift (docs vs code, hook vs CI rules, version pins vs lockfiles) — exactly the noise we don't want surfacing in human review.
+
+### Assigning Copilot
+
+```bash
+# Use the bot slug, NOT the display name "Copilot".
+# (gh CLI lowercases --add-reviewer input before lookup, so "Copilot"
+# becomes "copilot" which 404s.)
+gh pr edit <PR#> --add-reviewer copilot-pull-request-reviewer
+```
+
+Copilot takes 2–4 minutes to post its review.
+
+### Processing comments
+
+For each inline comment, decide:
+
+- **Reasonable** → fix it in code, push the fix
+- **Wrong / not applicable** → reply explaining why, then resolve anyway
+
+Either way: reply on the thread (so reviewers understand your reasoning) and resolve the thread. The `resolveReviewThread` mutation is only on GraphQL, not REST.
+
+```bash
+# Fetch unresolved threads (with thread IDs needed for resolution):
+gh api graphql -f query='
+query {
+  repository(owner: "hydai", name: "taiwan-data-hub") {
+    pullRequest(number: <PR#>) {
+      reviewThreads(first: 50) {
+        nodes {
+          id  isResolved
+          comments(first: 1) { nodes { databaseId path line body } }
+        }
+      }
+    }
+  }
+}'
+
+# Reply to a comment (REST, by databaseId):
+gh api -X POST /repos/hydai/taiwan-data-hub/pulls/<PR#>/comments/<comment_id>/replies \
+  -f 'body=Your reasoning here.'
+
+# Resolve the thread (GraphQL, by thread node id):
+gh api graphql -f query='
+mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'
+```
+
+### Triggering the next review round
+
+Copilot does NOT auto-re-review on subsequent pushes. After pushing fixes, re-assign:
+
+```bash
+gh pr edit <PR#> --add-reviewer copilot-pull-request-reviewer
+```
+
+Then wait another 2–4 minutes. Copilot's review summary explicitly says either:
+
+- *"Copilot reviewed N of M files and generated K comments"* — keep iterating
+- *"Copilot reviewed N of M files and generated no new comments"* — loop terminates; proceed to squash-merge
+
+### Squash-merge with curated message
+
+```bash
+gh pr merge <PR#> --squash --delete-branch \
+  --subject "feat(scope): subject (#<sub-issue-id>)" \
+  --body "$(cat <<'EOF'
+…curated summary, references "Closes #<gh-issue>", trailers…
+EOF
+)"
+```
+
+The per-round commit messages (`fix: address Copilot 2nd-pass…`) disappear from `main`; only the curated squash message lands. Copilot iteration history remains visible in the PR conversation.
 
 ## Quality bars (PR-blocking)
 
