@@ -1,0 +1,87 @@
+name: Bug report
+description: Something is broken or behaves unexpectedly in the gateway, web, etl-worker, MCP tools, or docker stack.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The checklist below
+        helps us reproduce the problem quickly. Skip a field only when
+        it is genuinely not applicable.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One sentence on what's wrong.
+      placeholder: gateway returns 503 from /readyz even after postgres is healthy
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions, ideally from a fresh clone.
+      placeholder: |
+        1. git clone https://github.com/hydai/taiwan-data-hub
+        2. docker compose -f docker/compose.yaml up -d
+        3. curl http://localhost:8080/readyz
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: /readyz returns 200 with checks.database = true
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: /readyz returns 503; gateway log shows …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit SHA / release tag
+      description: Output of `git rev-parse --short HEAD` or the value in /healthz's `build_sha` field.
+      placeholder: ed5b33c
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of the stack is affected? Multiple = pick the primary one.
+      options:
+        - gateway (Rust HTTP / MCP)
+        - mcp-stdio (Rust)
+        - etl-worker (Rust)
+        - web (SvelteKit)
+        - storage (postgres / sqlx / parquet)
+        - docker / compose
+        - utility tool
+        - CLAUDE.md / docs
+        - unsure
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Host OS, Rust / Node / pnpm / Docker versions, MCP client (Claude Desktop / Cursor / Cline) if relevant.
+      placeholder: |
+        macOS 15.3 (M3 Pro)
+        rustc 1.95.0
+        node 22.13, pnpm 10.13.1
+        OrbStack docker 29.4
+        Claude Desktop 0.9.3
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / output
+      description: Paste the smallest possible excerpt. Use a code block.
+      render: shell

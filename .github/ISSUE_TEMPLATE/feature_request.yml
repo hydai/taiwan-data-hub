@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a new feature, MCP tool, utility, connector, or playground.
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For ideas that aren't yet concrete enough for a feature request,
+        please use [Discussions](https://github.com/hydai/taiwan-data-hub/discussions)
+        first. Maintainers can promote a discussion into an issue once
+        the shape is clear.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: User-facing or workflow problem first — implementation second.
+      placeholder: As a [user / AI agent / contributor], I cannot …
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: API / UI sketch, command-line shape, MCP tool name + inputs/outputs, etc.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Roughly which milestone?
+      description: Skip if you're unsure — maintainers will route to the right milestone.
+      options:
+        - M0 Foundations
+        - M1 MCP MVP
+        - M2 Marketplace UI
+        - M3 Rich MCP + Utility Wave 1
+        - M4 Auth + Personal/Multi-user
+        - M5a Community Features
+        - M5b Multi-source ETL
+        - M6 Connectors + Playground + Utility W2
+        - M7 Discovery + REST + i18n
+        - unsure / spans multiple
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else would solve this? Why is the proposal preferred?
+  - type: textarea
+    id: additional
+    attributes:
+      label: Anything else?
+      description: Links to upstream issues, related PRs, mock-ups, sample data, etc.
