@@ -40,7 +40,7 @@ web/
 │       ├── +layout.svelte      # global layout
 │       ├── +page.svelte        # placeholder home (replaced in M2)
 │       └── layout.css          # Tailwind @import + @theme tokens
-├── static/                     # favicon, robots.txt, etc.
+├── static/                     # served at site root: favicon.svg, robots.txt
 ├── components.json             # shadcn-svelte config
 ├── svelte.config.js            # adapter-node, Runes mode
 ├── vite.config.ts              # Tailwind v4 Vite plugin + port 3000

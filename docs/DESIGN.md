@@ -310,7 +310,7 @@ services:
 | 領域 | 選擇 | 版本 | 備註 |
 |---|---|---|---|
 | 框架 | `@sveltejs/kit` + `svelte` | **kit 2.59.1** + **svelte 5.55.7** | ⚠️ Svelte 5 **Runes** 強制：`$state` / `$derived` / `$effect` / `$props`，舊的 `$:` 與 `export let` 廢棄；近期加入 "remote functions" |
-| CSS | `tailwindcss` | **4.3.0** | ⚠️ Major bump (v4)：CSS-first config（`@theme` 取代 `tailwind.config.js`）、`@import "tailwindcss"` 取代 `@tailwind`、PostCSS plugin 改為 `@tailwindcss/postcss`、`shadow` 階級重命名（`shadow-sm` → `shadow-xs`）、`border` 預設 `currentColor`；需 Safari 16.4+ / Chrome 111+ |
+| CSS | `tailwindcss` + `@tailwindcss/vite` | **4.3.0** | ⚠️ Major bump (v4)：CSS-first config（`@theme` 取代 `tailwind.config.js`）、`@import "tailwindcss"` 取代 `@tailwind`；對 Vite 專案用 **`@tailwindcss/vite`**（M0 #0.2 的實作選擇），對非 Vite 專案用 `@tailwindcss/postcss`；`shadow` 階級重命名（`shadow-sm` → `shadow-xs`）、`border` 預設 `currentColor`；需 Safari 16.4+ / Chrome 111+ |
 | UI 元件 | `shadcn-svelte` + `bits-ui` | **shadcn-svelte 1.2.7** + **bits-ui 2.18.1** | ⚠️ 兩者皆 Major bump：bits-ui v2 為對應 Svelte 5 Runes 重整 headless primitives |
 | i18n | `@inlang/paraglide-js` | **2.18.0** | ⚠️ Major bump：API 重命名 `languageTag()` → `getLocale()`、`setLanguageTag()` → `setLocale()`、`availableLanguageTags` → `locales`；server middleware 移到 `server.js` 成 `paraglideMiddleware` |
 | 地圖 | `maplibre-gl` | **5.24.0** | ⚠️ Major bump (v5)：重整型別、worker、style spec；v6 在 prerelease |

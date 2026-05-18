@@ -8,8 +8,11 @@ const config = {
 		runes: ({ filename }) => (filename.split(/[/\\]/).includes('node_modules') ? undefined : true)
 	},
 	kit: {
-		// adapter-node so we can ship a single Node binary inside Docker
-		// (self-hosted is our deploy target — see docs/DESIGN.md §4.7).
+		// adapter-node so we can run a self-contained Node app inside the
+		// Docker image (self-hosted is our deploy target — see
+		// docs/DESIGN.md §4.7). Build output is a JS entry + node_modules,
+		// not a native binary; the Docker image bundles Node 22+ alongside.
+		//
 		// Default env var names (PORT, HOST, ORIGIN, …) are kept so standard
 		// container orchestrators (Docker, k8s, Fly, Render) work without
 		// custom config. We can introduce an envPrefix later if/when we have
