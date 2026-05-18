@@ -1,0 +1,15 @@
+[package]
+name = "tools-utility"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "53 Taiwan-specific utility tools (ID validation, ROC year, address, etc.)"
+
+[lints]
+workspace = true
+
+[dependencies]

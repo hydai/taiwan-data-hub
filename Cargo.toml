@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/gateway",
+    "crates/mcp-stdio",
+    "crates/etl-worker",
+    "crates/mcp-core",
+    "crates/tools-utility",
+    "crates/tools-data",
+    "crates/connectors",
+    "crates/storage",
+    "crates/auth",
+    "crates/shared",
+    "crates/test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/hydai/taiwan-data-hub"
+authors = ["Taiwan Data Hub contributors"]
+publish = false
+
+# Centralized dependency versions — crates opt in via `dep.workspace = true`.
+# Versions chosen against the 2026-05-18 audit in docs/DESIGN.md §5.
+[workspace.dependencies]
+# (added as crates start needing them; intentionally empty during bootstrap)
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+non_ascii_idents = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Common pedantic noise we tolerate to keep PRs ergonomic.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+
+# CLAUDE.md mandate: dev builds skip debug info for *dependencies* so they
+# rebuild fast and the target/ stays small.
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# panic = "unwind" (Cargo default) is kept intentionally: it lets axum/tower
+# middleware `catch_unwind` a handler panic and return 500 instead of letting
+# the whole process die. With panic = "abort" the runtime would terminate on
+# the first uncaught panic anywhere.
+
+[profile.test]
+opt-level = 1

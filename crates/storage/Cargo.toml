@@ -1,0 +1,15 @@
+[package]
+name = "storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "PostgreSQL repositories (sqlx) and Parquet I/O (Polars)"
+
+[lints]
+workspace = true
+
+[dependencies]
