@@ -52,19 +52,24 @@ body:
     validations:
       required: true
   - type: dropdown
-    id: component
+    id: surface
     attributes:
-      label: Component
-      description: Which part of the stack is affected? Multiple = pick the primary one.
+      label: Affected surface
+      description: |
+        The user-facing area you noticed the bug in. These are
+        surfaces, not internal crates — implementation details
+        like auth/connectors/mcp-core/tools-* are routed to from
+        these surfaces during triage.
       options:
-        - gateway (Rust HTTP / MCP)
-        - mcp-stdio (Rust)
-        - etl-worker (Rust)
-        - web (SvelteKit)
-        - storage (postgres / sqlx / parquet)
-        - docker / compose
-        - utility tool
-        - CLAUDE.md / docs
+        - gateway HTTP endpoint (/healthz, /readyz, REST, MCP HTTP)
+        - mcp-stdio (Claude Desktop / Cursor / Cline integration)
+        - etl-worker (ingestion, scheduling)
+        - web (SvelteKit marketplace UI)
+        - database / migrations (postgres schema, sqlx)
+        - docker compose stack (local dev or CI)
+        - utility tool (TW ID, ROC year, address, etc.)
+        - CLAUDE.md / CONTRIBUTING.md / docs
+        - other / multiple (describe in summary)
         - unsure
     validations:
       required: true

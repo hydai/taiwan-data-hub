@@ -32,15 +32,15 @@ body:
       label: Roughly which milestone?
       description: Skip if you're unsure — maintainers will route to the right milestone.
       options:
-        - M0 Foundations
-        - M1 MCP MVP
-        - M2 Marketplace UI
-        - M3 Rich MCP + Utility Wave 1
-        - M4 Auth + Personal/Multi-user
-        - M5a Community Features
-        - M5b Multi-source ETL
-        - M6 Connectors + Playground + Utility W2
-        - M7 Discovery + REST + i18n
+        - M0 — Foundations
+        - M1 — MCP MVP
+        - M2 — Marketplace UI
+        - M3 — Rich MCP + Utility Wave 1
+        - M4 — Auth + Personal/Multi-user Mode
+        - M5a — Community Features
+        - M5b — Multi-source ETL
+        - M6 — Connectors + Playground + Utility Wave 2
+        - M7 — Agent Discovery + REST + i18n
         - unsure / spans multiple
   - type: textarea
     id: alternatives

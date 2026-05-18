@@ -93,7 +93,7 @@ versions before copy-pasting from blog posts or AI training data:
 ### Build / test (once crates exist)
 
 ```bash
-# Rust (always release + --locked + --all-targets to match CI)
+# Rust — release + --locked everywhere; --all-targets for clippy only
 cargo build --release --locked
 cargo clippy --release --locked --all-targets -- -D warnings
 cargo test --release --locked
