@@ -1,0 +1,34 @@
+# Build stage — Rust 1.95 pinned for reproducible container builds.
+# Local builds track rust-toolchain.toml (channel = stable), which will
+# drift to newer stables; CI / Docker pins this exact version so
+# image hashes stay stable. Bump together when stable advances.
+FROM rust:1.95-slim-bookworm AS builder
+WORKDIR /app
+
+# Copy the whole workspace — Cargo's --locked flag enforces lockfile
+# parity. We could split deps from sources for better layer caching
+# (cargo-chef) once the workspace is bigger; today the full copy is
+# fine because target/ is .dockerignore'd.
+#
+# Note: .git/ is .dockerignore'd too, so build.rs's `git rev-parse`
+# falls back to "unknown" (its documented fallback). Real SHAs land
+# via --build-arg from CI in a follow-up — installing git here is
+# unnecessary because the .git directory it would query isn't present.
+COPY . .
+
+RUN cargo build --release --locked -p gateway
+
+# Runtime — bookworm-slim instead of distroless because compose's
+# healthcheck shells out to curl. ~80 MB extra is acceptable for now;
+# revisit if we ship public images.
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin tdh
+
+COPY --from=builder /app/target/release/gateway /usr/local/bin/gateway
+
+USER tdh:tdh
+EXPOSE 8080
+ENTRYPOINT ["gateway"]
