@@ -122,9 +122,10 @@ python3 scripts/populate-project.py
 ### Pre-commit checks
 
 ```bash
-lineguard <changed-files>                  # format / line-ending check
-cargo clippy -- -D warnings                # before any Rust commit
-pnpm lint                                  # before any frontend commit (root forwards to --filter web)
+# Replace path/to/file with your changed files (or pass several).
+lineguard path/to/file                     # format / line-ending check
+cargo clippy --release -- -D warnings      # release flag matches the PR-blocking quality bar
+pnpm lint                                  # root forwards to --filter web (prettier + eslint)
 ```
 
 A PreToolUse hook in `~/.claude/settings.json` auto-runs these before `git commit`.
