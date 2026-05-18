@@ -60,7 +60,7 @@ def validate(domain: object, idx: int) -> dict:
             f"got {kind!r}"
         )
     so = domain.get("sort_order")
-    if not isinstance(so, int):
+    if not isinstance(so, int) or isinstance(so, bool):
         raise SystemExit(
             f"domains[{idx} {slug}]: sort_order must be int, got {so!r}"
         )
