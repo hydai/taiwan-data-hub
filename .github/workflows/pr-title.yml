@@ -1,0 +1,56 @@
+name: PR title check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    name: Conventional Commits title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Mirrors .githooks/commit-msg
+          types: |
+            feat
+            fix
+            docs
+            refactor
+            chore
+            test
+            perf
+            build
+            ci
+            style
+            revert
+          scopes: |
+            mcp
+            backend
+            frontend
+            etl
+            infra
+            docs
+            i18n
+            community
+            security
+            deps
+          # Scope is optional; subject must be lowercase; no trailing period.
+          requireScope: false
+          disallowScopes: |
+            release
+          subjectPattern: ^(?![A-Z])[^.]+$
+          subjectPatternError: |
+            Subject "{subject}" found in PR title "{title}"
+            does not match the expected pattern.
+            Subject must start with a lowercase letter and not end with a period.
+          # Allow `!` for breaking changes.
+          headerPattern: '^(\w*)(?:\(([^)]*)\))?!?: (.*)$'
+          headerPatternCorrespondence: type, scope, subject
+          # Validate squash commit message too.
+          validateSingleCommit: false
