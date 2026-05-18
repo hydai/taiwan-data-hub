@@ -143,26 +143,27 @@ patch-1
 1. **Branch** from `main`. Keep PRs small (ideally one sub-issue per PR).
 2. **Commit** in conventional format (hook enforces locally).
 3. **Push** and **open PR** — title must also be conventional (GHA enforces).
-4. **CI must pass** before merge:
-   - `cargo fmt --check`
-   - `cargo clippy --release -- -D warnings`
-   - `cargo test --release`
-   - `pnpm --filter web check`
-   - `pnpm prettier --check`
-   - DCO sign-off check
-   - Lighthouse budget (frontend PRs only): perf ≥ 85, a11y ≥ 95
-5. **Copilot first-pass review** — maintainers assign GitHub Copilot to
-   every PR. Expect 2–4 minute turnaround per round. Address comments
-   you agree with (push fixes), and reply with rationale on the ones
-   you don't. Resolve threads when settled. Iterate until Copilot
-   posts *"generated no new comments"*. Maintainers run the loop —
-   you don't need to assign Copilot yourself.
-6. **Human review** — at least one approving review from a maintainer.
-7. **Squash-merge** — PR title becomes the merged commit subject; the
+4. **Merge prerequisites (run in parallel; all three must clear):**
+   - **CI green** — fires automatically on every push:
+     - `cargo fmt --check`
+     - `cargo clippy --release -- -D warnings`
+     - `cargo test --release`
+     - `pnpm --filter web check`
+     - `pnpm prettier --check`
+     - DCO sign-off check
+     - Lighthouse budget (frontend PRs only): perf ≥ 85, a11y ≥ 95
+   - **Copilot first-pass review** — maintainers assign GitHub Copilot.
+     Expect 2–4 minute turnaround per round. Address comments you
+     agree with (push fixes); reply with rationale on the ones you
+     don't. Resolve threads when settled. Iterate until Copilot posts
+     *"generated no new comments"*. Maintainers run the loop — you
+     don't need to assign Copilot yourself.
+   - **Human review** — at least one approving review from a maintainer.
+5. **Squash-merge** — PR title becomes the merged commit subject; the
    maintainer composes a curated body that summarises what landed
    (the per-round commits get rolled up). Keeps `main` history linear
    and conventional.
-8. **Delete branch** after merge.
+6. **Delete branch** after merge.
 
 ## Where to look
 

@@ -243,11 +243,12 @@ docs/refine-mcp-quickstart
 1. Branch from `main`
 2. Commit with conventional format (hook enforces locally)
 3. Push and open PR — title must also follow conventional format (GHA enforces)
-4. **Assign GitHub Copilot for code review** (see next section)
-5. Iterate on Copilot's comments until it returns "generated no new comments"
-6. CI must be green: fmt + clippy + test + svelte-check + prettier + (later) lighthouse
-7. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
-8. Delete branch after merge
+4. **Merge prerequisites (run in parallel, all must clear):**
+   - **CI green**: fmt + clippy + test + svelte-check + prettier + (later) lighthouse — kicked off automatically on every push
+   - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
+   - **Maintainer review** approves (where applicable)
+5. Squash-merge — PR title becomes the merged commit subject; explicit `--subject`/`--body` flags to `gh pr merge` keep the merged message clean (the per-iteration commits get rolled up)
+6. Delete branch after merge
 
 ## Code review with GitHub Copilot
 
@@ -274,7 +275,9 @@ For each inline comment, decide:
 Either way: reply on the thread (so reviewers understand your reasoning) and resolve the thread. The `resolveReviewThread` mutation is only on GraphQL, not REST.
 
 ```bash
-# Fetch unresolved threads (with thread IDs needed for resolution):
+# Fetch all review threads (with their resolved state) and filter
+# to unresolved with jq — the GraphQL API has no isResolved argument
+# on `reviewThreads`, so filtering happens client-side:
 gh api graphql -f query='
 query {
   repository(owner: "hydai", name: "taiwan-data-hub") {
@@ -287,7 +290,7 @@ query {
       }
     }
   }
-}'
+}' | jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)'
 
 # Reply to a comment (REST, by databaseId):
 gh api -X POST /repos/hydai/taiwan-data-hub/pulls/<PR#>/comments/<comment_id>/replies \
