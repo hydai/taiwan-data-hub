@@ -144,7 +144,7 @@ patch-1
 2. **Commit** in conventional format (hook enforces locally).
 3. **Push** and **open PR** — title must also be conventional (GHA enforces).
 4. **Merge prerequisites (run in parallel; all three must clear):**
-   - **CI green** — fires automatically on every push:
+   - **CI green** — `pull_request` workflows fire on every PR open / push to the PR branch:
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)

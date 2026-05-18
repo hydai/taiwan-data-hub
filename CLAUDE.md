@@ -244,7 +244,7 @@ docs/refine-mcp-quickstart
 2. Commit with conventional format (hook enforces locally)
 3. Push and open PR — title must also follow conventional format (GHA enforces)
 4. **Merge prerequisites (run in parallel, all must clear):**
-   - **CI green** — fires automatically on every push:
+   - **CI green** — `pull_request` workflows fire on every PR open / push to the PR branch:
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
