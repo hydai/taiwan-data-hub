@@ -126,10 +126,13 @@ For answers to common questions about this code of conduct, see the FAQ at
 [https://www.contributor-covenant.org/translations][translations].
 
 The Contributor Covenant is licensed under
-[Creative Commons Attribution 4.0 International][CC BY 4.0]. The only change
-made to the canonical 2.1 text in this copy is replacing the
-`[INSERT CONTACT METHOD]` placeholder in the *Enforcement* section with the
-maintainer's email address.
+[Creative Commons Attribution 4.0 International][CC BY 4.0]. Deviations from
+the canonical 2.1 text in this copy:
+
+1. The `[INSERT CONTACT METHOD]` placeholder in the *Enforcement* section is
+   replaced with the maintainer's email address.
+2. This paragraph (the licensing/deviations note) is added to the end of the
+   *Attribution* section.
 
 [homepage]: https://www.contributor-covenant.org
 [v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html

@@ -29,9 +29,11 @@ duplicate work.
 ## Code of conduct
 
 This project adopts the [Contributor Covenant 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/)
-verbatim — see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Report violations to
-the enforcement address listed there. Be respectful. Discrimination,
-harassment, and bad-faith arguments are not welcome.
+— see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md), which lists the deviations
+from the canonical text (the enforcement contact and a CC BY 4.0 attribution
+note). Report violations to the enforcement address listed there. Be
+respectful. Discrimination, harassment, and bad-faith arguments are not
+welcome.
 
 ## Developer Certificate of Origin (DCO)
 
