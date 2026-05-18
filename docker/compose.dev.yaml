@@ -20,8 +20,10 @@ services:
       - ../Cargo.toml:/app/Cargo.toml
       - ../Cargo.lock:/app/Cargo.lock
       - ../rust-toolchain.toml:/app/rust-toolchain.toml
-      # Persisted target/ + registry between restarts.
-      - cargo-cache:/usr/local/cargo/registry
+      # Persist the WHOLE CARGO_HOME (registry + git db + installed
+      # binaries) so `cargo install cargo-watch` runs once across
+      # restarts instead of recompiling every time.
+      - cargo-home:/usr/local/cargo
       - target-cache:/app/target
 
   etl-worker:
@@ -36,7 +38,7 @@ services:
       - ../Cargo.toml:/app/Cargo.toml
       - ../Cargo.lock:/app/Cargo.lock
       - ../rust-toolchain.toml:/app/rust-toolchain.toml
-      - cargo-cache:/usr/local/cargo/registry
+      - cargo-home:/usr/local/cargo
       - target-cache:/app/target
 
   web:
@@ -48,7 +50,14 @@ services:
       - ../package.json:/app/package.json
       - ../pnpm-workspace.yaml:/app/pnpm-workspace.yaml
       - ../pnpm-lock.yaml:/app/pnpm-lock.yaml
+      # Bind-mounting ../web onto /app/web would shadow the
+      # node_modules that the builder stage installed. Mount named
+      # volumes on top of the bind so the dependency tree survives.
+      - web-node-modules:/app/web/node_modules
+      - root-node-modules:/app/node_modules
 
 volumes:
-  cargo-cache:
+  cargo-home:
   target-cache:
+  web-node-modules:
+  root-node-modules:
