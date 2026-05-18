@@ -51,7 +51,14 @@ if [[ "$FIRST" =~ ^fixup! || "$FIRST" =~ ^squash! ]]; then exit 0; fi
 
 TYPE_RE='(feat|fix|docs|refactor|chore|test|perf|build|ci|style|revert)'
 SCOPE_RE='(mcp|backend|frontend|etl|infra|docs|i18n|community|security|deps)'
-SUBJECT_RE='[^A-Z].{0,100}[^.]'   # disallow leading uppercase and trailing period (rough)
+# Subject regex (POSIX ERE — no lookahead, so we use negated char classes):
+#   - 1+ chars total
+#   - first char NOT uppercase AND (when it is also the last char) NOT a period
+#   - last char NOT a period
+#   - periods allowed elsewhere (e.g. trailing "(#0.1)" issue ref outside this group)
+# This mirrors the GHA pattern `^(?![A-Z]).*[^.]$` in pr-title.yml so local
+# commits and PR titles enforce the same length rule.
+SUBJECT_RE='[^A-Z.](.{0,99}[^.])?'
 ISSUE_RE='( \(#[0-9]+(\.[0-9]+|[a-z]\.[0-9]+)?\))?'
 
 # Full regex (POSIX ERE, used via [[ =~ ]])
