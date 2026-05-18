@@ -6,9 +6,9 @@ Run after editing the YAML; commit both files together so the seed
 migration and its source of truth stay in lockstep.
 
 Validates every row before emitting SQL — refuses to write a broken
-migration if `slug`/`kind` don't match the expected shape. String
-literals are escaped (single quotes doubled) for the few places that
-don't use dollar-quoted strings.
+migration if `slug` / `kind` / `name` / `description` don't match the
+expected shape. String literals are escaped (single quotes doubled)
+for the few places that don't use dollar-quoted strings.
 
 Requires PyYAML (`pip install pyyaml` or use a venv).
 """
@@ -42,7 +42,12 @@ def sql_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-def validate(domain: dict, idx: int) -> None:
+def validate(domain: object, idx: int) -> dict:
+    """Return the domain dict if every field passes; raise SystemExit otherwise."""
+    if not isinstance(domain, dict):
+        raise SystemExit(
+            f"domains[{idx}]: expected a mapping, got {type(domain).__name__}"
+        )
     slug = domain.get("slug")
     if not isinstance(slug, str) or not SLUG_RE.match(slug):
         raise SystemExit(
@@ -51,18 +56,36 @@ def validate(domain: dict, idx: int) -> None:
     kind = domain.get("kind")
     if kind not in ALLOWED_KINDS:
         raise SystemExit(
-            f"domains[{idx}]: kind must be one of {sorted(ALLOWED_KINDS)}, got {kind!r}"
+            f"domains[{idx} {slug}]: kind must be one of {sorted(ALLOWED_KINDS)}, "
+            f"got {kind!r}"
         )
     so = domain.get("sort_order")
     if not isinstance(so, int):
-        raise SystemExit(f"domains[{idx}]: sort_order must be int, got {so!r}")
+        raise SystemExit(
+            f"domains[{idx} {slug}]: sort_order must be int, got {so!r}"
+        )
     name = domain.get("name")
     if not isinstance(name, dict) or "zh-TW" not in name:
         raise SystemExit(
             f"domains[{idx} {slug}]: name must be a mapping with a zh-TW key"
         )
     if not isinstance(name["zh-TW"], str) or not name["zh-TW"]:
-        raise SystemExit(f"domains[{idx} {slug}]: name.zh-TW must be a non-empty string")
+        raise SystemExit(
+            f"domains[{idx} {slug}]: name.zh-TW must be a non-empty string"
+        )
+    description = domain.get("description")
+    if description is not None:
+        if not isinstance(description, dict):
+            raise SystemExit(
+                f"domains[{idx} {slug}]: description must be null or a mapping, "
+                f"got {type(description).__name__}"
+            )
+        zh = description.get("zh-TW")
+        if not isinstance(zh, str) or not zh:
+            raise SystemExit(
+                f"domains[{idx} {slug}]: description.zh-TW must be a non-empty string"
+            )
+    return domain
 
 
 def main() -> int:
@@ -70,21 +93,20 @@ def main() -> int:
     src = repo / "config" / "domains.yaml"
     out = repo / "migrations" / "0002_seed_domains.sql"
 
-    raw = yaml.safe_load(src.read_text())
+    raw = yaml.safe_load(src.read_text(encoding="utf-8"))
     if not isinstance(raw, list) or not raw:
         sys.stderr.write(f"{src} produced no domains\n")
         return 1
 
-    for i, d in enumerate(raw):
-        validate(d, i)
+    domains = [validate(d, i) for i, d in enumerate(raw)]
 
     seen: set[str] = set()
-    for d in raw:
+    for d in domains:
         if d["slug"] in seen:
             raise SystemExit(f"duplicate slug: {d['slug']!r}")
         seen.add(d["slug"])
 
-    domains = sorted(raw, key=lambda d: (d["sort_order"], d["slug"]))
+    domains.sort(key=lambda d: (d["sort_order"], d["slug"]))
 
     lines: list[str] = [
         "-- M0 #0.8 — seed the 20 marketplace domains.",
@@ -128,7 +150,7 @@ def main() -> int:
         ]
     )
 
-    out.write_text("\n".join(lines))
+    out.write_text("\n".join(lines), encoding="utf-8")
     print(f"✓ {out.relative_to(repo)} regenerated with {len(domains)} domains")
     return 0
 

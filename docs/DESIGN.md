@@ -135,7 +135,7 @@ erDiagram
 
 **關鍵欄位設計**：
 - 多語欄位一律 `jsonb`（`{"zh-TW":"…","en":"…"}`），避免每張表 join 翻譯表。
-- `datasets.source` 列舉：`data_gov_tw` / `twse` / `moea` / `cwa` / `user_contrib`。
+- `datasets.source` 列舉：`data_gov_tw` / `twse` / `moea` / `cwa` / `fishery_moa` / `user_contrib`。
 - `datasets.tier`：`platinum / gold / silver / bronze`（可手動 override）。
 - `dataset_files.uri` 抽象 storage：`file://`, `s3://`, `https://`。
 - `usage_records` 月分區，免費也記用於濫用偵測 + 公開統計。
