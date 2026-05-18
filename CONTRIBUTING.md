@@ -148,7 +148,7 @@ patch-1
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
-     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
+     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm check`, `pnpm lint` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
      - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
      - Run the planned commands locally as a pre-push habit until CI catches up
    - **Copilot first-pass review** — maintainers assign GitHub Copilot.
@@ -181,7 +181,7 @@ patch-1
 | Rust lints | `cargo clippy --release -- -D warnings` |
 | Rust format | `cargo fmt --check` |
 | Rust tests | `cargo test --release` pass (release builds only per project rule) |
-| Frontend lint | `pnpm --filter web check` + `pnpm prettier --check` |
+| Frontend lint | `pnpm check` + `pnpm lint` (root scripts forward to `--filter web`) |
 | Lighthouse (frontend) | perf ≥ 85, a11y ≥ 95, best-practices ≥ 90, SEO ≥ 90 |
 | Security | Never log secrets; OAuth tokens stored AES-GCM encrypted; query_rows SQL via AST whitelist |
 | Test coverage | No hard threshold — reviewer judgement; new business logic should have at least one happy-path and one edge-case test |

@@ -124,7 +124,7 @@ python3 scripts/populate-project.py
 ```bash
 lineguard <changed-files>                  # format / line-ending check
 cargo clippy -- -D warnings                # before any Rust commit
-pnpm prettier --check 'web/**/*'           # before any frontend commit
+pnpm lint                                  # before any frontend commit (root forwards to --filter web)
 ```
 
 A PreToolUse hook in `~/.claude/settings.json` auto-runs these before `git commit`.
@@ -248,7 +248,7 @@ docs/refine-mcp-quickstart
      - **Currently shipping**:
        - DCO sign-off (`.github/workflows/dco.yml`)
        - Conventional Commits PR title (`.github/workflows/pr-title.yml`)
-     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm --filter web check`, `pnpm prettier --check`
+     - **Planned in #0.5**: `cargo fmt --check`, `cargo clippy --release -- -D warnings`, `cargo test --release`, `pnpm check`, `pnpm lint` (the root scripts forward to `pnpm --filter web …` since `prettier` only lives in the `web` workspace)
      - **Planned in #2.10**: Lighthouse budget for frontend PRs (perf ≥ 85, a11y ≥ 95)
      - Run the planned commands locally as a pre-push habit until CI catches up
    - **Copilot review converges** to *"generated no new comments"* (see next section) — needs manual assignment per round
@@ -348,8 +348,8 @@ The per-round commit messages (`fix: address Copilot 2nd-pass…`) disappear fro
 - `cargo clippy --release -- -D warnings` — no warnings
 - `cargo test --release` — all pass
 - `cargo fmt --check` — formatted
-- `pnpm --filter web check` — Svelte type-checks
-- `pnpm prettier --check` — formatted
+- `pnpm check` — Svelte type-checks (root forwards to `--filter web check`)
+- `pnpm lint` — prettier + eslint (root forwards to `--filter web lint`)
 - Lighthouse perf ≥ 85, a11y ≥ 95, best-practices ≥ 90, SEO ≥ 90 (frontend PRs only)
 - Test coverage for new logic (no hard threshold; reviewer judgement)
 
