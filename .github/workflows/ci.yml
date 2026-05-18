@@ -2,7 +2,11 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    # Intentionally excludes `edited` — title/body/label edits do not
+    # affect the code, and combined with cancel-in-progress that would
+    # also kill in-flight code-validation runs for cosmetic edits.
+    # PR-title-format and DCO-sign-off workflows still observe `edited`.
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
 
@@ -42,10 +46,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo fmt --check
         run: cargo fmt --check
-      - name: cargo clippy --release --all-targets -- -D warnings
-        run: cargo clippy --release --all-targets -- -D warnings
-      - name: cargo test --release
-        run: cargo test --release
+      # --locked rejects PRs that change Cargo.toml without also
+      # committing the matching Cargo.lock update, so CI tracks the
+      # exact dep resolution the contributor tested locally.
+      - name: cargo clippy --release --locked --all-targets -- -D warnings
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      - name: cargo test --release --locked
+        run: cargo test --release --locked
 
   web:
     name: Web (check / lint / build)
