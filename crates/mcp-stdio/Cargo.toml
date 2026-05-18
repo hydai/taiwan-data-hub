@@ -13,9 +13,10 @@ description = "stdio MCP shim for local AI clients (Claude Desktop, Cursor, Clin
 workspace = true
 
 [dependencies]
+# rmcp is consumed via the `mcp_core::rmcp` re-export so the only crate that
+# binds to a specific rmcp version is mcp-core. Do not add `rmcp` here.
 mcp-core = { path = "../mcp-core" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-rmcp = { workspace = true }

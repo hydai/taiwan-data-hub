@@ -82,9 +82,10 @@ impl ServerHandler for McpServer {
         request: CallToolRequestParams,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let args = request
-            .arguments
-            .map_or(serde_json::Value::Null, serde_json::Value::Object);
+        // MCP `arguments` is optional. Map absence to an empty object so
+        // tools that pattern-match with `.as_object()` / `.get(..)` don't
+        // see `null` for a legitimate no-arg call.
+        let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
         match self.dispatcher.call_tool(&request.name, args).await {
             Ok(value) => {
                 let text = serde_json::to_string(&value)
