@@ -96,8 +96,11 @@ resolve `~` or `$HOME` inside the config JSON.
 
 ### 2. Verify with the MCP Inspector (optional)
 
-Start the gateway in another terminal first (only needed for the
-HTTP check):
+If you'll use the **Streamable HTTP** transport — for the Inspector
+HTTP check below, *or* for any client wired with the `url:` config
+in step 3 — start the gateway in a separate terminal and keep it
+running. **Stdio** clients spawn `mcp-stdio` themselves, so you can
+skip this step entirely if every client uses the `command:` config.
 
 ```bash
 # macOS / Linux (bash / zsh)
