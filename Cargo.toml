@@ -42,6 +42,10 @@ tokio-util = { version = "0.7", default-features = false }
 # Maintained fork of dtolnay/serde_yaml (archived 2024). API-compatible; we
 # only deserialize into typed structs, so the choice of fork is contained.
 serde_yml = "0.0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+url = "2"
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
