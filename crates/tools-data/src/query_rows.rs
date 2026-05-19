@@ -128,12 +128,30 @@ impl ToolHandler for QueryRowsTool {
         let df = match tokio::time::timeout(QUERY_TIMEOUT, exec).await {
             Ok(Ok(Ok(df))) => df,
             Ok(Ok(Err(e))) => {
-                return Err(ToolError::Execution(format!("polars: {e}")));
+                // Polars errors typically include the cache file
+                // path, schema details, and other internal context.
+                // Log the full error server-side so operators can
+                // diagnose, but return a sanitised message to the
+                // caller — leaking the cache layout would inform
+                // follow-up attacks on a multi-tenant deploy.
+                tracing::warn!(
+                    slug = %cache.slug,
+                    polars_error = %e,
+                    "query_rows polars execution failed",
+                );
+                return Err(ToolError::Execution(
+                    "query execution failed — see server logs for details".to_owned(),
+                ));
             }
             Ok(Err(join_err)) => {
-                return Err(ToolError::Execution(format!(
-                    "query worker crashed: {join_err}"
-                )));
+                tracing::error!(
+                    slug = %cache.slug,
+                    join_error = %join_err,
+                    "query_rows worker join failed",
+                );
+                return Err(ToolError::Execution(
+                    "query worker crashed unexpectedly".to_owned(),
+                ));
             }
             Err(_) => {
                 return Err(ToolError::Execution(format!(
@@ -160,14 +178,29 @@ fn parquet_path_for_query(cache: &DatasetCacheRef) -> Result<PathBuf, ToolError>
 
     if let Some(stripped) = raw.strip_prefix("file://") {
         Ok(PathBuf::from(stripped))
-    } else if raw.contains("://") {
-        // s3://, https://, etc. — not yet supported.
+    } else if let Some(scheme) = extract_uri_scheme(raw) {
+        // s3://, https://, etc. — not yet supported. Echo only the
+        // scheme back to the caller; the full URI may carry bucket
+        // names, internal hostnames, or (post-#1.8) signed-URL query
+        // params we don't want leaking out of the server.
+        tracing::warn!(
+            slug = %cache.slug,
+            cache_path = %raw,
+            "cache uri scheme not yet supported by query_rows",
+        );
         Err(ToolError::Execution(format!(
-            "cache scheme not yet supported: {raw}"
+            "cache scheme `{scheme}` is not yet supported by query_rows"
         )))
     } else {
         Ok(PathBuf::from(raw))
     }
+}
+
+/// Pull the `scheme` part out of a `scheme://...` URI without
+/// returning a borrow that ties the result to the input. Returns
+/// `None` if the input doesn't look like a URI (no `://`).
+fn extract_uri_scheme(uri: &str) -> Option<&str> {
+    uri.split_once("://").map(|(scheme, _)| scheme)
 }
 
 /// Blocking helper that runs on `spawn_blocking`. Returns the
@@ -557,6 +590,88 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    /// Polars surfaces internal context (file paths, schema, byte
+    /// offsets, ...) in its error messages. The tool sanitises those
+    /// before returning to the caller so a multi-tenant deploy
+    /// doesn't leak cache layout. Trigger a Polars-level error
+    /// (querying a column the file doesn't have) and assert the
+    /// public message doesn't include the cache path or column name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polars_execution_errors_are_sanitised() {
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT nonexistent_column FROM current_dataset",
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Execution(m) => {
+                assert!(
+                    !m.contains(&path.to_string_lossy().to_string()),
+                    "public error must not echo cache path: {m}",
+                );
+                assert!(
+                    !m.contains("nonexistent_column"),
+                    "public error must not echo column names: {m}",
+                );
+                assert!(
+                    m.contains("server logs"),
+                    "public error should point operators at the server logs: {m}",
+                );
+            }
+            other => panic!("expected Execution, got {other:?}"),
+        }
+    }
+
+    /// Unsupported cache scheme should surface only the scheme, not
+    /// the full URI (which may carry bucket / hostname / signed-URL
+    /// query params once #1.8 lands).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsupported_cache_scheme_leaks_only_scheme() {
+        let lookup = StubLookup::new(Some(DatasetCacheRef {
+            id: Uuid::nil(),
+            slug: "fixture".into(),
+            cached: true,
+            cache_path: Some(
+                "s3://secret-bucket-internal/path/to/cache.parquet?signature=AAA".into(),
+            ),
+        }));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({"slug": "fixture", "sql": "SELECT a FROM current_dataset"}))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::Execution(m) => {
+                assert!(m.contains("s3"), "scheme name should appear: {m}");
+                assert!(
+                    !m.contains("secret-bucket-internal"),
+                    "bucket name must not leak: {m}",
+                );
+                assert!(
+                    !m.contains("signature"),
+                    "signed-URL params must not leak: {m}",
+                );
+            }
+            other => panic!("expected Execution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_uri_scheme_only_when_separator_present() {
+        assert_eq!(extract_uri_scheme("file:///tmp/x"), Some("file"));
+        assert_eq!(extract_uri_scheme("s3://bucket/key"), Some("s3"));
+        assert_eq!(extract_uri_scheme("https://example.com/x"), Some("https"));
+        assert_eq!(extract_uri_scheme("/no/scheme/here"), None);
+        assert_eq!(extract_uri_scheme(""), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
