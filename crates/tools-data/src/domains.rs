@@ -135,8 +135,7 @@ pub fn embedded() -> &'static [Domain] {
     static CACHE: OnceLock<Vec<Domain>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let mut domains =
-                parse(DOMAINS_YAML).expect("config/domains.yaml must parse");
+            let mut domains = parse(DOMAINS_YAML).expect("config/domains.yaml must parse");
             // Stable sort so equal `sort_order` rows preserve their
             // authored order — relevant for the kind grouping
             // (topical/meta/horizontal) where each kind has a
