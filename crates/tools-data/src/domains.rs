@@ -1,10 +1,23 @@
 //! Seed data for the 20 dataset domains, parsed from
-//! `config/domains.yaml` at build time.
+//! `config/domains.yaml`.
 //!
-//! The YAML is embedded via `include_str!`, so binaries don't need
-//! filesystem access at startup and a malformed YAML breaks `cargo
-//! build` — not deployment. Lookup is cached in a `OnceLock` so the
-//! YAML parse happens once per process.
+//! Layered defenses against a malformed seed:
+//!
+//! 1. **`cargo test` (CI gate):** the unit test below parses the
+//!    embedded YAML so a bad seed fails the Rust gate in CI before
+//!    a binary ever ships.
+//! 2. **Process boot:** `tools_data::register_data_tools` warms the
+//!    `OnceLock` so any parse failure panics at startup, not on the
+//!    first tool call. A reckless build that skipped tests still
+//!    fails loudly before serving traffic.
+//! 3. **Defense in depth:** lookups continue to go through
+//!    `embedded()`, which panics on the (unreachable in practice)
+//!    case where the cache was never initialised.
+//!
+//! `include_str!` is byte-level only — it doesn't know the file is
+//! YAML — so there is no compile-time syntactic check without
+//! adding a `build.rs`. For a single config file we lean on the
+//! three layers above instead.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
