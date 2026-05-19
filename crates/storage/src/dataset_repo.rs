@@ -24,6 +24,40 @@ impl DatasetReader for Storage {
     }
 }
 
+/// Object-safe write trait used by the ETL driver. Mirrors the
+/// [`DatasetReader`] pattern so `run_one_pass` can be unit-tested with
+/// an in-memory stub instead of a real Postgres pool. [`Storage`] is
+/// the production impl.
+#[async_trait]
+pub trait DatasetWriter: Send + Sync + 'static {
+    /// See [`Storage::upsert_dataset`].
+    async fn upsert_dataset(
+        &self,
+        domain_id: i16,
+        source: SourceId,
+        metadata: &DatasetMetadata,
+    ) -> Result<Uuid, StorageError>;
+
+    /// See [`Storage::domain_id_for_slug`].
+    async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError>;
+}
+
+#[async_trait]
+impl DatasetWriter for Storage {
+    async fn upsert_dataset(
+        &self,
+        domain_id: i16,
+        source: SourceId,
+        metadata: &DatasetMetadata,
+    ) -> Result<Uuid, StorageError> {
+        Storage::upsert_dataset(self, domain_id, source, metadata).await
+    }
+
+    async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError> {
+        Storage::domain_id_for_slug(self, slug).await
+    }
+}
+
 /// Lookup key for [`Storage::get_dataset`].
 #[derive(Debug, Clone)]
 pub enum DatasetKey {

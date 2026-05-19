@@ -29,7 +29,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# `sqlx` is already a normal dep so integration tests inherit it
+# automatically; no need to repeat it here. Listing it would also
+# invite future feature-set drift between runtime and test builds.
+async-trait = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true }
 testcontainers-modules = { workspace = true }
+uuid = { workspace = true }
 wiremock = { workspace = true }

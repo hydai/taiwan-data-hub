@@ -767,6 +767,7 @@ name = "etl-worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "connectors",
  "serde_json",
  "sqlx",
@@ -778,6 +779,7 @@ dependencies = [
  "tools-data",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 

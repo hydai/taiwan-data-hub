@@ -15,6 +15,6 @@
 mod dataset_repo;
 
 pub use dataset_repo::{
-    DatasetFileRow, DatasetFull, DatasetKey, DatasetReader, DatasetRow, DatasetVersionRow, Storage,
-    StorageError, VersionWithFiles,
+    DatasetFileRow, DatasetFull, DatasetKey, DatasetReader, DatasetRow, DatasetVersionRow,
+    DatasetWriter, Storage, StorageError, VersionWithFiles,
 };

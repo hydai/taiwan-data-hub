@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use connectors::{DatasetMetadata, Page, SourceConnector};
-use storage::Storage;
+use storage::DatasetWriter;
 use tools_data::domains;
 
 /// How many per-dataset "no domain match" lines to log at WARN per
@@ -64,10 +64,11 @@ pub enum CrawlError {
 /// have a visible gap (`skipped_no_domain` count) than silently park
 /// uncategorised data in the wrong place. #1.4d will add a per-source
 /// mapping override config for the tail-of-the-tail cases.
-pub async fn run_one_pass<C: SourceConnector>(
-    connector: &C,
-    storage: &Storage,
-) -> Result<CrawlSummary, CrawlError> {
+pub async fn run_one_pass<C, W>(connector: &C, storage: &W) -> Result<CrawlSummary, CrawlError>
+where
+    C: SourceConnector,
+    W: DatasetWriter,
+{
     let source = connector.source_id();
     let mut summary = CrawlSummary::default();
     let mut cursor = None;
@@ -174,8 +175,8 @@ pub async fn run_one_pass<C: SourceConnector>(
 /// upstream category matched any domain" from "a domain matched, but
 /// its slug isn't seeded in the DB" — the two cases need different
 /// log messages and different counters.
-async fn resolve_domain_id(
-    storage: &Storage,
+async fn resolve_domain_id<W: DatasetWriter>(
+    storage: &W,
     meta: &DatasetMetadata,
     cache: &mut BTreeMap<String, Option<i16>>,
 ) -> Result<DomainResolution, CrawlError> {
@@ -209,15 +210,133 @@ async fn resolve_domain_id(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+
     use super::*;
+    use async_trait::async_trait;
     use connectors::data_gov_tw::DataGovTwConnector;
+    use connectors::{ConnectorError, Cursor, SourceId};
     use serde_json::json;
+    use storage::{Storage, StorageError};
     use testcontainers_modules::postgres::Postgres as PgContainer;
     use testcontainers_modules::testcontainers::ContainerAsync;
     use testcontainers_modules::testcontainers::ImageExt;
     use testcontainers_modules::testcontainers::runners::AsyncRunner;
+    use uuid::Uuid;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Docker-free `SourceConnector` that yields a pre-baked queue of
+    /// pages and panics if the driver requests more than were set up.
+    struct StubConnector {
+        pages: Mutex<VecDeque<Page>>,
+    }
+
+    #[async_trait]
+    impl SourceConnector for StubConnector {
+        fn source_id(&self) -> SourceId {
+            SourceId::DataGovTw
+        }
+        async fn list_datasets(&self, _cursor: Option<Cursor>) -> Result<Page, ConnectorError> {
+            Ok(self
+                .pages
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("stub connector exhausted — test asked for more pages than were set up"))
+        }
+    }
+
+    /// In-memory `DatasetWriter`. `domains` is the slug→id seed; an
+    /// upstream category that maps via `tools_data::domains` to a slug
+    /// **not** in this table exercises the `SeedMissing` branch.
+    struct StubStorage {
+        domains: HashMap<String, i16>,
+        upserts: Mutex<Vec<(i16, String)>>,
+    }
+
+    #[async_trait]
+    impl DatasetWriter for StubStorage {
+        async fn upsert_dataset(
+            &self,
+            domain_id: i16,
+            _source: SourceId,
+            metadata: &DatasetMetadata,
+        ) -> Result<Uuid, StorageError> {
+            self.upserts
+                .lock()
+                .unwrap()
+                .push((domain_id, metadata.slug.clone()));
+            Ok(Uuid::nil())
+        }
+        async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError> {
+            Ok(self.domains.get(slug).copied())
+        }
+    }
+
+    fn fixture_meta(slug: &str, category: &str) -> DatasetMetadata {
+        DatasetMetadata {
+            source_id: format!("{slug}-upstream-id"),
+            slug: slug.to_owned(),
+            title_i18n: BTreeMap::from([("zh-TW".to_owned(), format!("{slug} title"))]),
+            description_i18n: BTreeMap::new(),
+            license: "Open Government Data License".to_owned(),
+            publisher: None,
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: None,
+            upstream_categories: vec![category.to_owned()],
+        }
+    }
+
+    /// Docker-free coverage of `run_one_pass`: three datasets across
+    /// two pages exercise all three `DomainResolution` branches in one
+    /// shot, so the full counter contract is locked into CI.
+    #[tokio::test]
+    async fn run_one_pass_classifies_mapped_seed_missing_and_no_mapping() {
+        let connector = StubConnector {
+            pages: Mutex::new(VecDeque::from([
+                Page {
+                    items: vec![
+                        // Maps to "environment", which IS in stub domains → Mapped.
+                        fixture_meta("air-quality", "環境"),
+                        // Maps to "education-research", NOT in stub domains → SeedMissing.
+                        fixture_meta("school-roster", "教育與研究"),
+                    ],
+                    next: Some(Cursor::new("2:2")),
+                    total: Some(3),
+                },
+                Page {
+                    items: vec![
+                        // No upstream category matches any domain → NoMapping.
+                        fixture_meta("mystery", "Something Off-Taxonomy"),
+                    ],
+                    next: None,
+                    total: Some(3),
+                },
+            ])),
+        };
+        let storage = StubStorage {
+            domains: HashMap::from([("environment".to_owned(), 7_i16)]),
+            upserts: Mutex::new(Vec::new()),
+        };
+
+        let summary = run_one_pass(&connector, &storage).await.expect("crawl ok");
+
+        assert_eq!(summary.upserted, 1, "only environment is seeded");
+        assert_eq!(summary.skipped_no_seed, 1, "education-research is unseeded");
+        assert_eq!(summary.skipped_no_domain, 1, "mystery has no mapping");
+        assert_eq!(summary.pages, 2);
+
+        let upserts = storage.upserts.lock().unwrap();
+        assert_eq!(upserts.len(), 1, "exactly one upsert");
+        assert_eq!(
+            upserts[0],
+            (7, "air-quality".to_owned()),
+            "upsert lands under the seeded domain id",
+        );
+    }
 
     async fn fresh_storage() -> (Storage, ContainerAsync<PgContainer>) {
         let container = PgContainer::default()
