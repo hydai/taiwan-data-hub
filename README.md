@@ -92,14 +92,35 @@ resolve `~` or `$HOME` inside the config JSON.
 
 ### 2. Verify with the MCP Inspector (optional)
 
+Start the gateway in another terminal first (only needed for the
+HTTP check):
+
+```bash
+# macOS / Linux (bash / zsh)
+GATEWAY_ADDR=127.0.0.1:8080 ./target/release/gateway
+```
+
+```powershell
+# Windows (PowerShell)
+$env:GATEWAY_ADDR = "127.0.0.1:8080"
+.\target\release\gateway.exe
+```
+
+```cmd
+:: Windows (CMD)
+set GATEWAY_ADDR=127.0.0.1:8080
+.\target\release\gateway.exe
+```
+
+Then run the Inspector:
+
 ```bash
 # stdio
 npx -y @modelcontextprotocol/inspector --cli \
   /ABSOLUTE/PATH/TO/target/release/mcp-stdio \
   --method tools/list
 
-# Streamable HTTP (start the gateway in another terminal first:
-#   GATEWAY_ADDR=127.0.0.1:8080 ./target/release/gateway)
+# Streamable HTTP
 npx -y @modelcontextprotocol/inspector --cli \
   http://127.0.0.1:8080/mcp --transport http \
   --method tools/list
@@ -120,13 +141,25 @@ Config file:
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
-stdio:
+stdio (macOS / Linux):
 
 ```json
 {
   "mcpServers": {
     "taiwan-data-hub": {
       "command": "/ABSOLUTE/PATH/TO/target/release/mcp-stdio"
+    }
+  }
+}
+```
+
+stdio (Windows — JSON requires backslashes to be doubled):
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "command": "C:\\ABSOLUTE\\PATH\\TO\\target\\release\\mcp-stdio.exe"
     }
   }
 }
@@ -235,8 +268,8 @@ Streamable HTTP:
 |---|---|---|
 | Client shows 0 tools | Path uses `~` or `$HOME` | Replace with the absolute path |
 | `Failed to spawn process` | Binary not built | Re-run `cargo build --release -p mcp-stdio` |
-| HTTP config times out | Gateway not running, or wrong port | `GATEWAY_ADDR=127.0.0.1:8080 ./target/release/gateway` |
-| `Bad Request: missing Host header` | Calling /mcp without a `Host:` header | Use a client (curl needs `-H "Host: 127.0.0.1:8080"`) |
+| HTTP config times out | Gateway not running, or wrong port | Start the gateway (see step 2) |
+| `Bad Request: missing Host header` | Reverse proxy or raw-socket client stripped `Host:`. Browsers and modern HTTP clients (`curl`, `httpie`, `reqwest`, fetch) always set it automatically. | Send the header explicitly — `curl -H "Host: 127.0.0.1:8080" ...` — or fix the proxy config |
 | Server reports `name: "rmcp"` | Old build before the identity fix | `cargo build --release` against `main` |
 
 ### Screenshots
