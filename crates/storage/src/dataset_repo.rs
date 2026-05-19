@@ -58,6 +58,110 @@ impl DatasetWriter for Storage {
     }
 }
 
+/// Object-safe search trait so the `search_datasets` MCP tool can be
+/// unit-tested with an in-memory stub. Mirrors [`DatasetReader`] and
+/// [`DatasetWriter`].
+#[async_trait]
+pub trait DatasetSearcher: Send + Sync + 'static {
+    /// Returns hits ordered by relevance (when `q` is set) then by
+    /// `last_modified_at` descending. Caller sets the locale used to
+    /// resolve `title` / `description`; the storage layer always
+    /// falls back to `zh-TW` when the requested locale is absent.
+    async fn search_datasets(&self, params: SearchParams) -> Result<SearchPage, StorageError>;
+}
+
+#[async_trait]
+impl DatasetSearcher for Storage {
+    async fn search_datasets(&self, params: SearchParams) -> Result<SearchPage, StorageError> {
+        Storage::search_datasets(self, params).await
+    }
+}
+
+/// Filters + paging knobs for [`DatasetSearcher::search_datasets`].
+///
+/// All filter fields are `Option<String>` so a caller threading
+/// "no constraint" through doesn't have to remember any sentinel.
+/// `limit` is clamped storage-side (see [`Self::sanitise`]) to keep a
+/// pathological caller from asking for `u32::MAX` rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchParams {
+    /// Free-text query. Combined with tier/domain/license via AND.
+    /// Empty string is treated as "no query" so a caller doesn't
+    /// have to distinguish unset vs. blank submission.
+    pub q: Option<String>,
+    /// `domains.slug` exact match.
+    pub domain: Option<String>,
+    /// `datasets.tier` exact match (platinum / gold / silver / bronze).
+    pub tier: Option<String>,
+    /// `datasets.license` exact match (license string is opaque).
+    pub license: Option<String>,
+    /// Locale used to render `title` / `description` in each hit.
+    /// `None` defaults to `zh-TW` per CLAUDE.md's fallback chain.
+    pub locale: Option<String>,
+    /// Max rows to return. Clamped to [1, [`Self::MAX_LIMIT`]] at
+    /// the storage layer so a pathological caller can't drag the
+    /// pool into a 10⁹-row scan.
+    pub limit: u32,
+    /// Rows to skip for pagination.
+    pub offset: u32,
+}
+
+impl SearchParams {
+    /// Per DESIGN.md §9 (#1.5 DoD): "limit ≤ 100".
+    pub const MAX_LIMIT: u32 = 100;
+    /// Default `limit` when the caller doesn't supply one.
+    pub const DEFAULT_LIMIT: u32 = 20;
+
+    /// Apply storage-side guard rails: clamp `limit` into
+    /// `[1, MAX_LIMIT]`, blank-treat-as-unset `q`. Idempotent.
+    fn sanitise(mut self) -> Self {
+        let limit = if self.limit == 0 {
+            Self::DEFAULT_LIMIT
+        } else {
+            self.limit
+        };
+        self.limit = limit.min(Self::MAX_LIMIT);
+        // An empty / whitespace `q` is equivalent to "no full-text
+        // filter"; otherwise the SQL would try to `plainto_tsquery('')`
+        // which returns an empty tsquery that matches nothing — much
+        // worse than returning every dataset to a casual browser.
+        self.q = self.q.and_then(|raw| {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        });
+        self
+    }
+}
+
+/// One page of [`SearchHit`]s plus the cursor needed for the next.
+///
+/// `total` is `None` for now — counting against tsv/trigram filters
+/// is the most expensive part of FTS queries, and the MCP tool
+/// surface only needs `next_offset` for "load more". A future
+/// enhancement can add an opt-in `?with_total=true` knob.
+#[derive(Debug, Clone)]
+pub struct SearchPage {
+    pub hits: Vec<SearchHit>,
+    /// Offset to pass for the next call, if any. `None` when fewer
+    /// than `limit` rows came back (we've reached the end).
+    pub next_offset: Option<u32>,
+}
+
+/// One row of a search result, already i18n-resolved per the
+/// requested locale. Returns a flat shape (no nested JSONB) so the
+/// MCP tool can serialise it without further work.
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct SearchHit {
+    pub id: Uuid,
+    pub slug: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub domain_slug: String,
+    pub tier: String,
+    pub license: String,
+    pub publisher: Option<String>,
+}
+
 /// Lookup key for [`Storage::get_dataset`].
 #[derive(Debug, Clone)]
 pub enum DatasetKey {
@@ -314,6 +418,124 @@ impl Storage {
             versions: versions_with_files,
         }))
     }
+
+    /// Search the dataset catalog. `q` runs against the FTS `tsv`
+    /// column (populated by the `datasets_tsv_trigger`) **OR** the
+    /// trigram-indexed `searchable_text` column — combining them
+    /// gives English keyword search + CJK substring search without
+    /// requiring zhparser. The OR is fine for the planner: either
+    /// branch has a GIN index it can pick, and the row counts are
+    /// small enough that the dedup cost is irrelevant.
+    ///
+    /// Returns hits ordered by tsv rank (when `q` is set) then by
+    /// `last_modified_at` descending. The locale fallback chain is
+    /// requested-locale → `zh-TW`.
+    ///
+    /// `limit` is clamped to [`SearchParams::MAX_LIMIT`] inside
+    /// [`SearchParams::sanitise`] so a careless caller can't blow up
+    /// the connection.
+    pub async fn search_datasets(&self, params: SearchParams) -> Result<SearchPage, StorageError> {
+        let params = params.sanitise();
+        let locale = params.locale.as_deref().unwrap_or("zh-TW");
+
+        // Fetch `limit + 1` so we can tell whether there's another
+        // page without a separate COUNT(*) — the +1 row is dropped
+        // before returning to the caller.
+        let fetch = i64::from(params.limit) + 1;
+        let offset = i64::from(params.offset);
+
+        // `q` is bound TWICE: raw for `plainto_tsquery` (no LIKE
+        // semantics), and LIKE-escaped for the trigram-backed ILIKE
+        // branch. Without escaping, a `q` of `"_"` becomes a wildcard
+        // that matches every row with ≥ 1 character in
+        // `searchable_text`, and `"100%"` matches "100" + anything.
+        // Parameter binding stops SQL injection but doesn't make
+        // LIKE metacharacters literal — that's our job.
+        let q_escaped = params.q.as_deref().map(escape_like_pattern);
+
+        let hits: Vec<SearchHit> = sqlx::query_as(SEARCH_DATASETS_SQL)
+            .bind(params.q.as_deref())
+            .bind(q_escaped.as_deref())
+            .bind(params.domain.as_deref())
+            .bind(params.tier.as_deref())
+            .bind(params.license.as_deref())
+            .bind(locale)
+            .bind(fetch)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        // Compare in `usize` space (`u32 as usize` widens losslessly on
+        // 32-bit and 64-bit targets; the inverse `hits.len() as i64`
+        // can wrap on 64-bit and trips `clippy::cast_possible_wrap`).
+        let limit_usize = params.limit as usize;
+        let has_more = hits.len() > limit_usize;
+        let hits: Vec<SearchHit> = hits.into_iter().take(limit_usize).collect();
+        let next_offset = has_more.then(|| params.offset.saturating_add(params.limit));
+
+        Ok(SearchPage { hits, next_offset })
+    }
+}
+
+/// Multi-condition search. Each filter is `NULL`-skipped via the
+/// `$N::text IS NULL OR ...` idiom so one prepared statement covers
+/// every shape — no Rust-side string concatenation, no SQL injection
+/// surface. The FTS branch combines `tsv @@ ...` (works for English
+/// thanks to the `simple` config) with `searchable_text ILIKE '%q%'`
+/// (works for CJK thanks to the `pg_trgm` GIN index from
+/// `0004_datasets_search.sql`); the planner picks whichever index
+/// hits.
+///
+/// Bind layout:
+///   $1 — raw q (or NULL)        ← `plainto_tsquery` accepts it as-is
+///   $2 — LIKE-escaped q (or NULL) ← prevents `%`/`_` wildcarding
+///   $3 — domain slug filter
+///   $4 — tier filter
+///   $5 — license filter
+///   $6 — locale (always set)
+///   $7 — fetch count (limit + 1)
+///   $8 — row offset
+const SEARCH_DATASETS_SQL: &str = "\
+SELECT \
+    d.id, \
+    d.slug, \
+    coalesce(d.title_i18n->>$6::text, d.title_i18n->>'zh-TW') AS title, \
+    coalesce(d.description_i18n->>$6::text, d.description_i18n->>'zh-TW') AS description, \
+    dom.slug AS domain_slug, \
+    d.tier, \
+    d.license, \
+    d.publisher \
+FROM datasets d \
+JOIN domains dom ON dom.id = d.domain_id \
+WHERE \
+    ($1::text IS NULL OR \
+        d.tsv @@ plainto_tsquery('simple', $1::text) \
+        OR d.searchable_text ILIKE '%' || $2::text || '%') \
+    AND ($3::text IS NULL OR dom.slug = $3::text) \
+    AND ($4::text IS NULL OR d.tier = $4::text) \
+    AND ($5::text IS NULL OR d.license = $5::text) \
+ORDER BY \
+    CASE WHEN $1::text IS NULL THEN 0.0::real \
+         ELSE ts_rank(d.tsv, plainto_tsquery('simple', $1::text)) \
+    END DESC, \
+    d.last_modified_at DESC \
+LIMIT $7 OFFSET $8\
+";
+
+/// Escape LIKE/ILIKE metacharacters in `pattern` so a query string
+/// behaves as a literal substring match rather than a wildcard.
+/// Postgres's default LIKE escape character is `\` (see
+/// `LIKE ... ESCAPE '\'`), so we use `\\`, `\%`, `\_` as the escape
+/// sequences and don't need to add an `ESCAPE` clause to the SQL.
+fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Convert a `BTreeMap<String, String>` into the `jsonb` shape the
@@ -709,5 +931,339 @@ mod tests {
         m.title_i18n.remove("zh-TW");
         let err = i18n_to_jsonb(&m.title_i18n).unwrap_err();
         assert!(matches!(err, StorageError::MissingZhTw));
+    }
+
+    /// LIKE metacharacters must be escaped or the trigram branch
+    /// degenerates into a wildcard match. `%` and `_` are the famous
+    /// pair; `\` is the escape character itself and must be doubled.
+    /// Everything else passes through verbatim, including CJK code
+    /// points and emoji.
+    #[test]
+    fn escape_like_pattern_escapes_only_the_three_metacharacters() {
+        assert_eq!(escape_like_pattern(""), "");
+        assert_eq!(escape_like_pattern("plain"), "plain");
+        assert_eq!(escape_like_pattern("100%"), "100\\%");
+        assert_eq!(escape_like_pattern("_"), "\\_");
+        assert_eq!(escape_like_pattern("a\\b"), "a\\\\b");
+        assert_eq!(escape_like_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d");
+        // CJK + emoji untouched.
+        assert_eq!(escape_like_pattern("土地"), "土地");
+        assert_eq!(escape_like_pattern("🚀"), "🚀");
+    }
+
+    /// Per DESIGN.md §9 (#1.5 DoD): "limit ≤ 100". Caller-supplied
+    /// values are clamped so a tool layer that forwards an attacker-
+    /// controlled limit can't drag the pool into a 10⁹-row scan.
+    #[test]
+    fn search_params_sanitise_clamps_limit_and_blank_q() {
+        let p = SearchParams {
+            q: Some("   ".into()),
+            limit: 100_000,
+            ..Default::default()
+        }
+        .sanitise();
+        assert_eq!(p.q, None, "whitespace-only q is treated as unset");
+        assert_eq!(p.limit, SearchParams::MAX_LIMIT);
+
+        let p = SearchParams {
+            limit: 0,
+            ..Default::default()
+        }
+        .sanitise();
+        assert_eq!(
+            p.limit,
+            SearchParams::DEFAULT_LIMIT,
+            "limit=0 maps to default — no zero-page request",
+        );
+
+        let p = SearchParams {
+            q: Some("  土地  ".into()),
+            limit: 50,
+            ..Default::default()
+        }
+        .sanitise();
+        assert_eq!(p.q.as_deref(), Some("土地"), "trims around the term");
+        assert_eq!(p.limit, 50);
+    }
+
+    /// Seed three datasets across two domains so the search tests
+    /// can assert filter + relevance ordering without overlapping
+    /// `sample_metadata()`'s slug.
+    async fn seed_search_corpus(storage: &Storage) {
+        let realestate = realestate_land_id(storage).await;
+        let env: i16 = sqlx::query_as("SELECT id FROM domains WHERE slug = 'environment'")
+            .fetch_one(storage.pool())
+            .await
+            .map(|r: (i16,)| r.0)
+            .expect("environment seeded");
+
+        // 1. realestate / land prices — zh-TW + en title
+        let m1 = DatasetMetadata {
+            source_id: "land-prices".into(),
+            slug: "land-prices".into(),
+            title_i18n: BTreeMap::from([
+                ("zh-TW".to_owned(), "全國土地交易實價".to_owned()),
+                ("en".to_owned(), "Nationwide land prices".to_owned()),
+            ]),
+            description_i18n: BTreeMap::from([(
+                "zh-TW".to_owned(),
+                "全國不動產交易實價揭露".to_owned(),
+            )]),
+            license: "CC-BY-4.0".into(),
+            publisher: Some("內政部地政司".into()),
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: DateTime::parse_from_rfc3339("2026-05-01T00:00:00Z")
+                .ok()
+                .map(|d| d.with_timezone(&Utc)),
+            upstream_categories: vec!["不動產與土地".into()],
+        };
+        storage
+            .upsert_dataset(realestate, SourceId::DataGovTw, &m1)
+            .await
+            .expect("seed land-prices");
+
+        // 2. environment / air quality — title carries "land" in en
+        let m2 = DatasetMetadata {
+            source_id: "air-quality".into(),
+            slug: "air-quality".into(),
+            title_i18n: BTreeMap::from([
+                ("zh-TW".to_owned(), "空氣品質".to_owned()),
+                ("en".to_owned(), "Air quality index".to_owned()),
+            ]),
+            description_i18n: BTreeMap::from([(
+                "zh-TW".to_owned(),
+                "環保署測站每日空氣品質".to_owned(),
+            )]),
+            license: "OGDL-Taiwan-v1".into(),
+            publisher: Some("環境部".into()),
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: DateTime::parse_from_rfc3339("2026-05-15T00:00:00Z")
+                .ok()
+                .map(|d| d.with_timezone(&Utc)),
+            upstream_categories: vec!["環境".into()],
+        };
+        storage
+            .upsert_dataset(env, SourceId::DataGovTw, &m2)
+            .await
+            .expect("seed air-quality");
+
+        // 3. environment / forest land — both "land" (en) and "土地" (zh-TW)
+        let m3 = DatasetMetadata {
+            source_id: "forest-land".into(),
+            slug: "forest-land".into(),
+            title_i18n: BTreeMap::from([
+                ("zh-TW".to_owned(), "森林土地".to_owned()),
+                ("en".to_owned(), "Forest land".to_owned()),
+            ]),
+            description_i18n: BTreeMap::from([(
+                "zh-TW".to_owned(),
+                "林務局轄管森林土地".to_owned(),
+            )]),
+            license: "OGDL-Taiwan-v1".into(),
+            publisher: Some("林業及自然保育署".into()),
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+                .ok()
+                .map(|d| d.with_timezone(&Utc)),
+            upstream_categories: vec!["環境".into()],
+        };
+        storage
+            .upsert_dataset(env, SourceId::DataGovTw, &m3)
+            .await
+            .expect("seed forest-land");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_matches_english_via_tsv_and_chinese_via_trigram() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        // English keyword "land" hits via tsv on land-prices & forest-land.
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("land".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search");
+        let slugs: Vec<_> = page.hits.iter().map(|h| h.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"land-prices") && slugs.contains(&"forest-land"),
+            "english tsv hit: got {slugs:?}",
+        );
+
+        // Chinese substring "土地" matches the zh-TW titles via pg_trgm,
+        // even though `simple` config tokenises Chinese poorly.
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("土地".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search zh-TW");
+        let slugs: Vec<_> = page.hits.iter().map(|h| h.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"land-prices") && slugs.contains(&"forest-land"),
+            "zh-TW trigram hit: got {slugs:?}",
+        );
+        assert!(
+            !slugs.contains(&"air-quality"),
+            "air-quality has no 土地 anywhere",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_filters_combine_via_and() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        // domain=environment narrows the corpus to air-quality + forest-land.
+        let page = storage
+            .search_datasets(SearchParams {
+                domain: Some("environment".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search domain");
+        let mut slugs: Vec<_> = page.hits.iter().map(|h| h.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(slugs, vec!["air-quality", "forest-land"]);
+
+        // license filter further narrows to OGDL — knocks out the
+        // realestate-land row (CC-BY-4.0). Combined with domain it
+        // leaves both environment rows.
+        let page = storage
+            .search_datasets(SearchParams {
+                license: Some("OGDL-Taiwan-v1".into()),
+                domain: Some("environment".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search license + domain");
+        let mut slugs: Vec<_> = page.hits.iter().map(|h| h.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(slugs, vec!["air-quality", "forest-land"]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_locale_resolves_with_zh_tw_fallback() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        // English locale renders the en title when present.
+        let page = storage
+            .search_datasets(SearchParams {
+                domain: Some("environment".into()),
+                locale: Some("en".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search en");
+        let air = page
+            .hits
+            .iter()
+            .find(|h| h.slug == "air-quality")
+            .expect("air-quality present");
+        assert_eq!(air.title, "Air quality index");
+
+        // Unknown locale falls back to zh-TW.
+        let page = storage
+            .search_datasets(SearchParams {
+                domain: Some("environment".into()),
+                locale: Some("ja".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search ja");
+        let air = page
+            .hits
+            .iter()
+            .find(|h| h.slug == "air-quality")
+            .expect("air-quality present");
+        assert_eq!(air.title, "空氣品質", "ja missing → zh-TW fallback");
+    }
+
+    /// LIKE metacharacters in the user query must NOT act as wildcards
+    /// against `searchable_text`. Without `escape_like_pattern`, `q="_"`
+    /// would match every dataset (`_` is "any single character" in
+    /// LIKE) and `q="100%"` would match the prefix `100`. This test
+    /// pins the fix: a `_` query returns zero hits because none of the
+    /// seeded titles / descriptions / publishers contains a literal
+    /// underscore.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_treats_like_metacharacters_as_literals() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("_".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search _");
+        assert!(
+            page.hits.is_empty(),
+            "underscore must be literal, not 'any char'; got {:?}",
+            page.hits.iter().map(|h| &h.slug).collect::<Vec<_>>(),
+        );
+
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("%".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search %");
+        assert!(
+            page.hits.is_empty(),
+            "percent must be literal, not 'any string'; got {:?}",
+            page.hits.iter().map(|h| &h.slug).collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_paginates_with_next_offset() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        // limit=2 over 3 matching rows → page 1 yields 2 hits + next_offset.
+        let page1 = storage
+            .search_datasets(SearchParams {
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .expect("page 1");
+        assert_eq!(page1.hits.len(), 2);
+        assert_eq!(page1.next_offset, Some(2));
+
+        // Page 2 with the cursor returns the remaining row, no more pages.
+        let page2 = storage
+            .search_datasets(SearchParams {
+                limit: 2,
+                offset: page1.next_offset.unwrap(),
+                ..Default::default()
+            })
+            .await
+            .expect("page 2");
+        assert_eq!(page2.hits.len(), 1);
+        assert_eq!(page2.next_offset, None);
     }
 }

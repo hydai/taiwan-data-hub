@@ -5,21 +5,30 @@
 //!
 //! - [`register_data_tools`] — always-on tools that need no
 //!   database (today: `list_domains`).
-//! - [`register_db_tools`] — tools backed by a
-//!   `storage::DatasetReader`. Binaries call this only when a
-//!   `DATABASE_URL` is configured and the pool connects
-//!   successfully. A personal-mode install without Postgres simply
-//!   ships fewer tools.
+//! - [`register_db_tools`] — tools that need Postgres. Takes a
+//!   concrete [`storage::Storage`] handle and wires every tool that
+//!   implements its narrowest required trait (today: `get_dataset`
+//!   via [`storage::DatasetReader`] + `search_datasets` via
+//!   [`storage::DatasetSearcher`]). Binaries call this only when
+//!   `DATABASE_URL` is configured and the pool connects; a personal-
+//!   mode install without Postgres simply ships fewer tools.
+//! - [`register_db_tools_with`] — lower-level entry point that takes
+//!   the trait objects (`Arc<dyn DatasetReader>` etc.) directly so
+//!   tests can plug in in-memory stubs per trait without going
+//!   through `Storage`.
 
 pub mod domains;
 pub mod get_dataset;
 pub mod list_domains;
+pub mod search_datasets;
 
 pub use get_dataset::{GetDatasetTool, TOOL_NAME as GET_DATASET_TOOL_NAME};
 pub use list_domains::{ListDomainsTool, TOOL_NAME as LIST_DOMAINS_TOOL_NAME};
+pub use search_datasets::{SearchDatasetsTool, TOOL_NAME as SEARCH_DATASETS_TOOL_NAME};
 
 use mcp_core::DispatcherBuilder;
-use storage::DatasetReader;
+use std::sync::Arc;
+use storage::{DatasetReader, DatasetSearcher, Storage};
 
 /// Register every data tool that has no runtime dependencies.
 ///
@@ -34,14 +43,31 @@ pub fn register_data_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
     builder.register(ListDomainsTool::new())
 }
 
-/// Register every tool that needs a `DatasetReader` (i.e. Postgres).
-///
-/// `reader` is typed as a `storage::DatasetReader`, not a concrete
-/// `storage::Storage`, so callers can plug in a test stub when
-/// scripting an MCP scenario without a live database.
-pub fn register_db_tools<R: DatasetReader>(
+/// Register every tool backed by a Postgres-shaped storage handle.
+/// In production the binary passes a single [`Storage`] that already
+/// implements every trait we need; tests can plug in separate stubs
+/// per trait via the lower-level [`register_db_tools_with`] entry
+/// point.
+pub fn register_db_tools(builder: DispatcherBuilder, storage: Storage) -> DispatcherBuilder {
+    // Wrap once so the per-tool `Arc<dyn Trait>` re-counts cheaply
+    // instead of cloning the inner `Storage` (which is itself Arc-
+    // backed but the trait-object wrapping needs to happen at this
+    // boundary).
+    let reader: Arc<dyn DatasetReader> = Arc::new(storage.clone());
+    let searcher: Arc<dyn DatasetSearcher> = Arc::new(storage);
+    register_db_tools_with(builder, reader, searcher)
+}
+
+/// Lower-level entry point that takes the trait objects directly, so
+/// tests can mix and match in-memory stubs without going through
+/// `Storage`. Each tool needs only the narrowest trait it uses, so
+/// future additions just take another `Arc<dyn …>` parameter.
+pub fn register_db_tools_with(
     builder: DispatcherBuilder,
-    reader: R,
+    reader: Arc<dyn DatasetReader>,
+    searcher: Arc<dyn DatasetSearcher>,
 ) -> DispatcherBuilder {
-    builder.register(GetDatasetTool::new(reader))
+    builder
+        .register(GetDatasetTool::from_arc(reader))
+        .register(SearchDatasetsTool::from_arc(searcher))
 }
