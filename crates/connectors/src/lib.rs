@@ -52,11 +52,24 @@ impl std::fmt::Display for SourceId {
     }
 }
 
-/// One dataset as emitted by a connector. Field shapes mirror the
-/// `datasets` table in `migrations/0001_init.sql`. The domain mapping
-/// (assigning `domain_id`) is left to the ETL layer in #1.4b because
-/// each connector reports upstream taxonomy verbatim under
-/// [`Self::upstream_categories`].
+/// One dataset as emitted by a connector — the **connector-side subset**
+/// of what eventually lands in the `datasets` table.
+///
+/// The ETL/storage layer (#1.4b) is responsible for the columns this
+/// struct deliberately omits:
+///
+/// - `domain_id` — resolved from [`Self::upstream_categories`] against
+///   the 20-row `domains` table by the ETL mapping step.
+/// - `tier` / `tier_score` — computed by the tier classifier described
+///   in DESIGN.md §4.5.
+/// - `schema_json` / `row_count_estimate` / `cached` / `cache_path` —
+///   filled by the file-level crawl that follows the catalog crawl.
+/// - `first_seen_at` — defaulted by Postgres at insert time
+///   (`DEFAULT now()`).
+/// - `last_modified_at` — the SQL column is `NOT NULL DEFAULT now()`.
+///   This struct exposes `Option<DateTime<Utc>>` because upstream may
+///   not carry it; the ETL layer is responsible for falling back to
+///   `now()` (or the column default) when the option is `None`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatasetMetadata {
     /// Upstream identifier — unique within the source. Used together
@@ -169,7 +182,11 @@ mod trait_tests {
         // These strings are referenced by `datasets.source CHECK (... IN
         // ('data_gov_tw', 'twse', 'moea', 'cwa', 'fishery_moa',
         // 'user_contrib'))` in migrations/0001_init.sql. Drift between
-        // the SQL and the Rust enum means upserts will reject silently.
+        // the SQL and the Rust enum would surface at insert time as a
+        // CHECK-constraint violation (Postgres error code 23514) — loud,
+        // not silent — but the failure happens *after* the connector has
+        // already done a full crawl. Catching the drift here at
+        // `cargo test` lets CI fail fast.
         assert_eq!(SourceId::DataGovTw.as_str(), "data_gov_tw");
         assert_eq!(SourceId::Twse.as_str(), "twse");
         assert_eq!(SourceId::Moea.as_str(), "moea");

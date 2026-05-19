@@ -3,8 +3,11 @@
 //! Hits the upstream REST endpoint and translates each dataset into a
 //! [`DatasetMetadata`]. Pagination is offset-based; the cursor encodes
 //! `"<offset>:<limit>"`. Network errors and non-2xx responses surface as
-//! [`ConnectorError`]; malformed JSON is decoded leniently — unknown
-//! fields are ignored, missing optional fields become `None`.
+//! [`ConnectorError`]. The decoder is *schema-drift tolerant*: unknown
+//! keys are ignored and missing optional fields become `None`. JSON
+//! that isn't syntactically valid still fails decode (as a
+//! [`ConnectorError::Decode`]) — there's no recovery from a malformed
+//! response body, only from a slowly-evolving schema.
 //!
 //! This module handles #1.4a (read-only HTTP). DB writes, retry/DLQ,
 //! and `ETag` / `If-Modified-Since` are layered in later sub-issues.
