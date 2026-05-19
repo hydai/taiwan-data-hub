@@ -29,16 +29,12 @@ impl DatasetReader for Storage {
 /// caller to materialise it first).
 #[async_trait]
 pub trait DatasetCacheLookup: Send + Sync + 'static {
-    async fn dataset_cache(&self, key: DatasetKey)
-    -> Result<Option<DatasetCacheRef>, StorageError>;
+    async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError>;
 }
 
 #[async_trait]
 impl DatasetCacheLookup for Storage {
-    async fn dataset_cache(
-        &self,
-        key: DatasetKey,
-    ) -> Result<Option<DatasetCacheRef>, StorageError> {
+    async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
         Storage::dataset_cache(self, key).await
     }
 }
@@ -46,7 +42,7 @@ impl DatasetCacheLookup for Storage {
 /// What `query_rows` needs to know about a dataset to either run a
 /// query or tell the user to materialise it first.
 #[derive(Debug, Clone, FromRow, PartialEq, Eq)]
-pub struct DatasetCacheRef {
+pub struct CacheRef {
     pub id: Uuid,
     pub slug: String,
     /// `true` iff the latest version has been written to local /
@@ -459,10 +455,7 @@ impl Storage {
     /// `cached = false / cache_path = None` when the dataset exists
     /// but hasn't been materialised yet (the tool layer translates
     /// to "call `materialize_dataset` first").
-    pub async fn dataset_cache(
-        &self,
-        key: DatasetKey,
-    ) -> Result<Option<DatasetCacheRef>, StorageError> {
+    pub async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
         match key {
             DatasetKey::Id(id) => {
                 sqlx::query_as("SELECT id, slug, cached, cache_path FROM datasets WHERE id = $1")

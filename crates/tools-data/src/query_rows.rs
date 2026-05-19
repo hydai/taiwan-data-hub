@@ -46,7 +46,7 @@ use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use polars::prelude::*;
 use polars::sql::SQLContext;
 use serde_json::{Map, Value, json};
-use storage::{DatasetCacheLookup, DatasetCacheRef, DatasetKey};
+use storage::{CacheRef, DatasetCacheLookup, DatasetKey};
 use uuid::Uuid;
 
 use crate::sql_guard::{self, ALLOWED_TABLE, DEFAULT_MAX_LIMIT};
@@ -168,7 +168,7 @@ impl ToolHandler for QueryRowsTool {
 /// Resolve the file-system path Polars should scan, given a cache
 /// reference. We only support `file://` and bare-path URIs for now;
 /// `s3://` lands when #1.8 materialises to `SeaweedFS`.
-fn parquet_path_for_query(cache: &DatasetCacheRef) -> Result<PathBuf, ToolError> {
+fn parquet_path_for_query(cache: &CacheRef) -> Result<PathBuf, ToolError> {
     let (true, Some(raw)) = (cache.cached, cache.cache_path.as_deref()) else {
         return Err(ToolError::NotFound(format!(
             "dataset `{}` is not materialised yet — call `materialize_dataset` first",
@@ -482,16 +482,16 @@ mod tests {
     use storage::StorageError;
     use tempfile::TempDir;
 
-    /// In-memory `DatasetCacheLookup`. Returns the same `DatasetCacheRef`
+    /// In-memory `DatasetCacheLookup`. Returns the same `CacheRef`
     /// for every key so we can drive the tool through scan + execute
     /// without a database.
     #[derive(Clone)]
     struct StubLookup {
-        response: Arc<Mutex<Option<DatasetCacheRef>>>,
+        response: Arc<Mutex<Option<CacheRef>>>,
     }
 
     impl StubLookup {
-        fn new(response: Option<DatasetCacheRef>) -> Self {
+        fn new(response: Option<CacheRef>) -> Self {
             Self {
                 response: Arc::new(Mutex::new(response)),
             }
@@ -500,10 +500,7 @@ mod tests {
 
     #[async_trait]
     impl DatasetCacheLookup for StubLookup {
-        async fn dataset_cache(
-            &self,
-            _key: DatasetKey,
-        ) -> Result<Option<DatasetCacheRef>, StorageError> {
+        async fn dataset_cache(&self, _key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
             Ok(self.response.lock().unwrap().clone())
         }
     }
@@ -524,8 +521,8 @@ mod tests {
         (dir, path)
     }
 
-    fn cache_ref_for(path: &Path) -> DatasetCacheRef {
-        DatasetCacheRef {
+    fn cache_ref_for(path: &Path) -> CacheRef {
+        CacheRef {
             id: Uuid::nil(),
             slug: "fixture".into(),
             cached: true,
@@ -564,7 +561,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_cache_returns_not_found_with_materialize_hint() {
-        let lookup = StubLookup::new(Some(DatasetCacheRef {
+        let lookup = StubLookup::new(Some(CacheRef {
             id: Uuid::nil(),
             slug: "fixture".into(),
             cached: false,
@@ -642,7 +639,7 @@ mod tests {
     /// query params once #1.8 lands).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unsupported_cache_scheme_leaks_only_scheme() {
-        let lookup = StubLookup::new(Some(DatasetCacheRef {
+        let lookup = StubLookup::new(Some(CacheRef {
             id: Uuid::nil(),
             slug: "fixture".into(),
             cached: true,
@@ -723,7 +720,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn missing_sql_field_rejected() {
-        let lookup = StubLookup::new(Some(DatasetCacheRef {
+        let lookup = StubLookup::new(Some(CacheRef {
             id: Uuid::nil(),
             slug: "fixture".into(),
             cached: true,
