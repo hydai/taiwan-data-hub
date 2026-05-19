@@ -155,7 +155,15 @@ fn parse_max_connections(raw: Option<String>) -> Result<u32> {
 
 fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
     let mut builder = DataGovTwConnector::builder();
-    if let Ok(url) = env::var("DATA_GOV_TW_URL") {
+    // Trim + empty-skip the override so `DATA_GOV_TW_URL=` (empty
+    // value, common in Docker / k8s optional-var templating) behaves
+    // like "unset" rather than passing `""` to `base_url` and failing
+    // URL parsing at boot. Same shape as `parse_max_connections`.
+    let override_url = env::var("DATA_GOV_TW_URL")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    if let Some(url) = override_url {
         builder = builder.base_url(url);
     }
     // `.context` preserves `BuildError` as the underlying source so
