@@ -1,9 +1,14 @@
 //! cron-driven ETL worker that mirrors upstream data sources.
 //!
 //! Schedule: nightly at **02:00 Asia/Taipei** (per docs/DESIGN.md §4.4).
-//! The cron expression is interpreted in UTC because `tokio-cron-scheduler`
-//! evaluates against the system clock; the TPE-local 02:00 maps to
-//! 18:00 UTC year-round (Taiwan does not observe DST).
+//! The cron expression is hand-converted to UTC (`0 0 18 * * * *` =
+//! 18:00 UTC = 02:00 TPE; Taiwan does not observe DST) and passed
+//! through [`tokio_cron_scheduler::Job::new_async_tz`] with an explicit
+//! [`chrono::Utc`] timezone so the schedule is decoupled from whatever
+//! local timezone the host process happens to inherit. (`new_async`
+//! also defaults to `Utc` in 0.15.1, but the call site is more
+//! defensive against future API changes if it spells the timezone
+//! out.)
 //!
 //! Configuration is via environment variables:
 //!
@@ -23,6 +28,7 @@ mod driver;
 use std::env;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use connectors::data_gov_tw::DataGovTwConnector;
 use sqlx::postgres::PgPoolOptions;
 use storage::Storage;
@@ -69,7 +75,7 @@ async fn main() -> Result<()> {
     // clone — pool is Arc-backed, connector holds a reqwest::Client).
     let storage_for_cron = storage.clone();
     let connector_for_cron = connector.clone();
-    let job = Job::new_async(NIGHTLY_TPE_2AM_IN_UTC, move |_uuid, _l| {
+    let job = Job::new_async_tz(NIGHTLY_TPE_2AM_IN_UTC, Utc, move |_uuid, _l| {
         let storage = storage_for_cron.clone();
         let connector = connector_for_cron.clone();
         Box::pin(async move {

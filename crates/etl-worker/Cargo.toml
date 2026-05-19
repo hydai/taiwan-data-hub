@@ -13,14 +13,17 @@ description = "cron-driven ETL worker that mirrors upstream data sources"
 workspace = true
 
 [dependencies]
-# Direct deps only — `chrono` and `async-trait` flow in transitively
-# via the in-repo crates / `tokio-cron-scheduler` when actually needed.
-# Keep this list minimal so a future code change has to consciously opt
-# back into them rather than inheriting unused weight.
+# Direct deps only — keep this list minimal so a future code change
+# has to consciously opt back into transitive crates rather than
+# inheriting unused weight.
 connectors = { path = "../connectors" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 anyhow = { workspace = true }
+# Needed for `chrono::Utc` passed to `Job::new_async_tz` so the cron
+# schedule's timezone is explicit at the call site (not implicit in
+# `new_async`'s default).
+chrono = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
