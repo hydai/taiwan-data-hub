@@ -379,60 +379,46 @@ impl Storage {
         Ok(row.map(|r| r.0))
     }
 
-    /// Insert a new `dataset_versions` row iff `checksum` differs
-    /// from the latest version's checksum. Returns `Some(new_id)`
-    /// when a row was inserted, `None` when no change (latest's
-    /// checksum already matches).
+    /// Insert a new `dataset_versions` row iff `(dataset_id, version)`
+    /// hasn't been recorded before. Returns `Some(new_id)` when a row
+    /// was inserted, `None` when the version already exists (the
+    /// caller already recorded this exact checksum once).
     ///
     /// Used by the ETL driver to record schema-diff history per
     /// `DESIGN.md` §9 (the #1.4 Definition of Done specifies
-    /// "schema diff detection stores into `dataset_versions`"). The
-    /// caller computes the checksum from the upstream metadata;
-    /// the storage layer only needs to know whether it's *different
-    /// from last time*.
+    /// "schema diff detection stores into `dataset_versions`").
     ///
-    /// Wrapped in a transaction so the read-then-write is atomic
-    /// against concurrent crawlers (today there's only one, but
-    /// #5b adds multiple connector workers).
+    /// **Concurrency**: the `INSERT ... ON CONFLICT (dataset_id,
+    /// version) DO NOTHING` form makes this idempotent and race-safe.
+    /// Two crawlers seeing the same metadata simultaneously will both
+    /// derive the same `version` (because the caller folds the
+    /// checksum into the label); whichever transaction commits first
+    /// inserts, the other sees the conflict and silently no-ops via
+    /// `DO NOTHING`. No SELECT, no transaction, no read-skew window.
+    ///
+    /// **Caller contract**: `version` must be uniquely derived from
+    /// `checksum` so two distinct checksums never collide on the same
+    /// version label (otherwise this method would silently drop a real
+    /// change). The ETL driver's `version_string` helper builds the
+    /// label as `"<ts>#<hash_prefix>"` to guarantee this.
     pub async fn record_version_if_changed(
         &self,
         dataset_id: Uuid,
         version: &str,
         checksum: &str,
     ) -> Result<Option<Uuid>, StorageError> {
-        let mut tx = self.pool.begin().await?;
-        let latest: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT checksum FROM dataset_versions \
-             WHERE dataset_id = $1 \
-             ORDER BY fetched_at DESC, id DESC \
-             LIMIT 1",
-        )
-        .bind(dataset_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        // Latest's checksum matches → no-op. Latest's checksum is
-        // NULL or absent → write a new version (we have nothing to
-        // compare against).
-        if let Some((Some(prev_checksum),)) = latest.as_ref()
-            && prev_checksum == checksum
-        {
-            tx.commit().await?;
-            return Ok(None);
-        }
-
-        let inserted: (Uuid,) = sqlx::query_as(
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
             "INSERT INTO dataset_versions (dataset_id, version, checksum) \
              VALUES ($1, $2, $3) \
+             ON CONFLICT (dataset_id, version) DO NOTHING \
              RETURNING id",
         )
         .bind(dataset_id)
         .bind(version)
         .bind(checksum)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&self.pool)
         .await?;
-        tx.commit().await?;
-        Ok(Some(inserted.0))
+        Ok(inserted.map(|(id,)| id))
     }
 
     /// Fetch the full read view for a dataset by id or slug. Returns

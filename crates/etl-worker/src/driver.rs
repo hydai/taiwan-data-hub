@@ -291,19 +291,28 @@ fn feed_i18n_field(hasher: &mut Sha256, label: &str, map: &BTreeMap<String, Stri
 }
 
 /// Human-comparable version label for a `dataset_versions` row.
-/// Prefer upstream's `last_modified_at` (operators recognise the
-/// ISO-8601 stamp); fall back to the first 12 hex chars of the
-/// checksum when upstream doesn't carry the timestamp.
+///
+/// Always appends a checksum-prefix suffix so two distinct
+/// checksums NEVER collide on the same version label — even when
+/// upstream's `last_modified_at` stays put across a metadata edit
+/// (e.g., publisher changes but the timestamp doesn't). The
+/// `record_version_if_changed` storage call relies on this
+/// uniqueness for its `ON CONFLICT (dataset_id, version) DO NOTHING`
+/// shape: a checksum change must surface as a new version label.
+///
+/// Shapes:
+/// - `last_modified_at` present: `"2026-04-15T03:30:00+00:00#abc012345678"`
+///   (timestamp first so operators recognise the era at a glance;
+///   `#`-separated hash suffix disambiguates content)
+/// - missing: `"sha256:abc012345678"` (no good human-readable era,
+///   so the hash leads)
 fn version_string(meta: &DatasetMetadata, checksum: &str) -> String {
-    if let Some(ts) = meta.last_modified_at {
-        return ts.to_rfc3339();
-    }
-    // Strip the "sha256:" prefix and keep the next 12 hex chars —
-    // enough for human distinguishability without leaking the full
-    // hash into the version label.
     let hex = checksum.strip_prefix("sha256:").unwrap_or(checksum);
     let prefix: String = hex.chars().take(12).collect();
-    format!("sha256:{prefix}")
+    match meta.last_modified_at {
+        Some(ts) => format!("{}#{prefix}", ts.to_rfc3339()),
+        None => format!("sha256:{prefix}"),
+    }
 }
 
 /// Resolve `meta.upstream_categories` → `domain_id` via
@@ -488,13 +497,13 @@ mod tests {
     }
 
     #[test]
-    fn version_string_prefers_upstream_timestamp() {
+    fn version_string_always_includes_checksum_suffix() {
         let no_ts = fixture_meta("x", "y");
         assert!(no_ts.last_modified_at.is_none());
         let fallback = version_string(&no_ts, "sha256:abcdef0123456789");
         assert_eq!(
             fallback, "sha256:abcdef012345",
-            "fallback uses checksum prefix",
+            "no-ts shape uses sha256: prefix + 12 hex chars",
         );
 
         let mut with_ts = no_ts.clone();
@@ -505,9 +514,27 @@ mod tests {
         );
         let from_ts = version_string(&with_ts, "sha256:abcdef0123456789");
         assert_eq!(
-            from_ts, "2026-04-15T03:30:00+00:00",
-            "upstream timestamp wins over checksum fallback",
+            from_ts, "2026-04-15T03:30:00+00:00#abcdef012345",
+            "with-ts shape is `<ts>#<hashprefix>`",
         );
+    }
+
+    /// Critical concurrency-safety contract: two different checksums
+    /// with the SAME upstream timestamp must produce different version
+    /// labels. The storage layer's `ON CONFLICT (dataset_id, version)
+    /// DO NOTHING` relies on this — without it a publisher-only edit
+    /// (timestamp unchanged) would silently lose its version row.
+    #[test]
+    fn version_string_disambiguates_distinct_checksums_at_same_timestamp() {
+        let mut meta = fixture_meta("x", "y");
+        meta.last_modified_at = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-04-15T03:30:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let v1 = version_string(&meta, "sha256:aaaaaaaaaaaa1111");
+        let v2 = version_string(&meta, "sha256:bbbbbbbbbbbb2222");
+        assert_ne!(v1, v2, "same ts + different checksum must differ");
     }
 
     fn fixture_meta(slug: &str, category: &str) -> DatasetMetadata {
