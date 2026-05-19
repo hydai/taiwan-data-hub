@@ -108,32 +108,47 @@ impl ServerHandler for McpServer {
             .descriptor(&request.name)
             .is_some_and(|d| d.output_schema.is_some());
 
-        match self.dispatcher.call_tool(&request.name, args).await {
-            Ok(value) if expects_structured => {
-                // `structured_content` is a JSON Value but clients commonly
-                // assume an object. Enforce the object invariant here so
-                // tools surface a clean error rather than letting the
-                // client's schema validator reject the response.
-                if !value.is_object() {
-                    return Err(McpError::internal_error(
-                        format!(
-                            "tool `{}` declares output_schema but returned a non-object \
-                             top-level value",
-                            request.name
-                        ),
-                        None,
-                    ));
-                }
-                Ok(CallToolResult::structured(value))
+        let outcome = self.dispatcher.call_tool(&request.name, args).await;
+        package_tool_outcome(&request.name, expects_structured, outcome)
+    }
+}
+
+/// Translate a dispatcher outcome into the matching rmcp `CallToolResult`
+/// or `McpError`, applying the MCP spec rules around `output_schema`:
+///
+/// * tools that declared an output schema MUST return structured content
+///   (a JSON *object*) — anything else trips `-32603 Internal error`,
+///   surfaced from mcp-core rather than rmcp's deeper validator;
+/// * tools without an output schema render results as plain text via
+///   [`value_to_content`].
+///
+/// Factored out of `ServerHandler::call_tool` so the routing contract is
+/// unit-testable without needing to construct an rmcp `RequestContext`.
+fn package_tool_outcome(
+    name: &str,
+    expects_structured: bool,
+    outcome: Result<serde_json::Value, ToolError>,
+) -> Result<CallToolResult, McpError> {
+    match outcome {
+        Ok(value) if expects_structured => {
+            if !value.is_object() {
+                return Err(McpError::internal_error(
+                    format!(
+                        "tool `{name}` declares output_schema but returned a non-object \
+                         top-level value"
+                    ),
+                    None,
+                ));
             }
-            Ok(value) => Ok(CallToolResult::success(vec![value_to_content(value)])),
-            Err(ToolError::NotFound(name)) => Err(McpError::invalid_params(
-                format!("unknown tool: {name}"),
-                None,
-            )),
-            Err(ToolError::InvalidArguments(msg)) => Err(McpError::invalid_params(msg, None)),
-            Err(ToolError::Execution(msg)) => Err(McpError::internal_error(msg, None)),
+            Ok(CallToolResult::structured(value))
         }
+        Ok(value) => Ok(CallToolResult::success(vec![value_to_content(value)])),
+        Err(ToolError::NotFound(missing)) => Err(McpError::invalid_params(
+            format!("unknown tool: {missing}"),
+            None,
+        )),
+        Err(ToolError::InvalidArguments(msg)) => Err(McpError::invalid_params(msg, None)),
+        Err(ToolError::Execution(msg)) => Err(McpError::internal_error(msg, None)),
     }
 }
 
@@ -199,5 +214,105 @@ mod tests {
         let server = McpServer::new(Dispatcher::default(), test_impl()).with_instructions("hello");
         let info = server.get_info();
         assert_eq!(info.instructions.as_deref(), Some("hello"));
+    }
+
+    // The tests below exercise the spec-mandated routing in
+    // `package_tool_outcome` without scaffolding an rmcp `RequestContext`.
+    // Together they pin the MCP `output_schema` contract: structured
+    // tools route through `CallToolResult::structured`, unstructured
+    // tools fall back to `Content::text`, and every `ToolError` variant
+    // maps to the right JSON-RPC error code.
+
+    #[test]
+    fn structured_tool_with_object_result_routes_via_structured() {
+        let result =
+            package_tool_outcome("demo", true, Ok(json!({"answer": 42}))).expect("structured ok");
+        // CallToolResult::structured sets BOTH a JSON-stringified text
+        // fallback (for legacy clients) AND structured_content (for
+        // spec-compliant clients). Assert both are present.
+        assert_eq!(result.structured_content, Some(json!({"answer": 42})));
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn structured_tool_with_non_object_result_is_internal_error() {
+        let cases = [json!("hi"), json!([1, 2, 3]), json!(7), json!(null)];
+        for value in cases {
+            let err = package_tool_outcome("demo", true, Ok(value.clone())).unwrap_err();
+            let payload = serde_json::to_value(&err).unwrap();
+            assert_eq!(
+                payload["code"], -32603,
+                "{value} should map to internal error"
+            );
+            assert!(
+                payload["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("output_schema"),
+                "message must mention output_schema (got {})",
+                payload["message"]
+            );
+        }
+    }
+
+    #[test]
+    fn unstructured_tool_renders_string_as_plain_text() {
+        let result =
+            package_tool_outcome("demo", false, Ok(json!("hello"))).expect("unstructured ok");
+        assert!(result.structured_content.is_none());
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(
+            result.content[0].as_text().map(|t| t.text.as_str()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn unstructured_tool_renders_object_as_json_text() {
+        let result =
+            package_tool_outcome("demo", false, Ok(json!({"k": 1}))).expect("unstructured ok");
+        assert!(result.structured_content.is_none());
+        assert_eq!(
+            result.content[0].as_text().map(|t| t.text.as_str()),
+            Some(r#"{"k":1}"#),
+        );
+    }
+
+    #[test]
+    fn not_found_maps_to_invalid_params() {
+        let err = package_tool_outcome("demo", false, Err(ToolError::NotFound("missing".into())))
+            .unwrap_err();
+        let payload = serde_json::to_value(&err).unwrap();
+        assert_eq!(payload["code"], -32602);
+        assert!(payload["message"].as_str().unwrap().contains("missing"));
+    }
+
+    #[test]
+    fn invalid_arguments_maps_to_invalid_params() {
+        let err = package_tool_outcome(
+            "demo",
+            false,
+            Err(ToolError::InvalidArguments(
+                "locale must be a string".into(),
+            )),
+        )
+        .unwrap_err();
+        let payload = serde_json::to_value(&err).unwrap();
+        assert_eq!(payload["code"], -32602);
+        assert!(payload["message"].as_str().unwrap().contains("locale"));
+    }
+
+    #[test]
+    fn execution_failure_maps_to_internal_error() {
+        let err = package_tool_outcome(
+            "demo",
+            false,
+            Err(ToolError::Execution("downstream blew up".into())),
+        )
+        .unwrap_err();
+        let payload = serde_json::to_value(&err).unwrap();
+        assert_eq!(payload["code"], -32603);
+        assert!(payload["message"].as_str().unwrap().contains("downstream"));
     }
 }
