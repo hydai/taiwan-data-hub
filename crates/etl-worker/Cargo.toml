@@ -13,3 +13,30 @@ description = "cron-driven ETL worker that mirrors upstream data sources"
 workspace = true
 
 [dependencies]
+# Direct deps only — keep this list minimal so a future code change
+# has to consciously opt back into transitive crates rather than
+# inheriting unused weight.
+connectors = { path = "../connectors" }
+storage = { path = "../storage" }
+tools-data = { path = "../tools-data" }
+anyhow = { workspace = true }
+# Needed for `chrono::Utc` passed to `Job::new_async_tz` so the cron
+# schedule's timezone is explicit at the call site (not implicit in
+# `new_async`'s default).
+chrono = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# `sqlx` is already a normal dep so integration tests inherit it
+# automatically; no need to repeat it here. Listing it would also
+# invite future feature-set drift between runtime and test builds.
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+testcontainers-modules = { workspace = true }
+uuid = { workspace = true }
+wiremock = { workspace = true }
