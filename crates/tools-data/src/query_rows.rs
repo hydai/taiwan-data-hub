@@ -16,13 +16,26 @@
 //! - AST whitelist before Polars sees the SQL.
 //! - Table whitelist: SQL can reference only `current_dataset`.
 //! - `LIMIT` clamped to [`sql_guard::DEFAULT_MAX_LIMIT`] (`10_000`).
-//! - `tokio::time::timeout` so a runaway scan can't pin a worker
-//!   thread forever — see [`QUERY_TIMEOUT`].
+//! - `tokio::time::timeout` returns a deadline error to the caller
+//!   after [`QUERY_TIMEOUT`]; see the note below on the limitation
+//!   this carries.
 //!
-//! Streaming + memory limit are tracked in #1.7's follow-ups; the
-//! Polars `new_streaming` feature is on so the engine streams when it
-//! can, but enforcing a hard memory ceiling needs Polars 0.53's
-//! `engine_affinity` plumbing which is out of scope for this PR.
+//! **Timeout limitation**: `tokio::time::timeout` wrapping
+//! `spawn_blocking` is a *caller-side* deadline only. Dropping the
+//! `JoinHandle` doesn't preempt an OS thread, so the Polars query
+//! keeps running on the blocking pool until it naturally completes;
+//! the caller gets `Execution("query exceeded …")` but resources
+//! aren't reclaimed. The combination of the AST whitelist plus a
+//! 10k LIMIT bounds what work a query can be made to do in the first
+//! place, but a true hard kill needs worker-process isolation
+//! (DESIGN.md §6 calls this out as a long-term safety measure;
+//! tracked separately).
+//!
+//! **Streaming + memory limit** are tracked in #1.7's follow-ups;
+//! the Polars `new_streaming` feature is on so the engine streams
+//! when it can, but enforcing a hard memory ceiling needs Polars
+//! 0.53's `engine_affinity` plumbing which is out of scope for this
+//! PR.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -199,10 +212,16 @@ fn render_dataframe(df: &DataFrame, effective_limit: u64) -> Value {
         rows.push(Value::Array(row));
     }
 
+    // The LIMIT clamp guarantees `height <= effective_limit` for any
+    // non-degenerate query. Use `==` (not `>=`) so the contract reads
+    // "the LIMIT held back more rows" instead of an off-by-one that
+    // also fires on `LIMIT 0` (0 == 0 is the trivial empty case; the
+    // user asked for nothing and got nothing, not a truncation).
+    let truncated = effective_limit > 0 && (height as u64) == effective_limit;
     json!({
         "columns": columns,
         "rows": rows,
-        "truncated": (height as u64) >= effective_limit,
+        "truncated": truncated,
     })
 }
 
@@ -395,10 +414,10 @@ fn output_schema() -> Map<String, Value> {
             },
             "truncated": {
                 "type": "boolean",
-                "description": format!(
-                    "True if exactly {DEFAULT_MAX_LIMIT} rows came back — there may be more \
-                     upstream that the cap held back."
-                ),
+                "description":
+                    "True if the result row count equals the LIMIT that ran (whichever was \
+                     smaller: the LIMIT in the user's SQL, or the tool cap). Means there \
+                     may be more rows the LIMIT held back; raise it to see them.",
             },
         }),
     );
@@ -625,6 +644,30 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(out["truncated"], true);
+    }
+
+    /// `LIMIT 0` is a valid SQL idiom for "tell me the columns
+    /// without any rows". 0 rows == `effective_limit` 0, but we
+    /// don't want to flag truncation in this degenerate case — the
+    /// user got exactly what they asked for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn truncated_false_when_limit_zero_returns_empty() {
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let out = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 0",
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(out["rows"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            out["truncated"], false,
+            "LIMIT 0 with 0 rows is not truncation"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

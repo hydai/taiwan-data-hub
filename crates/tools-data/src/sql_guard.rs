@@ -288,14 +288,19 @@ fn enforce_limit(query: &mut Query, max_limit: u64) -> Result<u64, SqlError> {
 /// Accept only `Expr::Value(Number(...))` and refuse runtime-computed
 /// LIMIT values. A SQL like `LIMIT some_column` would compile but
 /// could blow past our cap once Polars evaluates it.
+///
+/// The error variant's `Display` already wraps the value in the
+/// "LIMIT must be a non-negative literal integer; got `…`" template,
+/// so we pass only the offending text (column reference, fraction,
+/// string literal, …) and let the variant render the prefix.
 fn clamp_limit_expr(expr: &Expr, max_limit: u64) -> Result<u64, SqlError> {
     let Expr::Value(ValueWithSpan { value, .. }) = expr else {
-        return Err(SqlError::LimitNotLiteral(format!("{expr}")));
+        return Err(SqlError::LimitNotLiteral(expr.to_string()));
     };
     let n = match value {
-        Value::Number(raw, _) => raw.parse::<u64>().map_err(|_| {
-            SqlError::LimitNotLiteral(format!("LIMIT must be a non-negative integer; got `{raw}`"))
-        })?,
+        Value::Number(raw, _) => raw
+            .parse::<u64>()
+            .map_err(|_| SqlError::LimitNotLiteral(raw.clone()))?,
         _ => return Err(SqlError::LimitNotLiteral(format!("{value:?}"))),
     };
     Ok(n.min(max_limit))
