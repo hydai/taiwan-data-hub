@@ -207,24 +207,45 @@ fn read_optional_env(name: &str) -> Result<Option<String>> {
 /// (the README still lists Windows in the Quickstart).
 ///
 /// Unix gets the rich SIGTERM/SIGINT pair (so `docker stop` SIGTERM
-/// drains cleanly). Other platforms fall back to `ctrl_c()` which
-/// covers SIGINT-equivalent shutdown without pulling in
-/// `tokio::signal::unix` (which only compiles on Unix).
+/// drains cleanly). If installing those handlers fails — possible
+/// inside containers that have dropped `CAP_KILL` or similarly
+/// restricted capabilities — we log the failure and fall back to
+/// `ctrl_c()` so the worker still has *some* shutdown signal rather
+/// than crashing at boot. The non-Unix path always uses `ctrl_c()`.
+///
+/// `ctrl_c()` itself returns a `Result`; an error there is rare
+/// (e.g. the signal stream became unhealthy) but we surface it as
+/// an error log and still proceed to shutdown — keeping the worker
+/// hanging on a broken watcher would be worse than exiting cleanly.
 async fn wait_for_shutdown() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM");
-        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT");
-        tokio::select! {
-            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
-            _ = sigint.recv() => tracing::info!("received SIGINT"),
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(mut sigterm), Ok(mut sigint)) => {
+                tokio::select! {
+                    _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+                    _ = sigint.recv() => tracing::info!("received SIGINT"),
+                }
+                return;
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not install Unix signal handlers; falling back to Ctrl-C",
+                );
+            }
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("received Ctrl-C");
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!("received Ctrl-C"),
+        Err(e) => tracing::error!(
+            error = %e,
+            "ctrl_c watcher failed; treating as shutdown to exit cleanly",
+        ),
     }
 }
 
