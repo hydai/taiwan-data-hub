@@ -174,10 +174,20 @@ impl Storage {
     /// is small (a dataset has tens of versions max, each with a
     /// handful of files) and three planning-friendly queries beat
     /// a single mega-statement that grows with every column added
-    /// to the schema. Wrapped in a transaction for snapshot
-    /// consistency.
+    /// to the schema.
+    ///
+    /// Wrapped in a `REPEATABLE READ` transaction so the three
+    /// statements observe one snapshot. Postgres's default
+    /// `READ COMMITTED` takes a new snapshot per statement, which
+    /// would let `dataset_versions` and `dataset_files` reflect
+    /// commits that landed between the initial dataset lookup and
+    /// the join — including a file row whose parent version was
+    /// already dropped.
     pub async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
 
         let dataset: Option<DatasetRow> = match &key {
             DatasetKey::Id(id) => {
