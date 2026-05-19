@@ -177,11 +177,31 @@ impl SourceConnector for DataGovTwConnector {
 
         let total = result.count;
         let fetched = offset.saturating_add(items.len() as u64);
+        // An empty page ALWAYS terminates the walk, regardless of what
+        // `total` claims. Without this guard, upstream returning
+        // `count: t` with `results: []` while `offset < t` (the
+        // upstream inconsistency case) would re-emit the same cursor
+        // and trap callers in an infinite loop. Log a warning so the
+        // inconsistency is at least visible in production logs.
+        if items.is_empty() {
+            if let Some(t) = total {
+                if offset < t {
+                    tracing::warn!(
+                        offset,
+                        total = t,
+                        "upstream returned empty page while count > offset; terminating walk to avoid infinite loop",
+                    );
+                }
+            }
+            return Ok(Page {
+                items,
+                next: None,
+                total,
+            });
+        }
         let next = match total {
             Some(t) if fetched < t => Some(Cursor::new(format!("{fetched}:{limit}"))),
-            // When total is unknown we keep paging until upstream returns
-            // an empty page; an empty `items` therefore signals end-of-stream.
-            None if !items.is_empty() => Some(Cursor::new(format!("{fetched}:{limit}"))),
+            None => Some(Cursor::new(format!("{fetched}:{limit}"))),
             _ => None,
         };
 
@@ -481,6 +501,35 @@ mod tests {
         let p1 = c.list_datasets(Some(next)).await.expect("p1");
         assert_eq!(p1.items.len(), 1);
         assert!(p1.next.is_none(), "final page must terminate the walk");
+    }
+
+    /// Regression for Copilot PR #94 round 4: if upstream lies about
+    /// the total (`count: 100`) and returns an empty page mid-walk,
+    /// our previous logic re-emitted the same cursor — `fetched ==
+    /// offset` so `fetched < total` stayed true forever. The fix
+    /// treats an empty page as terminal regardless of what `total`
+    /// claims.
+    #[tokio::test]
+    async fn empty_page_terminates_even_when_total_claims_more() {
+        let server = MockServer::start().await;
+        // Upstream claims count=100 but returns an empty page for offset=50.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(query_param("offset", "50"))
+            .and(query_param("limit", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_envelope(100, &[])))
+            .mount(&server)
+            .await;
+
+        let page = connector(&server)
+            .list_datasets(Some(Cursor::new("50:2")))
+            .await
+            .expect("ok");
+        assert!(page.items.is_empty());
+        assert!(
+            page.next.is_none(),
+            "empty page must terminate even when total > offset",
+        );
     }
 
     #[tokio::test]
