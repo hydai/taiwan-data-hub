@@ -196,9 +196,10 @@ fn parquet_path_for_query(cache: &DatasetCacheRef) -> Result<PathBuf, ToolError>
     }
 }
 
-/// Pull the `scheme` part out of a `scheme://...` URI without
-/// returning a borrow that ties the result to the input. Returns
-/// `None` if the input doesn't look like a URI (no `://`).
+/// Pull the `scheme` part out of a `scheme://...` URI. Returns a
+/// borrow tied to the input's lifetime — callers that need to keep
+/// the scheme around past the input's drop should `.to_owned()`.
+/// Returns `None` if the input doesn't look like a URI (no `://`).
 fn extract_uri_scheme(uri: &str) -> Option<&str> {
     uri.split_once("://").map(|(scheme, _)| scheme)
 }
