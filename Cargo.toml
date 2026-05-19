@@ -56,7 +56,11 @@ tokio-cron-scheduler = "0.15.1"
 # `sql` for SQLContext, `new_streaming` to bound memory on large
 # scans (the old `streaming` feature was renamed in 0.53).
 polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming"] }
-sqlparser = { version = "0.61.0", features = ["visitor"] }
+# Aligned with the version `polars-sql` 0.53 transitively pulls in.
+# Pinning a newer release would double-compile sqlparser; the API
+# surface we use (`Visit`/`Visitor`/`LimitClause`/`TableFactor`) is
+# stable across the 0.60/0.61 boundary, so the dedup wins.
+sqlparser = { version = "0.60.0", features = ["visitor"] }
 tempfile = "3.13"
 
 [workspace.lints.rust]

@@ -52,7 +52,7 @@ pub struct DatasetCacheRef {
     /// `true` iff the latest version has been written to local /
     /// object cache and `cache_path` is non-null.
     pub cached: bool,
-    /// Storage URI (`file:// `, `s3://`, …) for the cached Parquet.
+    /// Storage URI (`file://`, `s3://`, …) for the cached Parquet.
     /// `None` until #1.8 materialises it.
     pub cache_path: Option<String>,
 }
