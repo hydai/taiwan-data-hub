@@ -444,8 +444,18 @@ impl Storage {
         let fetch = i64::from(params.limit) + 1;
         let offset = i64::from(params.offset);
 
+        // `q` is bound TWICE: raw for `plainto_tsquery` (no LIKE
+        // semantics), and LIKE-escaped for the trigram-backed ILIKE
+        // branch. Without escaping, a `q` of `"_"` becomes a wildcard
+        // that matches every row with ≥ 1 character in
+        // `searchable_text`, and `"100%"` matches "100" + anything.
+        // Parameter binding stops SQL injection but doesn't make
+        // LIKE metacharacters literal — that's our job.
+        let q_escaped = params.q.as_deref().map(escape_like_pattern);
+
         let hits: Vec<SearchHit> = sqlx::query_as(SEARCH_DATASETS_SQL)
             .bind(params.q.as_deref())
+            .bind(q_escaped.as_deref())
             .bind(params.domain.as_deref())
             .bind(params.tier.as_deref())
             .bind(params.license.as_deref())
@@ -475,12 +485,22 @@ impl Storage {
 /// (works for CJK thanks to the `pg_trgm` GIN index from
 /// `0004_datasets_search.sql`); the planner picks whichever index
 /// hits.
+///
+/// Bind layout:
+///   $1 — raw q (or NULL)        ← `plainto_tsquery` accepts it as-is
+///   $2 — LIKE-escaped q (or NULL) ← prevents `%`/`_` wildcarding
+///   $3 — domain slug filter
+///   $4 — tier filter
+///   $5 — license filter
+///   $6 — locale (always set)
+///   $7 — fetch count (limit + 1)
+///   $8 — row offset
 const SEARCH_DATASETS_SQL: &str = "\
 SELECT \
     d.id, \
     d.slug, \
-    coalesce(d.title_i18n->>$5::text, d.title_i18n->>'zh-TW') AS title, \
-    coalesce(d.description_i18n->>$5::text, d.description_i18n->>'zh-TW') AS description, \
+    coalesce(d.title_i18n->>$6::text, d.title_i18n->>'zh-TW') AS title, \
+    coalesce(d.description_i18n->>$6::text, d.description_i18n->>'zh-TW') AS description, \
     dom.slug AS domain_slug, \
     d.tier, \
     d.license, \
@@ -490,17 +510,33 @@ JOIN domains dom ON dom.id = d.domain_id \
 WHERE \
     ($1::text IS NULL OR \
         d.tsv @@ plainto_tsquery('simple', $1::text) \
-        OR d.searchable_text ILIKE '%' || $1::text || '%') \
-    AND ($2::text IS NULL OR dom.slug = $2::text) \
-    AND ($3::text IS NULL OR d.tier = $3::text) \
-    AND ($4::text IS NULL OR d.license = $4::text) \
+        OR d.searchable_text ILIKE '%' || $2::text || '%') \
+    AND ($3::text IS NULL OR dom.slug = $3::text) \
+    AND ($4::text IS NULL OR d.tier = $4::text) \
+    AND ($5::text IS NULL OR d.license = $5::text) \
 ORDER BY \
     CASE WHEN $1::text IS NULL THEN 0.0::real \
          ELSE ts_rank(d.tsv, plainto_tsquery('simple', $1::text)) \
     END DESC, \
     d.last_modified_at DESC \
-LIMIT $6 OFFSET $7\
+LIMIT $7 OFFSET $8\
 ";
+
+/// Escape LIKE/ILIKE metacharacters in `pattern` so a query string
+/// behaves as a literal substring match rather than a wildcard.
+/// Postgres's default LIKE escape character is `\` (see
+/// `LIKE ... ESCAPE '\'`), so we use `\\`, `\%`, `\_` as the escape
+/// sequences and don't need to add an `ESCAPE` clause to the SQL.
+fn escape_like_pattern(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
 
 /// Convert a `BTreeMap<String, String>` into the `jsonb` shape the
 /// schema CHECK constraints expect (`{"zh-TW": "...", "en": "..."}`).
@@ -897,6 +933,24 @@ mod tests {
         assert!(matches!(err, StorageError::MissingZhTw));
     }
 
+    /// LIKE metacharacters must be escaped or the trigram branch
+    /// degenerates into a wildcard match. `%` and `_` are the famous
+    /// pair; `\` is the escape character itself and must be doubled.
+    /// Everything else passes through verbatim, including CJK code
+    /// points and emoji.
+    #[test]
+    fn escape_like_pattern_escapes_only_the_three_metacharacters() {
+        assert_eq!(escape_like_pattern(""), "");
+        assert_eq!(escape_like_pattern("plain"), "plain");
+        assert_eq!(escape_like_pattern("100%"), "100\\%");
+        assert_eq!(escape_like_pattern("_"), "\\_");
+        assert_eq!(escape_like_pattern("a\\b"), "a\\\\b");
+        assert_eq!(escape_like_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d");
+        // CJK + emoji untouched.
+        assert_eq!(escape_like_pattern("土地"), "土地");
+        assert_eq!(escape_like_pattern("🚀"), "🚀");
+    }
+
     /// Per DESIGN.md §9 (#1.5 DoD): "limit ≤ 100". Caller-supplied
     /// values are clamped so a tool layer that forwards an attacker-
     /// controlled limit can't drag the pool into a 10⁹-row scan.
@@ -1139,6 +1193,48 @@ mod tests {
             .find(|h| h.slug == "air-quality")
             .expect("air-quality present");
         assert_eq!(air.title, "空氣品質", "ja missing → zh-TW fallback");
+    }
+
+    /// LIKE metacharacters in the user query must NOT act as wildcards
+    /// against `searchable_text`. Without `escape_like_pattern`, `q="_"`
+    /// would match every dataset (`_` is "any single character" in
+    /// LIKE) and `q="100%"` would match the prefix `100`. This test
+    /// pins the fix: a `_` query returns zero hits because none of the
+    /// seeded titles / descriptions / publishers contains a literal
+    /// underscore.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn search_treats_like_metacharacters_as_literals() {
+        let (storage, _container) = fresh_storage().await;
+        seed_search_corpus(&storage).await;
+
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("_".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search _");
+        assert!(
+            page.hits.is_empty(),
+            "underscore must be literal, not 'any char'; got {:?}",
+            page.hits.iter().map(|h| &h.slug).collect::<Vec<_>>(),
+        );
+
+        let page = storage
+            .search_datasets(SearchParams {
+                q: Some("%".into()),
+                limit: 20,
+                ..Default::default()
+            })
+            .await
+            .expect("search %");
+        assert!(
+            page.hits.is_empty(),
+            "percent must be literal, not 'any string'; got {:?}",
+            page.hits.iter().map(|h| &h.slug).collect::<Vec<_>>(),
+        );
     }
 
     #[tokio::test]
