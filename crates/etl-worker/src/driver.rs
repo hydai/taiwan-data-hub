@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use connectors::{DatasetMetadata, Page, SourceConnector};
+use connectors::{ConditionalCues, DatasetMetadata, ListResponse, Page, SourceConnector};
 use sha2::{Digest, Sha256};
 use storage::DatasetWriter;
 use tools_data::domains;
@@ -38,6 +38,12 @@ pub struct CrawlSummary {
     /// only writes versions when upstream actually changes.
     pub versions_recorded: u64,
     pub pages: u32,
+    /// `true` iff the conditional fetch short-circuited the crawl
+    /// (server returned 304 Not Modified to our `If-None-Match` /
+    /// `If-Modified-Since`). All other counters are zero in that
+    /// case; the summary INFO line still fires so operators see the
+    /// "no work to do" signal.
+    pub not_modified: bool,
 }
 
 /// Outcome of resolving one dataset's upstream categories against the
@@ -90,6 +96,17 @@ where
     // crawl. The aggregate count surfaces in the summary INFO line.
     let mut skip_warn_remaining: u32 = SKIP_WARN_BUDGET;
 
+    // Load the persisted ETag / Last-Modified for this source so the
+    // FIRST connector request can send `If-None-Match` /
+    // `If-Modified-Since`. None on first-ever crawl → unconditional
+    // fetch.
+    let stored = storage.get_source_state(source).await?;
+    let mut cues = cues_from_stored(stored.as_ref());
+    // Fresh cues come from the FIRST 200 of the walk and get
+    // persisted at the end. None means "we never saw a 200 this
+    // pass" (e.g. error before first page completed).
+    let mut fresh_cues: Option<ConditionalCues> = None;
+
     loop {
         // Increment AFTER a successful page fetch so the counter
         // reflects pages we actually completed. If `list_datasets`
@@ -101,7 +118,29 @@ where
         // underlying `String`) into the call rather than cloning it
         // per page; `cursor` is unconditionally re-assigned below
         // from `next`, so the temporary `None` is irrelevant.
-        let Page { items, next, total } = connector.list_datasets(cursor.take()).await?;
+        let outcome = connector.list_datasets(cursor.take(), &cues).await?;
+        let Page { items, next, total } = match outcome {
+            ListResponse::Modified {
+                page,
+                fresh_cues: new_cues,
+            } => {
+                // Drop the loaded cues now that we have a fresh
+                // page — subsequent paginated calls go through with
+                // default cues (the connector ignores them anyway on
+                // mid-walk pages, but explicit-is-better-than-implicit).
+                cues = ConditionalCues::default();
+                // The FIRST 200 of the walk gives us the cues to
+                // persist after the crawl completes. Subsequent
+                // pages also carry headers but those reflect
+                // page-specific ETags we shouldn't replay.
+                fresh_cues.get_or_insert(new_cues);
+                page
+            }
+            ListResponse::NotModified => {
+                return short_circuit_not_modified(storage, source, stored.as_ref(), &mut summary)
+                    .await;
+            }
+        };
         summary.pages = summary.pages.saturating_add(1);
         // `?total` renders the `Option<u64>` via Debug — `None` /
         // `Some(123)` — without allocating a fallback `String` per
@@ -115,90 +154,39 @@ where
         );
 
         for meta in items {
-            match resolve_domain_id(storage, &meta, &mut domain_cache).await? {
-                DomainResolution::Mapped(domain_id) => {
-                    let dataset_id = storage.upsert_dataset(domain_id, source, &meta).await?;
-                    summary.upserted = summary.upserted.saturating_add(1);
-
-                    // Schema-diff recording (#1.4d). Compute a stable
-                    // checksum over the metadata fields whose change
-                    // we care about and derive a version label from
-                    // it. The storage layer dedupes on
-                    // `(dataset_id, version)` via `ON CONFLICT DO
-                    // NOTHING`, so a no-op return means "this exact
-                    // version has already been recorded for this
-                    // dataset" — usually because the metadata is
-                    // unchanged since last crawl, OR because upstream
-                    // oscillated back to a state we've seen before.
-                    // Steady-state crawls land near zero increments.
-                    let checksum = metadata_checksum(&meta);
-                    let version = version_string(&meta, &checksum);
-                    match storage
-                        .record_version_if_changed(dataset_id, &version, &checksum)
-                        .await?
-                    {
-                        Some(_) => {
-                            summary.versions_recorded = summary.versions_recorded.saturating_add(1);
-                        }
-                        None => {
-                            tracing::trace!(
-                                slug = %meta.slug,
-                                "version already recorded for this dataset",
-                            );
-                        }
-                    }
-                }
-                DomainResolution::NoMapping => {
-                    // Only the FIRST WARN this pass carries the
-                    // "budget exists" explanation; subsequent budgeted
-                    // WARNs are concise. Otherwise WARN #2..N would
-                    // each claim "further skips log at DEBUG" while
-                    // there are still WARNs coming, which is false
-                    // for every line except the last.
-                    if skip_warn_remaining == SKIP_WARN_BUDGET {
-                        tracing::warn!(
-                            slug = %meta.slug,
-                            categories = ?meta.upstream_categories,
-                            skip_warn_budget = SKIP_WARN_BUDGET,
-                            "no domain match — dataset skipped (WARNs bounded per pass; further skips beyond the budget log at DEBUG)",
-                        );
-                        skip_warn_remaining -= 1;
-                    } else if skip_warn_remaining > 0 {
-                        tracing::warn!(
-                            slug = %meta.slug,
-                            categories = ?meta.upstream_categories,
-                            "no domain match — dataset skipped",
-                        );
-                        skip_warn_remaining -= 1;
-                    } else {
-                        tracing::debug!(
-                            slug = %meta.slug,
-                            categories = ?meta.upstream_categories,
-                            "no domain match — dataset skipped",
-                        );
-                    }
-                    summary.skipped_no_domain = summary.skipped_no_domain.saturating_add(1);
-                }
-                DomainResolution::SeedMissing => {
-                    // `resolve_domain_id` already emitted the one-shot
-                    // WARN naming the offending slug (and cached the
-                    // miss so subsequent datasets routing to it don't
-                    // re-warn). Per-dataset trace stays at DEBUG so a
-                    // `RUST_LOG=debug` run can still surface the full
-                    // affected list without flooding default logs.
-                    tracing::debug!(
-                        slug = %meta.slug,
-                        "domain mapped but DB seed missing — dataset skipped",
-                    );
-                    summary.skipped_no_seed = summary.skipped_no_seed.saturating_add(1);
-                }
-            }
+            let resolution = resolve_domain_id(storage, &meta, &mut domain_cache).await?;
+            process_dataset(
+                storage,
+                source,
+                &meta,
+                resolution,
+                &mut summary,
+                &mut skip_warn_remaining,
+            )
+            .await?;
         }
 
         cursor = next;
         if cursor.is_none() {
             break;
         }
+    }
+
+    // Persist the fresh cues from the FIRST page so the next crawl
+    // can send conditional headers. `fresh_cues` is only `None` if
+    // the loop returned `Page { next: None }` on the very first iter
+    // without entering the `Modified` arm — which is impossible
+    // because we always enter exactly one of the two arms. Belt-and-
+    // braces: if it IS `None`, skip the put rather than blanking the
+    // existing row.
+    if let Some(cues) = fresh_cues {
+        storage
+            .put_source_state(
+                source,
+                cues.if_none_match.as_deref(),
+                cues.if_modified_since.as_deref(),
+            )
+            .await?;
     }
 
     tracing::info!(
@@ -208,9 +196,137 @@ where
         skipped_no_seed = summary.skipped_no_seed,
         versions_recorded = summary.versions_recorded,
         pages = summary.pages,
+        not_modified = summary.not_modified,
         "crawl pass complete"
     );
     Ok(summary)
+}
+
+/// Build the conditional-fetch cues to send on the first page of a
+/// crawl from the persisted `source_http_state` row. Returns the
+/// `Default` (no headers) when this source has no prior state.
+fn cues_from_stored(stored: Option<&storage::SourceHttpState>) -> ConditionalCues {
+    ConditionalCues {
+        if_none_match: stored.and_then(|s| s.etag.clone()),
+        if_modified_since: stored.and_then(|s| s.last_modified.clone()),
+    }
+}
+
+/// Handle the 304 path: refresh `last_seen_at` (keeping the existing
+/// cues — server says nothing changed) and return a summary flagged
+/// as `not_modified`. Extracted so `run_one_pass` stays under the
+/// clippy `too_many_lines` cap.
+async fn short_circuit_not_modified<W: DatasetWriter>(
+    storage: &W,
+    source: connectors::SourceId,
+    stored: Option<&storage::SourceHttpState>,
+    summary: &mut CrawlSummary,
+) -> Result<CrawlSummary, CrawlError> {
+    tracing::info!(
+        source = %source,
+        "upstream reported 304 Not Modified; skipping crawl",
+    );
+    summary.not_modified = true;
+    let etag = stored.and_then(|s| s.etag.as_deref());
+    let last_modified = stored.and_then(|s| s.last_modified.as_deref());
+    storage
+        .put_source_state(source, etag, last_modified)
+        .await?;
+    Ok(*summary)
+}
+
+/// Apply one dataset's resolution to storage + summary. Extracted
+/// from `run_one_pass`'s inner loop so the parent stays under the
+/// clippy `too_many_lines` cap and the three branches read as one
+/// per-dataset story.
+async fn process_dataset<W: DatasetWriter>(
+    storage: &W,
+    source: connectors::SourceId,
+    meta: &DatasetMetadata,
+    resolution: DomainResolution,
+    summary: &mut CrawlSummary,
+    skip_warn_remaining: &mut u32,
+) -> Result<(), CrawlError> {
+    match resolution {
+        DomainResolution::Mapped(domain_id) => {
+            let dataset_id = storage.upsert_dataset(domain_id, source, meta).await?;
+            summary.upserted = summary.upserted.saturating_add(1);
+
+            // Schema-diff recording (#1.4d). Compute a stable
+            // checksum over the metadata fields whose change we
+            // care about and derive a version label from it. The
+            // storage layer dedupes on `(dataset_id, version)` via
+            // `ON CONFLICT DO NOTHING`, so a no-op return means
+            // "this exact version has already been recorded for
+            // this dataset" — usually because the metadata is
+            // unchanged since last crawl, OR because upstream
+            // oscillated back to a state we've seen before.
+            // Steady-state crawls land near zero increments.
+            let checksum = metadata_checksum(meta);
+            let version = version_string(meta, &checksum);
+            match storage
+                .record_version_if_changed(dataset_id, &version, &checksum)
+                .await?
+            {
+                Some(_) => {
+                    summary.versions_recorded = summary.versions_recorded.saturating_add(1);
+                }
+                None => {
+                    tracing::trace!(
+                        slug = %meta.slug,
+                        "version already recorded for this dataset",
+                    );
+                }
+            }
+        }
+        DomainResolution::NoMapping => {
+            log_no_mapping_skip(meta, skip_warn_remaining);
+            summary.skipped_no_domain = summary.skipped_no_domain.saturating_add(1);
+        }
+        DomainResolution::SeedMissing => {
+            // `resolve_domain_id` already emitted the one-shot WARN
+            // naming the offending slug (and cached the miss so
+            // subsequent datasets routing to it don't re-warn).
+            // Per-dataset trace stays at DEBUG so a `RUST_LOG=debug`
+            // run can still surface the full affected list without
+            // flooding default logs.
+            tracing::debug!(
+                slug = %meta.slug,
+                "domain mapped but DB seed missing — dataset skipped",
+            );
+            summary.skipped_no_seed = summary.skipped_no_seed.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+/// Bounded-rate WARN logging for the no-domain-match case. Only the
+/// FIRST WARN this pass carries the "budget exists" explanation;
+/// subsequent budgeted WARNs are concise; everything past the budget
+/// falls to DEBUG.
+fn log_no_mapping_skip(meta: &DatasetMetadata, skip_warn_remaining: &mut u32) {
+    if *skip_warn_remaining == SKIP_WARN_BUDGET {
+        tracing::warn!(
+            slug = %meta.slug,
+            categories = ?meta.upstream_categories,
+            skip_warn_budget = SKIP_WARN_BUDGET,
+            "no domain match — dataset skipped (WARNs bounded per pass; further skips beyond the budget log at DEBUG)",
+        );
+        *skip_warn_remaining -= 1;
+    } else if *skip_warn_remaining > 0 {
+        tracing::warn!(
+            slug = %meta.slug,
+            categories = ?meta.upstream_categories,
+            "no domain match — dataset skipped",
+        );
+        *skip_warn_remaining -= 1;
+    } else {
+        tracing::debug!(
+            slug = %meta.slug,
+            categories = ?meta.upstream_categories,
+            "no domain match — dataset skipped",
+        );
+    }
 }
 
 /// Canonical fingerprint over the metadata fields that matter for
@@ -391,8 +507,22 @@ mod tests {
 
     /// Docker-free `SourceConnector` that yields a pre-baked queue of
     /// pages and panics if the driver requests more than were set up.
+    /// Stub connector that yields a pre-baked queue of pages.
+    /// `not_modified_first` lets a test inject a 304 response in front
+    /// of the page queue — handy for exercising the conditional-fetch
+    /// short-circuit without a real wiremock setup.
     struct StubConnector {
         pages: Mutex<VecDeque<Page>>,
+        not_modified_first: Mutex<bool>,
+    }
+
+    impl StubConnector {
+        fn new(pages: VecDeque<Page>) -> Self {
+            Self {
+                pages: Mutex::new(pages),
+                not_modified_first: Mutex::new(false),
+            }
+        }
     }
 
     #[async_trait]
@@ -400,13 +530,26 @@ mod tests {
         fn source_id(&self) -> SourceId {
             SourceId::DataGovTw
         }
-        async fn list_datasets(&self, _cursor: Option<Cursor>) -> Result<Page, ConnectorError> {
-            Ok(self
-                .pages
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("stub connector exhausted — test asked for more pages than were set up"))
+        async fn list_datasets(
+            &self,
+            _cursor: Option<Cursor>,
+            _cues: &ConditionalCues,
+        ) -> Result<ListResponse, ConnectorError> {
+            // Synthetic 304 path: pop the flag, return NotModified
+            // once. Subsequent calls fall through to the page queue.
+            let mut nm = self.not_modified_first.lock().unwrap();
+            if *nm {
+                *nm = false;
+                return Ok(ListResponse::NotModified);
+            }
+            let page =
+                self.pages.lock().unwrap().pop_front().expect(
+                    "stub connector exhausted — test asked for more pages than were set up",
+                );
+            Ok(ListResponse::Modified {
+                page,
+                fresh_cues: ConditionalCues::default(),
+            })
         }
     }
 
@@ -430,7 +573,15 @@ mod tests {
         dataset_ids: Mutex<HashMap<String, Uuid>>,
         /// Versions we've seen — mirrors UNIQUE (`dataset_id`, version).
         seen_versions: Mutex<HashSet<(Uuid, String)>>,
+        /// Per-source HTTP cache state, in-memory equivalent of the
+        /// `source_http_state` table.
+        source_state: Mutex<HashMap<SourceId, StubSourceCues>>,
     }
+
+    /// `(etag, last_modified)` payload kept under `source_state` —
+    /// extracted into an alias so the field signature stays readable
+    /// and clippy's `type_complexity` lint is satisfied.
+    type StubSourceCues = (Option<String>, Option<String>);
 
     #[async_trait]
     impl DatasetWriter for StubStorage {
@@ -467,6 +618,30 @@ mod tests {
             } else {
                 Ok(None)
             }
+        }
+        async fn get_source_state(
+            &self,
+            source: SourceId,
+        ) -> Result<Option<storage::SourceHttpState>, StorageError> {
+            let map = self.source_state.lock().unwrap();
+            Ok(map.get(&source).map(|(etag, lm)| storage::SourceHttpState {
+                source: source.as_str().to_owned(),
+                etag: etag.clone(),
+                last_modified: lm.clone(),
+                last_seen_at: chrono::Utc::now(),
+            }))
+        }
+        async fn put_source_state(
+            &self,
+            source: SourceId,
+            etag: Option<&str>,
+            last_modified: Option<&str>,
+        ) -> Result<(), StorageError> {
+            self.source_state.lock().unwrap().insert(
+                source,
+                (etag.map(str::to_owned), last_modified.map(str::to_owned)),
+            );
+            Ok(())
         }
     }
 
@@ -578,33 +753,32 @@ mod tests {
     /// shot, so the full counter contract is locked into CI.
     #[tokio::test]
     async fn run_one_pass_classifies_mapped_seed_missing_and_no_mapping() {
-        let connector = StubConnector {
-            pages: Mutex::new(VecDeque::from([
-                Page {
-                    items: vec![
-                        // Maps to "environment", which IS in stub domains → Mapped.
-                        fixture_meta("air-quality", "環境"),
-                        // Maps to "education-research", NOT in stub domains → SeedMissing.
-                        fixture_meta("school-roster", "教育與研究"),
-                    ],
-                    next: Some(Cursor::new("2:2")),
-                    total: Some(3),
-                },
-                Page {
-                    items: vec![
-                        // No upstream category matches any domain → NoMapping.
-                        fixture_meta("mystery", "Something Off-Taxonomy"),
-                    ],
-                    next: None,
-                    total: Some(3),
-                },
-            ])),
-        };
+        let connector = StubConnector::new(VecDeque::from([
+            Page {
+                items: vec![
+                    // Maps to "environment", which IS in stub domains → Mapped.
+                    fixture_meta("air-quality", "環境"),
+                    // Maps to "education-research", NOT in stub domains → SeedMissing.
+                    fixture_meta("school-roster", "教育與研究"),
+                ],
+                next: Some(Cursor::new("2:2")),
+                total: Some(3),
+            },
+            Page {
+                items: vec![
+                    // No upstream category matches any domain → NoMapping.
+                    fixture_meta("mystery", "Something Off-Taxonomy"),
+                ],
+                next: None,
+                total: Some(3),
+            },
+        ]));
         let storage = StubStorage {
             domains: HashMap::from([("environment".to_owned(), 7_i16)]),
             upserts: Mutex::new(Vec::new()),
             dataset_ids: Mutex::new(HashMap::new()),
             seen_versions: Mutex::new(HashSet::new()),
+            source_state: Mutex::new(HashMap::new()),
         };
 
         let summary = run_one_pass(&connector, &storage).await.expect("crawl ok");
@@ -643,25 +817,67 @@ mod tests {
             upserts: Mutex::new(Vec::new()),
             dataset_ids: Mutex::new(HashMap::new()),
             seen_versions: Mutex::new(HashSet::new()),
+            source_state: Mutex::new(HashMap::new()),
         };
 
         // First pass — version row recorded.
-        let connector = StubConnector {
-            pages: Mutex::new(VecDeque::from(connector_pages.clone())),
-        };
+        let connector = StubConnector::new(VecDeque::from(connector_pages.clone()));
         let summary = run_one_pass(&connector, &storage).await.expect("pass 1");
         assert_eq!(summary.versions_recorded, 1);
 
         // Second pass with identical metadata — checksum matches,
         // no new version row.
-        let connector = StubConnector {
-            pages: Mutex::new(VecDeque::from(connector_pages)),
-        };
+        let connector = StubConnector::new(VecDeque::from(connector_pages));
         let summary = run_one_pass(&connector, &storage).await.expect("pass 2");
         assert_eq!(
             summary.versions_recorded, 0,
             "identical metadata must not insert a new version row",
         );
+    }
+
+    /// Conditional-fetch short-circuit: when the connector reports
+    /// `NotModified`, `run_one_pass` returns early with all counters
+    /// at zero (except `not_modified=true`) and refreshes the
+    /// source state's `last_seen_at` without touching ingested rows.
+    #[tokio::test]
+    async fn run_one_pass_short_circuits_on_not_modified() {
+        // Pre-seed the storage with previous cues so we can verify
+        // they survive the no-op pass.
+        let storage = StubStorage {
+            domains: HashMap::from([("environment".to_owned(), 7_i16)]),
+            upserts: Mutex::new(Vec::new()),
+            dataset_ids: Mutex::new(HashMap::new()),
+            seen_versions: Mutex::new(HashSet::new()),
+            source_state: Mutex::new(HashMap::from([(
+                SourceId::DataGovTw,
+                (
+                    Some("\"prior-etag\"".to_owned()),
+                    Some("Wed, 14 Apr 2026 03:30:00 GMT".to_owned()),
+                ),
+            )])),
+        };
+        let connector = StubConnector::new(VecDeque::new());
+        *connector.not_modified_first.lock().unwrap() = true;
+
+        let summary = run_one_pass(&connector, &storage)
+            .await
+            .expect("304 short-circuit ok");
+        assert!(summary.not_modified, "summary flags the short-circuit");
+        assert_eq!(summary.upserted, 0);
+        assert_eq!(summary.versions_recorded, 0);
+        assert_eq!(summary.pages, 0);
+
+        // Cues are preserved in the stub's source_state — the
+        // driver did NOT blank them on the no-op pass.
+        let state = storage
+            .source_state
+            .lock()
+            .unwrap()
+            .get(&SourceId::DataGovTw)
+            .cloned()
+            .expect("state present after short-circuit");
+        assert_eq!(state.0.as_deref(), Some("\"prior-etag\""));
+        assert_eq!(state.1.as_deref(), Some("Wed, 14 Apr 2026 03:30:00 GMT"),);
     }
 
     async fn fresh_storage() -> (Storage, ContainerAsync<PgContainer>) {

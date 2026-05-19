@@ -156,6 +156,45 @@ pub enum ConnectorError {
     Unsupported(&'static str),
 }
 
+/// HTTP cache cues a caller persists between crawls. The connector
+/// translates these into conditional request headers
+/// (`If-None-Match` / `If-Modified-Since`) on the FIRST page of a
+/// walk so the server can short-circuit unchanged catalogs with 304.
+///
+/// Both fields are independent: a server may emit only one. Empty
+/// cues (the `Default`) make the connector behave like the
+/// unconditional pre-#1.4d.2 form — useful for the first-ever crawl
+/// or for connectors / tests that don't bother with conditional
+/// fetch.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConditionalCues {
+    /// Last-seen `ETag` header value (sent as `If-None-Match`).
+    pub if_none_match: Option<String>,
+    /// Last-seen `Last-Modified` header value (sent as
+    /// `If-Modified-Since`). Format is whatever the server emitted —
+    /// HTTP-date per RFC 7231 in well-behaved servers, but we pass it
+    /// through verbatim so the round-trip is byte-stable.
+    pub if_modified_since: Option<String>,
+}
+
+/// Outcome of a [`SourceConnector::list_datasets`] call.
+///
+/// `cues` are only meaningful when `cursor` is `None` (the first
+/// page of a walk); subsequent paginated calls ignore them.
+#[derive(Debug, Clone)]
+pub enum ListResponse {
+    /// Server returned a page. `fresh_cues` are extracted from the
+    /// response headers and should be persisted for the next crawl.
+    Modified {
+        page: Page,
+        fresh_cues: ConditionalCues,
+    },
+    /// Server returned `304 Not Modified`. Caller should skip the
+    /// rest of the walk and refresh `last_seen_at` for the source
+    /// (the cues themselves haven't changed).
+    NotModified,
+}
+
 /// Drives the catalog walk for one upstream source.
 ///
 /// Implementations are async + Send + Sync so the ETL scheduler in
@@ -167,10 +206,22 @@ pub trait SourceConnector: Send + Sync + 'static {
     fn source_id(&self) -> SourceId;
 
     /// Fetch the next page of dataset metadata. Pass `None` for the
-    /// first call; pass back the previous [`Page::next`] for subsequent
-    /// calls. A `None` return for `next` means upstream is fully
-    /// drained.
-    async fn list_datasets(&self, cursor: Option<Cursor>) -> Result<Page, ConnectorError>;
+    /// first call (along with the persisted `cues`); pass back the
+    /// previous [`Page::next`] for subsequent calls (with default
+    /// `cues` — they don't apply to mid-walk pages). A `None` return
+    /// for [`Page::next`] means upstream is fully drained.
+    ///
+    /// When `cursor` is `None` and the server honours the conditional
+    /// headers carried by `cues`, the connector may return
+    /// [`ListResponse::NotModified`] — the catalog hasn't changed
+    /// since the persisted cues were captured. Callers must treat
+    /// this as a successful no-op crawl (refresh `last_seen_at`,
+    /// don't touch ingested rows).
+    async fn list_datasets(
+        &self,
+        cursor: Option<Cursor>,
+        cues: &ConditionalCues,
+    ) -> Result<ListResponse, ConnectorError>;
 }
 
 #[cfg(test)]
