@@ -7,12 +7,12 @@
 //!
 //! Configuration is via environment variables:
 //!
-//! | env                       | required | default                       |
-//! |---------------------------|----------|-------------------------------|
-//! | `DATABASE_URL`            | yes      | —                             |
-//! | `DATA_GOV_TW_URL`         | no       | `https://data.gov.tw`         |
-//! | `ETL_DB_MAX_CONNECTIONS`  | no       | `20`                          |
-//! | `ETL_RUN_AT_STARTUP`      | no       | `false`                       |
+//! | env                       | required | default                                  |
+//! |---------------------------|----------|------------------------------------------|
+//! | `DATABASE_URL`            | yes      | —                                        |
+//! | `DATA_GOV_TW_URL`         | no       | `https://data.gov.tw`                    |
+//! | `ETL_DB_MAX_CONNECTIONS`  | no       | `20` (must be a positive integer if set) |
+//! | `ETL_RUN_AT_STARTUP`      | no       | `false`                                  |
 //!
 //! When `ETL_RUN_AT_STARTUP=true` (handy for local dev / CI smoke
 //! tests) the worker runs a single immediate pass before settling
@@ -117,10 +117,7 @@ const DEFAULT_ETL_MAX_CONNECTIONS: u32 = 20;
 /// read `ETL_DB_MAX_CONNECTIONS` (default 20), build a `PgPool`, and
 /// wrap it.
 async fn connect_storage(database_url: &str) -> Result<Storage> {
-    let max_connections = env::var("ETL_DB_MAX_CONNECTIONS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_ETL_MAX_CONNECTIONS);
+    let max_connections = parse_max_connections(env::var("ETL_DB_MAX_CONNECTIONS").ok())?;
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -129,6 +126,31 @@ async fn connect_storage(database_url: &str) -> Result<Storage> {
         .context("could not connect ETL pool — is Postgres reachable?")?;
     tracing::info!(max_connections, "ETL pool ready");
     Ok(Storage::from_pool(pool))
+}
+
+/// Strict parser for `ETL_DB_MAX_CONNECTIONS`. Fails fast on any
+/// present-but-malformed value — non-numeric, zero, negative — so a
+/// misconfigured deploy surfaces at boot instead of as a silently
+/// undersized pool (or, for `0`, a pool that deadlocks on first
+/// `acquire`). Unset, empty, or whitespace-only values fall back to
+/// `DEFAULT_ETL_MAX_CONNECTIONS`: Docker / k8s templates frequently
+/// emit `ETL_DB_MAX_CONNECTIONS=` for unsupplied optional overrides,
+/// and rejecting that would punish benign deployments.
+fn parse_max_connections(raw: Option<String>) -> Result<u32> {
+    let Some(raw) = raw else {
+        return Ok(DEFAULT_ETL_MAX_CONNECTIONS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_ETL_MAX_CONNECTIONS);
+    }
+    let parsed: u32 = trimmed
+        .parse()
+        .with_context(|| format!("ETL_DB_MAX_CONNECTIONS={trimmed:?} is not a positive integer"))?;
+    if parsed == 0 {
+        anyhow::bail!("ETL_DB_MAX_CONNECTIONS must be > 0 (got 0)");
+    }
+    Ok(parsed)
 }
 
 fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
@@ -181,4 +203,63 @@ async fn wait_for_shutdown() {
 // main.rs is glue. Crawl driver logic lives in `driver.rs` and is
 // covered by the testcontainers + wiremock integration test there;
 // the cron string is validated at process boot when the scheduler
-// rejects malformed expressions.
+// rejects malformed expressions. The env-var parser below has its
+// own unit tests so the contract is verifiable without spinning up
+// a tokio runtime or a Postgres container.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_yields_default() {
+        assert_eq!(
+            parse_max_connections(None).unwrap(),
+            DEFAULT_ETL_MAX_CONNECTIONS,
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_yields_default() {
+        assert_eq!(
+            parse_max_connections(Some(String::new())).unwrap(),
+            DEFAULT_ETL_MAX_CONNECTIONS,
+        );
+        assert_eq!(
+            parse_max_connections(Some("   ".into())).unwrap(),
+            DEFAULT_ETL_MAX_CONNECTIONS,
+        );
+    }
+
+    #[test]
+    fn positive_integer_passes_through() {
+        assert_eq!(parse_max_connections(Some("42".into())).unwrap(), 42);
+        // Surrounding whitespace is tolerated (shell + YAML often leak it).
+        assert_eq!(parse_max_connections(Some("  7 ".into())).unwrap(), 7);
+    }
+
+    #[test]
+    fn zero_is_rejected() {
+        let err = parse_max_connections(Some("0".into())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must be > 0"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn non_numeric_is_rejected() {
+        let err = parse_max_connections(Some("twenty".into())).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ETL_DB_MAX_CONNECTIONS"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("positive integer"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn negative_is_rejected() {
+        // `u32::from_str` rejects "-1" outright, so it lands in the same
+        // parse-error path as non-numeric input.
+        assert!(parse_max_connections(Some("-1".into())).is_err());
+    }
+}
