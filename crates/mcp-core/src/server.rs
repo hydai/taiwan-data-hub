@@ -68,7 +68,19 @@ impl ServerHandler for McpServer {
             .dispatcher
             .list_tools()
             .into_iter()
-            .map(|d| Tool::new(d.name, d.description, Arc::new(d.input_schema)))
+            .map(|d| {
+                // Tool is #[non_exhaustive] in rmcp 1.x, but its fields are
+                // `pub` — construct via `Tool::new` then attach the optional
+                // output schema by field assignment. rmcp's own
+                // `with_output_schema<T: JsonSchema>` derives from a Rust
+                // type; we already carry the schema as a `JsonObject`, so
+                // assigning directly skips the schemars round-trip.
+                let mut tool = Tool::new(d.name, d.description, Arc::new(d.input_schema));
+                if let Some(out) = d.output_schema {
+                    tool.output_schema = Some(Arc::new(out));
+                }
+                tool
+            })
             .collect();
         Ok(ListToolsResult {
             tools,
@@ -86,7 +98,34 @@ impl ServerHandler for McpServer {
         // tools that pattern-match with `.as_object()` / `.get(..)` don't
         // see `null` for a legitimate no-arg call.
         let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
+
+        // A tool that declared `output_schema` MUST return structured
+        // content per the MCP spec — otherwise rmcp returns -32600 to the
+        // client. Decide which `CallToolResult` constructor to use by
+        // peeking at the descriptor before dispatching.
+        let expects_structured = self
+            .dispatcher
+            .descriptor(&request.name)
+            .is_some_and(|d| d.output_schema.is_some());
+
         match self.dispatcher.call_tool(&request.name, args).await {
+            Ok(value) if expects_structured => {
+                // `structured_content` is a JSON Value but clients commonly
+                // assume an object. Enforce the object invariant here so
+                // tools surface a clean error rather than letting the
+                // client's schema validator reject the response.
+                if !value.is_object() {
+                    return Err(McpError::internal_error(
+                        format!(
+                            "tool `{}` declares output_schema but returned a non-object \
+                             top-level value",
+                            request.name
+                        ),
+                        None,
+                    ));
+                }
+                Ok(CallToolResult::structured(value))
+            }
             Ok(value) => Ok(CallToolResult::success(vec![value_to_content(value)])),
             Err(ToolError::NotFound(name)) => Err(McpError::invalid_params(
                 format!("unknown tool: {name}"),

@@ -20,12 +20,15 @@ use thiserror::Error;
 /// Metadata about a tool exposed to MCP clients.
 ///
 /// `input_schema` is a JSON Schema object — the outer wrapping must be
-/// `{"type": "object", ...}` per the MCP spec.
+/// `{"type": "object", ...}` per the MCP spec. `output_schema` is optional;
+/// when present, clients can validate `call` results against it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolDescriptor {
     pub name: String,
     pub description: String,
     pub input_schema: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Map<String, Value>>,
 }
 
 /// Errors a [`ToolHandler`] (or the dispatcher) can return.
@@ -66,6 +69,13 @@ impl Dispatcher {
 
     pub fn list_tools(&self) -> Vec<ToolDescriptor> {
         self.tools.values().map(|t| t.descriptor()).collect()
+    }
+
+    /// Look up a single tool's descriptor by name without invoking the
+    /// tool. Used by the rmcp adapter to decide whether to wrap results
+    /// as structured content (when the tool declares `output_schema`).
+    pub fn descriptor(&self, name: &str) -> Option<ToolDescriptor> {
+        self.tools.get(name).map(|t| t.descriptor())
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<Value, ToolError> {
@@ -142,6 +152,7 @@ mod tests {
                 .as_object()
                 .cloned()
                 .unwrap(),
+                output_schema: None,
             }
         }
 
@@ -187,5 +198,15 @@ mod tests {
         let d = Dispatcher::builder().register(EchoTool).build();
         let err = d.call_tool("echo", json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn descriptor_lookup_returns_known_tools_and_none_otherwise() {
+        let d = Dispatcher::builder().register(EchoTool).build();
+        assert_eq!(d.descriptor("echo").map(|d| d.name), Some("echo".into()));
+        assert!(d.descriptor("missing").is_none());
+        // EchoTool doesn't declare an output schema — the adapter relies
+        // on this to skip the structured-content wrapper.
+        assert!(d.descriptor("echo").and_then(|d| d.output_schema).is_none());
     }
 }

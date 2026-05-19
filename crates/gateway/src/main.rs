@@ -163,10 +163,13 @@ async fn main() -> anyhow::Result<()> {
         .context("GATEWAY_ADDR must be a valid socket address (host:port)")?;
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
-    // so clone() in the factory is cheap. Future issues (#1.3, #1.5, …)
-    // register tools against this dispatcher at startup.
-    let server = McpServer::new(Dispatcher::default(), gateway_implementation())
-        .with_instructions("Taiwan Data Hub MCP server (skeleton — no tools registered yet).");
+    // so clone() in the factory is cheap. Stdio and HTTP both feed off the
+    // same `tools_data::register_data_tools` helper, so tools register in
+    // one place and reach every transport.
+    let dispatcher = tools_data::register_data_tools(Dispatcher::builder()).build();
+    let tool_count = dispatcher.len();
+    let server = McpServer::new(dispatcher, gateway_implementation())
+        .with_instructions("Taiwan Data Hub MCP server.");
 
     let cancel = CancellationToken::new();
     let app = build_router(server, cancel.child_token());
@@ -179,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         version = PKG_VERSION,
         build_sha = GIT_SHA,
         addr = %addr,
+        tools = tool_count,
         "gateway listening (HTTP + MCP Streamable at /mcp)"
     );
 
