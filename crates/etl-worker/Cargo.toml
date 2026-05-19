@@ -24,6 +24,9 @@ anyhow = { workspace = true }
 # schedule's timezone is explicit at the call site (not implicit in
 # `new_async`'s default).
 chrono = { workspace = true }
+# Stable cryptographic hash for dataset_versions checksumming —
+# DefaultHasher isn't stable across binary builds.
+sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

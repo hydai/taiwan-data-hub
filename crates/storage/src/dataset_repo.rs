@@ -69,6 +69,14 @@ pub trait DatasetWriter: Send + Sync + 'static {
 
     /// See [`Storage::domain_id_for_slug`].
     async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError>;
+
+    /// See [`Storage::record_version_if_changed`].
+    async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError>;
 }
 
 #[async_trait]
@@ -84,6 +92,15 @@ impl DatasetWriter for Storage {
 
     async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError> {
         Storage::domain_id_for_slug(self, slug).await
+    }
+
+    async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Storage::record_version_if_changed(self, dataset_id, version, checksum).await
     }
 }
 
@@ -360,6 +377,52 @@ impl Storage {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    /// Insert a new `dataset_versions` row iff `(dataset_id, version)`
+    /// hasn't been recorded before. Returns `Some(new_id)` when a row
+    /// was inserted, `None` when the version already exists (the
+    /// caller already recorded this exact checksum once).
+    ///
+    /// Used by the ETL driver to record schema-diff history per
+    /// `DESIGN.md` §9 (the #1.4 Definition of Done specifies
+    /// "schema diff detection stores into `dataset_versions`").
+    ///
+    /// **Concurrency**: the `INSERT ... ON CONFLICT (dataset_id,
+    /// version) DO NOTHING` form makes this idempotent and race-safe.
+    /// Two crawlers seeing the same metadata simultaneously will both
+    /// derive the same `version` (because the caller folds the
+    /// checksum into the label); whichever transaction commits first
+    /// inserts, the other sees the conflict and silently no-ops via
+    /// `DO NOTHING`. No SELECT, no transaction, no read-skew window.
+    ///
+    /// **Caller contract**: `version` must be injectively derived
+    /// from `checksum` so two distinct checksums never collide on
+    /// the same version label (otherwise this method would silently
+    /// drop a real change). The ETL driver's `version_string` helper
+    /// embeds the full `sha256:<64-hex>` checksum string into the
+    /// label so the result is `"<rfc3339-ts>#sha256:<64-hex>"` when
+    /// upstream carries a `last_modified_at`, or `"sha256:<64-hex>"`
+    /// otherwise. 256 bits of entropy makes this injectivity
+    /// mathematical, not probabilistic.
+    pub async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO dataset_versions (dataset_id, version, checksum) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (dataset_id, version) DO NOTHING \
+             RETURNING id",
+        )
+        .bind(dataset_id)
+        .bind(version)
+        .bind(checksum)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(inserted.map(|(id,)| id))
     }
 
     /// Fetch the full read view for a dataset by id or slug. Returns
@@ -810,6 +873,104 @@ mod tests {
             Some("地政司"),
             "publisher must reflect the update"
         );
+    }
+
+    /// Pin the natural-key dedup semantic: returning to a
+    /// previously-seen `(dataset_id, version)` pair must no-op via
+    /// `ON CONFLICT DO NOTHING`. A metadata oscillation A → B → A
+    /// records exactly two rows, not three.
+    ///
+    /// This is the deliberate trade-off the storage layer makes:
+    /// concurrency safety (no read-then-write race) at the cost of
+    /// losing oscillation history. Pin it here so a future refactor
+    /// back to "differs from latest" without proper locking fails CI.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_version_oscillation_collapses_to_seen_set() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        let v_a = "ts#sha256:aaaa";
+        let v_b = "ts#sha256:bbbb";
+        let a1 = storage
+            .record_version_if_changed(dataset_id, v_a, "sha256:aaaa")
+            .await
+            .expect("A first");
+        let b1 = storage
+            .record_version_if_changed(dataset_id, v_b, "sha256:bbbb")
+            .await
+            .expect("B");
+        let a2 = storage
+            .record_version_if_changed(dataset_id, v_a, "sha256:aaaa")
+            .await
+            .expect("A second");
+
+        assert!(a1.is_some(), "A first records");
+        assert!(b1.is_some(), "B records");
+        assert!(
+            a2.is_none(),
+            "A again no-ops via natural-key dedup (not a new row)",
+        );
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM dataset_versions WHERE dataset_id = $1")
+                .bind(dataset_id)
+                .fetch_one(storage.pool())
+                .await
+                .expect("count");
+        assert_eq!(count.0, 2, "A → B → A collapses to two rows");
+    }
+
+    /// Schema-diff contract for #1.4d: the storage layer dedups on
+    /// `(dataset_id, version)` (the table's UNIQUE constraint backed
+    /// by `ON CONFLICT DO NOTHING`). First call with a new version
+    /// inserts; repeat with the same `(dataset_id, version)` is a
+    /// no-op; a different version inserts another row. The
+    /// `checksum` argument is stored but does NOT participate in
+    /// the dedup decision.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_version_dedupes_on_dataset_id_and_version() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        // First call records a fresh version.
+        let v1 = storage
+            .record_version_if_changed(dataset_id, "2026-04-15", "checksum-A")
+            .await
+            .expect("first version");
+        assert!(v1.is_some(), "first call must insert");
+
+        // Same checksum → no new row.
+        let v2 = storage
+            .record_version_if_changed(dataset_id, "2026-04-15", "checksum-A")
+            .await
+            .expect("no-op");
+        assert!(v2.is_none(), "matching checksum must not insert");
+
+        // Different checksum → new row.
+        let v3 = storage
+            .record_version_if_changed(dataset_id, "2026-05-01", "checksum-B")
+            .await
+            .expect("second version");
+        assert!(v3.is_some(), "changed checksum must insert");
+        assert_ne!(v1.unwrap(), v3.unwrap());
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM dataset_versions WHERE dataset_id = $1")
+                .bind(dataset_id)
+                .fetch_one(storage.pool())
+                .await
+                .expect("count");
+        assert_eq!(count.0, 2, "exactly two version rows after A → A → B");
     }
 
     #[tokio::test]

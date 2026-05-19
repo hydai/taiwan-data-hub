@@ -1013,6 +1013,7 @@ dependencies = [
  "chrono",
  "connectors",
  "serde_json",
+ "sha2",
  "sqlx",
  "storage",
  "testcontainers-modules",

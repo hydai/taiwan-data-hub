@@ -61,6 +61,11 @@ polars = { version = "0.53.0", default-features = false, features = ["lazy", "pa
 # surface we use (`Visit`/`Visitor`/`LimitClause`/`TableFactor`) is
 # stable across the 0.60/0.61 boundary, so the dedup wins.
 sqlparser = { version = "0.60.0", features = ["visitor"] }
+# Stable cryptographic hash for the dataset_versions checksum
+# (schema-diff detection). DefaultHasher isn't stable across
+# binary builds; `sha2` 0.10 is small, well-audited, and already
+# pulled in transitively via reqwest's TLS chain.
+sha2 = "0.10"
 tempfile = "3.13"
 
 [workspace.lints.rust]
