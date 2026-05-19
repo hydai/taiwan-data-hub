@@ -146,7 +146,7 @@ npx @modelcontextprotocol/inspector http://127.0.0.1:8080/mcp
 ```
 
 The interactive form opens `http://localhost:6274` and is the form
-referenced in [`docs/DESIGN.md`](docs/DESIGN.md) §14.
+referenced in [`docs/DESIGN.md`](docs/DESIGN.md) §11.1 *端到端驗收*.
 
 ### 3. Wire your client
 
