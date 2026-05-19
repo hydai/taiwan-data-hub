@@ -452,21 +452,6 @@ impl Storage {
         }))
     }
 
-    /// Search the dataset catalog. `q` runs against the FTS `tsv`
-    /// column (populated by the `datasets_tsv_trigger`) **OR** the
-    /// trigram-indexed `searchable_text` column — combining them
-    /// gives English keyword search + CJK substring search without
-    /// requiring zhparser. The OR is fine for the planner: either
-    /// branch has a GIN index it can pick, and the row counts are
-    /// small enough that the dedup cost is irrelevant.
-    ///
-    /// Returns hits ordered by tsv rank (when `q` is set) then by
-    /// `last_modified_at` descending. The locale fallback chain is
-    /// requested-locale → `zh-TW`.
-    ///
-    /// `limit` is clamped to [`SearchParams::MAX_LIMIT`] inside
-    /// [`SearchParams::sanitise`] so a careless caller can't blow up
-    /// the connection.
     /// Look up the minimal dataset info `query_rows` needs:
     /// id + slug for error messaging plus the cache state. Returns
     /// `None` when no dataset matches the key (the tool layer
@@ -496,6 +481,21 @@ impl Storage {
         }
     }
 
+    /// Search the dataset catalog. `q` runs against the FTS `tsv`
+    /// column (populated by the `datasets_tsv_trigger`) **OR** the
+    /// trigram-indexed `searchable_text` column — combining them
+    /// gives English keyword search + CJK substring search without
+    /// requiring zhparser. The OR is fine for the planner: either
+    /// branch has a GIN index it can pick, and the row counts are
+    /// small enough that the dedup cost is irrelevant.
+    ///
+    /// Returns hits ordered by tsv rank (when `q` is set) then by
+    /// `last_modified_at` descending. The locale fallback chain is
+    /// requested-locale → `zh-TW`.
+    ///
+    /// `limit` is clamped to [`SearchParams::MAX_LIMIT`] inside
+    /// [`SearchParams::sanitise`] so a careless caller can't blow up
+    /// the connection.
     pub async fn search_datasets(&self, params: SearchParams) -> Result<SearchPage, StorageError> {
         let params = params.sanitise();
         let locale = params.locale.as_deref().unwrap_or("zh-TW");

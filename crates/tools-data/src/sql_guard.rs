@@ -12,6 +12,9 @@
 //!    `VALUES (…)` body, no `INSERT … RETURNING` wrapped as Query.
 //! 2. **No CTEs, no set ops, no subqueries, no FETCH FIRST** — keeps
 //!    the surface tiny and prevents bypassing the LIMIT clamp.
+//!    Includes **derived tables**: `FROM (SELECT …) AS t` is
+//!    rejected because the inner SELECT can have its own
+//!    LIMIT/OFFSET/FETCH that the outer clamp doesn't see.
 //! 3. **Exactly one reference to `current_dataset`** — rejects
 //!    self-joins and cartesian products. Even with a forced LIMIT
 //!    on the output, materialising an N×N intermediate is an easy
@@ -35,8 +38,8 @@
 use std::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, Function, LimitClause, ObjectName, ObjectNamePart, Query, Statement, Value,
-    ValueWithSpan, Visit, Visitor,
+    Expr, Function, LimitClause, ObjectName, ObjectNamePart, Query, SetExpr, Statement,
+    TableFactor, Value, ValueWithSpan, Visit, Visitor,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -135,6 +138,11 @@ pub enum SqlError {
     Offset,
     #[error("FETCH FIRST … ROWS ONLY is not allowed; use LIMIT instead")]
     Fetch,
+    #[error(
+        "non-table FROM clauses are not allowed \
+         (derived subqueries, `UNNEST`, `JSON_TABLE`, lateral functions, etc.)"
+    )]
+    NonTableFrom,
 }
 
 /// The validated SQL ready to hand to Polars. Wraps the string in a
@@ -186,8 +194,8 @@ pub fn validate(sql: &str, max_limit: u64) -> Result<ValidatedSql, SqlError> {
     // bodies (`VALUES (...)`, `INSERT ... RETURNING ...` wrapped as
     // Query, etc.) — only top-level SELECTs are admitted.
     match query.body.as_ref() {
-        sqlparser::ast::SetExpr::Select(_) => {}
-        sqlparser::ast::SetExpr::SetOperation { .. } => return Err(SqlError::SetOperation),
+        SetExpr::Select(_) => {}
+        SetExpr::SetOperation { .. } => return Err(SqlError::SetOperation),
         _ => return Err(SqlError::NotSelect),
     }
 
@@ -202,6 +210,12 @@ pub fn validate(sql: &str, max_limit: u64) -> Result<ValidatedSql, SqlError> {
     // caught by the relation-count check (which would otherwise win
     // because each subquery reference adds to the count).
     walk_expressions(&query)?;
+    // Derived tables / UNNEST / JSON_TABLE / lateral functions are
+    // table-shaped from the parser's view but never trigger
+    // `pre_visit_relation` (no `ObjectName` to visit) — they'd
+    // therefore slip past `walk_relations`. Catch them explicitly
+    // on the FROM clauses of the top-level SELECT.
+    reject_non_table_from_clauses(&query)?;
     walk_relations(&query)?;
     walk_select_into(&query)?;
     reject_offset(&query)?;
@@ -249,6 +263,35 @@ fn walk_relations(query: &Query) -> Result<(), SqlError> {
         return Err(SqlError::TooManyRelations(visitor.relation_count));
     }
     Ok(())
+}
+
+/// Reject any `TableFactor` shape other than `Table { name, … }` in
+/// the top-level SELECT's FROM clauses (and the joins they carry).
+/// Derived subqueries (`FROM (SELECT …) AS t`), `UNNEST`, `JSON_TABLE`,
+/// lateral functions, etc. all bypass the rest of the AST whitelist
+/// because they don't surface as `ObjectName` references the
+/// relation visitor walks, AND they can nest queries with their
+/// own LIMIT/OFFSET/FETCH clauses that would dodge the top-level
+/// clamp.
+fn reject_non_table_from_clauses(query: &Query) -> Result<(), SqlError> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Ok(());
+    };
+    for twj in &select.from {
+        check_table_factor(&twj.relation)?;
+        for join in &twj.joins {
+            check_table_factor(&join.relation)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_table_factor(tf: &TableFactor) -> Result<(), SqlError> {
+    if matches!(tf, TableFactor::Table { .. }) {
+        Ok(())
+    } else {
+        Err(SqlError::NonTableFrom)
+    }
 }
 
 /// Reject any OFFSET in either LIMIT-clause shape. OFFSET forces the
@@ -640,6 +683,42 @@ mod tests {
             assert_err("SELECT a FROM current_dataset LIMIT 10 OFFSET 5"),
             SqlError::Offset,
         );
+    }
+
+    #[test]
+    fn derived_subquery_in_from_rejected() {
+        // `FROM (SELECT …) AS t` doesn't go through pre_visit_relation
+        // (no ObjectName for `(SELECT …)`) so walk_relations would
+        // see zero relations — its count check wouldn't fire. Without
+        // the dedicated TableFactor walk, this query would smuggle
+        // a nested SELECT past the AST guard.
+        let err = assert_err("SELECT * FROM (SELECT * FROM current_dataset) AS t");
+        assert_eq!(err, SqlError::NonTableFrom);
+    }
+
+    #[test]
+    fn unnest_and_table_function_rejected() {
+        // Sqlparser may parse a table-function-shaped FROM as either
+        // `TableFactor::TableFunction` (proper) or as a bare
+        // `TableFactor::Table { name: "generate_series" }` depending
+        // on dialect quirks. Either way the query gets rejected:
+        // the first by NonTableFrom, the second by DisallowedTable
+        // (the name isn't `current_dataset`).
+        for sql in &[
+            "SELECT * FROM UNNEST(ARRAY[1,2,3])",
+            "SELECT * FROM generate_series(1, 100)",
+        ] {
+            let err = validate(sql, DEFAULT_MAX_LIMIT)
+                .err()
+                .unwrap_or_else(|| panic!("expected rejection for `{sql}`"));
+            assert!(
+                matches!(
+                    err,
+                    SqlError::NonTableFrom | SqlError::Parse(_) | SqlError::DisallowedTable(_)
+                ),
+                "expected a rejection variant for `{sql}`, got {err}",
+            );
+        }
     }
 
     #[test]

@@ -232,9 +232,11 @@ fn render_dataframe(df: &DataFrame, effective_limit: u64) -> Value {
 }
 
 /// Best-effort conversion from a Polars cell to JSON. Anything we
-/// don't have a dedicated mapping for falls back to its Debug
+/// don't have a dedicated mapping for falls back to its `Display`
 /// representation as a string — preserves information without
-/// pretending we support a richer type than we do.
+/// pretending we support a richer type than we do, and `Display` is
+/// the more user-friendly default for Polars `AnyValue` variants
+/// (timestamps render in ISO-8601, lists as `[…]`, etc.).
 fn any_value_to_json(av: &AnyValue<'_>) -> Value {
     match av {
         AnyValue::Null => Value::Null,
