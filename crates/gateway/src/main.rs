@@ -19,6 +19,7 @@ use mcp_core::{Dispatcher, McpServer};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -136,11 +137,16 @@ fn build_router(server: McpServer, cancel: CancellationToken) -> Router {
         StreamableHttpServerConfig::default().with_cancellation_token(cancel),
     );
 
+    // Scope CORS to /mcp only — /healthz and /readyz are infrastructure
+    // probes and should retain default (no-CORS) behavior.
+    let mcp_with_cors = ServiceBuilder::new()
+        .layer(build_mcp_cors())
+        .service(mcp_service);
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest_service("/mcp", mcp_service)
-        .layer(build_mcp_cors())
+        .nest_service("/mcp", mcp_with_cors)
 }
 
 #[tokio::main]
@@ -254,6 +260,56 @@ mod tests {
         assert_eq!(dependency_ready(Some("postgres://stub/stub")), Some(false));
     }
 
+    /// Regression for Copilot PR #91 round 1: CORS must apply to `/mcp`
+    /// only, not the infrastructure probes. An OPTIONS preflight to
+    /// `/healthz` should NOT come back with `access-control-allow-origin`,
+    /// while the same preflight to `/mcp` should.
+    #[tokio::test]
+    async fn cors_is_scoped_to_mcp_and_does_not_leak_to_healthz() {
+        let app = build_router(test_server(), CancellationToken::new());
+
+        let mcp_preflight = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/mcp")
+                    .header("host", "127.0.0.1:8080")
+                    .header("origin", "http://example.invalid")
+                    .header("access-control-request-method", "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            mcp_preflight
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "/mcp preflight should carry CORS headers",
+        );
+
+        let healthz_preflight = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/healthz")
+                    .header("host", "127.0.0.1:8080")
+                    .header("origin", "http://example.invalid")
+                    .header("access-control-request-method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !healthz_preflight
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "CORS must not leak onto /healthz",
+        );
+    }
+
     /// Streamable HTTP requires `Accept: application/json, text/event-stream`
     /// on POST /mcp. The initialize response is JSON (not SSE) and carries
     /// the negotiated protocol version + the server's identity.
@@ -293,9 +349,6 @@ mod tests {
         let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
         let raw = String::from_utf8_lossy(&bytes);
 
-        // Per MCP 2025-11-25 the server picks application/json or
-        // text/event-stream based on Accept. With both offered, rmcp
-        // currently chooses SSE — extract the first `data:` payload.
         // Per MCP 2025-11-25 the server picks application/json or
         // text/event-stream based on Accept. With both offered, rmcp
         // currently chooses SSE; the first frame is an empty
