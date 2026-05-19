@@ -13,9 +13,14 @@ description = "HTTP + MCP gateway (Axum + tower) for Taiwan Data Hub"
 workspace = true
 
 [dependencies]
+# rmcp is consumed exclusively via the `mcp_core::rmcp` re-export so the SDK
+# binding lives in a single crate; do not add a direct `rmcp` dep here.
+mcp-core = { path = "../mcp-core" }
 axum = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tower = { workspace = true }
+tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
