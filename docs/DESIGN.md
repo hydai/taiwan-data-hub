@@ -300,7 +300,7 @@ services:
 | Metrics | `metrics-exporter-prometheus` | **0.18.1** | — |
 | OpenAPI 產生 | `utoipa` + `utoipa-axum` | **utoipa 5.5.0** / **utoipa-axum 0.2.x** | ⚠️ Major bump（OpenAPI 3.1、`OpenApiRouter` 取代直接用 axum Router） |
 | Rate limit | `tower-governor` | **0.3.x / 0.4 線** | Token bucket、governor 內核穩定 |
-| SQL AST 驗證 | `sqlparser` | **0.61.0** | 新增 dialect 支援，破壞變更在 AST node |
+| SQL AST 驗證 | `sqlparser` | **0.60.0** | 對齊 polars-sql 0.53 的傳遞版本以避免雙重編譯；API（Visit/Visitor/LimitClause/TableFactor）在 0.60/0.61 邊界穩定 |
 | Test infra | `testcontainers` + `insta` | **0.27.3** / **1.46.0** | 真實 PG；建議搭 `testcontainers-modules` |
 | 加密 | `aes-gcm` | **0.10.3** | 已穩定 |
 | 檔案類型偵測 | `infer` | **0.19.0** | magic byte 檢查 |

@@ -24,6 +24,35 @@ impl DatasetReader for Storage {
     }
 }
 
+/// Object-safe lookup for the `query_rows` MCP tool (#1.7). Returns
+/// just enough to find the cached Parquet for a dataset (or tell the
+/// caller to materialise it first).
+#[async_trait]
+pub trait DatasetCacheLookup: Send + Sync + 'static {
+    async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError>;
+}
+
+#[async_trait]
+impl DatasetCacheLookup for Storage {
+    async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
+        Storage::dataset_cache(self, key).await
+    }
+}
+
+/// What `query_rows` needs to know about a dataset to either run a
+/// query or tell the user to materialise it first.
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct CacheRef {
+    pub id: Uuid,
+    pub slug: String,
+    /// `true` iff the latest version has been written to local /
+    /// object cache and `cache_path` is non-null.
+    pub cached: bool,
+    /// Storage URI (`file://`, `s3://`, …) for the cached Parquet.
+    /// `None` until #1.8 materialises it.
+    pub cache_path: Option<String>,
+}
+
 /// Object-safe write trait used by the ETL driver. Mirrors the
 /// [`DatasetReader`] pattern so `run_one_pass` can be unit-tested with
 /// an in-memory stub instead of a real Postgres pool. [`Storage`] is
@@ -417,6 +446,32 @@ impl Storage {
             dataset,
             versions: versions_with_files,
         }))
+    }
+
+    /// Look up the minimal dataset info `query_rows` needs:
+    /// id + slug for error messaging plus the cache state. Returns
+    /// `None` when no dataset matches the key (the tool layer
+    /// translates to `NotFound`); returns `Some(_)` with
+    /// `cached = false / cache_path = None` when the dataset exists
+    /// but hasn't been materialised yet (the tool layer translates
+    /// to "call `materialize_dataset` first").
+    pub async fn dataset_cache(&self, key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
+        match key {
+            DatasetKey::Id(id) => {
+                sqlx::query_as("SELECT id, slug, cached, cache_path FROM datasets WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(StorageError::from)
+            }
+            DatasetKey::Slug(slug) => {
+                sqlx::query_as("SELECT id, slug, cached, cache_path FROM datasets WHERE slug = $1")
+                    .bind(slug)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(StorageError::from)
+            }
+        }
     }
 
     /// Search the dataset catalog. `q` runs against the FTS `tsv`
