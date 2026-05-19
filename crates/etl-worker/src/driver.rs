@@ -122,11 +122,15 @@ where
 
                     // Schema-diff recording (#1.4d). Compute a stable
                     // checksum over the metadata fields whose change
-                    // we care about; insert a new `dataset_versions`
-                    // row only when the checksum drifts from the
-                    // previous one. A no-op return means "metadata
-                    // unchanged since last crawl" — the common case
-                    // in steady state.
+                    // we care about and derive a version label from
+                    // it. The storage layer dedupes on
+                    // `(dataset_id, version)` via `ON CONFLICT DO
+                    // NOTHING`, so a no-op return means "this exact
+                    // version has already been recorded for this
+                    // dataset" — usually because the metadata is
+                    // unchanged since last crawl, OR because upstream
+                    // oscillated back to a state we've seen before.
+                    // Steady-state crawls land near zero increments.
                     let checksum = metadata_checksum(&meta);
                     let version = version_string(&meta, &checksum);
                     match storage
@@ -139,7 +143,7 @@ where
                         None => {
                             tracing::trace!(
                                 slug = %meta.slug,
-                                "metadata unchanged; version not recorded",
+                                "version already recorded for this dataset",
                             );
                         }
                     }

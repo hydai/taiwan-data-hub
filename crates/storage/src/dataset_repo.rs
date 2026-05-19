@@ -396,11 +396,13 @@ impl Storage {
     /// inserts, the other sees the conflict and silently no-ops via
     /// `DO NOTHING`. No SELECT, no transaction, no read-skew window.
     ///
-    /// **Caller contract**: `version` must be uniquely derived from
-    /// `checksum` so two distinct checksums never collide on the same
-    /// version label (otherwise this method would silently drop a real
-    /// change). The ETL driver's `version_string` helper builds the
-    /// label as `"<ts>#<hash_prefix>"` to guarantee this.
+    /// **Caller contract**: `version` must be injectively derived
+    /// from `checksum` so two distinct checksums never collide on
+    /// the same version label (otherwise this method would silently
+    /// drop a real change). The ETL driver's `version_string` helper
+    /// embeds the full SHA-256 hex in the label
+    /// (`"<rfc3339-ts>#<sha256-hex>"` or `"<sha256-hex>"`) to
+    /// guarantee this mathematically rather than probabilistically.
     pub async fn record_version_if_changed(
         &self,
         dataset_id: Uuid,
