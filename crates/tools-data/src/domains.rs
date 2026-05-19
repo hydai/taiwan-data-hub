@@ -101,14 +101,31 @@ pub fn parse(yaml: &str) -> Result<Vec<Domain>, serde_yml::Error> {
 /// fallback (skip the dataset, log a warning, drop in a "misc"
 /// bucket); the mapper itself stays opinion-free.
 pub fn map_to_domain<S: AsRef<str>>(upstream: &[S]) -> Option<&'static Domain> {
+    map_in(upstream, embedded())
+}
+
+/// Inner implementation, parameterised over the domain table so unit
+/// tests can fixture pathological inputs (empty locale values, etc.)
+/// without going through `embedded()`'s singleton cache.
+fn map_in<'a, S: AsRef<str>>(upstream: &[S], domains: &'a [Domain]) -> Option<&'a Domain> {
     if upstream.is_empty() {
         return None;
     }
-    for d in embedded() {
+    for d in domains {
         let candidates = [d.name.zh_tw.as_str()]
             .into_iter()
             .chain(d.name.other.values().map(String::as_str));
         for cand in candidates {
+            // Trim + empty-skip on BOTH sides. Without the candidate
+            // guard, a future YAML revision shipping `en: ""` (which
+            // the `every_domain_has_zh_tw_name` test wouldn't catch)
+            // would make `raw.contains("")` trivially true for every
+            // upstream string and silently route every dataset to the
+            // first domain in `sort_order`.
+            let cand = cand.trim();
+            if cand.is_empty() {
+                continue;
+            }
             for raw in upstream {
                 // Trim BEFORE the emptiness check so whitespace-only
                 // inputs (e.g. CKAN sometimes emits `" "` for a missing
@@ -262,6 +279,61 @@ mod tests {
         assert_eq!(d.slug, "environment");
         let d = map_to_domain(&["\tReal estate & land\n"]).expect("trimmed en match");
         assert_eq!(d.slug, "realestate-land");
+    }
+
+    /// Build a `Domain` for fixture use. Hand-rolled rather than via
+    /// `parse()` so tests can express degenerate states (empty
+    /// strings, missing locales) that the YAML wouldn't naturally
+    /// produce.
+    fn fixture(slug: &str, sort_order: i32, zh_tw: &str, en: Option<&str>) -> Domain {
+        let mut other = BTreeMap::new();
+        if let Some(en) = en {
+            other.insert("en".to_owned(), en.to_owned());
+        }
+        Domain {
+            slug: slug.to_owned(),
+            kind: DomainKind::Topical,
+            sort_order,
+            name: I18nText {
+                zh_tw: zh_tw.to_owned(),
+                other,
+            },
+            description: None,
+        }
+    }
+
+    #[test]
+    fn map_skips_domains_with_empty_locale_value() {
+        // First domain has `en: ""` (a plausible future YAML mistake).
+        // Without the candidate-side empty guard, `"Second".contains("")`
+        // returns true and the matcher would route the upstream tag to
+        // the first domain in `sort_order`. With the guard, it falls
+        // through to the second domain and matches its `en: "Second"`.
+        let domains = [
+            fixture("first", 1, "第一", Some("")),
+            fixture("second", 2, "第二", Some("Second")),
+        ];
+        let d = map_in(&["Second"], &domains).expect("matches second");
+        assert_eq!(d.slug, "second");
+        // Also: an upstream that matches none of the *non-empty*
+        // candidates must return None rather than falling into the
+        // empty-string trap and emitting the first domain.
+        assert!(map_in(&["nothing relevant"], &domains).is_none());
+    }
+
+    #[test]
+    fn map_skips_domains_with_empty_or_whitespace_zh_tw() {
+        // Symmetric defense for the zh-TW side: the embedded YAML test
+        // (`every_domain_has_zh_tw_name`) already prevents this from
+        // shipping, but the matcher belt-and-braces it.
+        let domains = [
+            fixture("blank", 1, "", None),
+            fixture("blanks", 2, "   ", None),
+            fixture("ok", 3, "OK", None),
+        ];
+        let d = map_in(&["OK"], &domains).expect("matches third");
+        assert_eq!(d.slug, "ok");
+        assert!(map_in(&["unrelated"], &domains).is_none());
     }
 
     #[test]
