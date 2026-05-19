@@ -13,13 +13,14 @@ description = "cron-driven ETL worker that mirrors upstream data sources"
 workspace = true
 
 [dependencies]
+# Direct deps only — `chrono` and `async-trait` flow in transitively
+# via the in-repo crates / `tokio-cron-scheduler` when actually needed.
+# Keep this list minimal so a future code change has to consciously opt
+# back into them rather than inheriting unused weight.
 connectors = { path = "../connectors" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 anyhow = { workspace = true }
-async-trait = { workspace = true }
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-cron-scheduler = { workspace = true }

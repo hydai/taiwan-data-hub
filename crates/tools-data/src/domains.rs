@@ -123,15 +123,27 @@ pub fn map_to_domain<S: AsRef<str>>(upstream: &[S]) -> Option<&'static Domain> {
     None
 }
 
-/// Cached view of the embedded `config/domains.yaml`.
+/// Cached view of the embedded `config/domains.yaml`, **sorted by
+/// `sort_order`** so iteration semantics don't depend on the order
+/// the maintainer happens to have written the YAML in. Tools like
+/// `list_domains` and `map_to_domain` rely on this invariant.
 ///
-/// Panics on first use if the YAML is malformed — which would mean the
-/// binary was built from a broken `config/domains.yaml`. The unit test
-/// below guarantees this doesn't ship.
+/// Panics on first use if the YAML is malformed — which would mean
+/// the binary was built from a broken `config/domains.yaml`. The
+/// unit test below guarantees this doesn't ship.
 pub fn embedded() -> &'static [Domain] {
     static CACHE: OnceLock<Vec<Domain>> = OnceLock::new();
     CACHE
-        .get_or_init(|| parse(DOMAINS_YAML).expect("config/domains.yaml must parse"))
+        .get_or_init(|| {
+            let mut domains =
+                parse(DOMAINS_YAML).expect("config/domains.yaml must parse");
+            // Stable sort so equal `sort_order` rows preserve their
+            // authored order — relevant for the kind grouping
+            // (topical/meta/horizontal) where each kind has a
+            // contiguous sort_order range.
+            domains.sort_by_key(|d| d.sort_order);
+            domains
+        })
         .as_slice()
 }
 
