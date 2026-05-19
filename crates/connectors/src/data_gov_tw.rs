@@ -25,7 +25,10 @@ use crate::{Cursor, DatasetMetadata, Page, SourceConnector, SourceId};
 const DEFAULT_BASE_URL: &str = "https://data.gov.tw";
 const DEFAULT_PATH: &str = "/api/v2/rest/dataset";
 const DEFAULT_LIMIT: u32 = 100;
-/// data.gov.tw is occasionally slow; 60s matches DESIGN.md §11.1 budget.
+/// data.gov.tw is occasionally slow under load. 60s is generous enough
+/// to ride out short upstream pauses without letting one stuck request
+/// block the whole crawl. Override via `Builder::timeout_secs` for
+/// tests or for restricted-network environments.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const USER_AGENT: &str = concat!(
     "taiwan-data-hub/",
@@ -228,23 +231,31 @@ fn parse_cursor(
 fn into_metadata(raw: CkanDataset) -> DatasetMetadata {
     let mut title_i18n = BTreeMap::new();
     title_i18n.insert("zh-TW".to_owned(), raw.title.clone());
-    if let Some(en) = raw.title_en.filter(|s| !s.is_empty()) {
+    if let Some(en) = non_empty(raw.title_en) {
         title_i18n.insert("en".to_owned(), en);
     }
 
     let mut description_i18n = BTreeMap::new();
-    if let Some(notes) = raw.notes.filter(|s| !s.is_empty()) {
+    if let Some(notes) = non_empty(raw.notes) {
         description_i18n.insert("zh-TW".to_owned(), notes);
     }
-    if let Some(en) = raw.notes_en.filter(|s| !s.is_empty()) {
+    if let Some(en) = non_empty(raw.notes_en) {
         description_i18n.insert("en".to_owned(), en);
     }
 
+    // For each group, pick the first non-empty human-readable label
+    // (title → display_name → name). Without the `non_empty`
+    // normalisation an empty `title: ""` would win against a
+    // populated `display_name` and the entry would silently drop out
+    // at the outer filter.
     let categories = raw
         .groups
         .into_iter()
-        .filter_map(|g| g.title.or(g.display_name).or(Some(g.name)))
-        .filter(|s| !s.is_empty())
+        .filter_map(|g| {
+            non_empty(g.title)
+                .or_else(|| non_empty(g.display_name))
+                .or_else(|| non_empty(Some(g.name)))
+        })
         .collect();
 
     let original_url = Some(format!("https://data.gov.tw/dataset/{}", raw.name));
@@ -254,12 +265,13 @@ fn into_metadata(raw: CkanDataset) -> DatasetMetadata {
         slug: raw.name,
         title_i18n,
         description_i18n,
-        license: raw
-            .license_title
-            .or(raw.license_id)
+        license: non_empty(raw.license_title)
+            .or_else(|| non_empty(raw.license_id))
             .unwrap_or_else(|| "unspecified".to_owned()),
-        publisher: raw.organization.and_then(|o| o.title.or(Some(o.name))),
-        update_frequency: raw.frequency,
+        publisher: raw
+            .organization
+            .and_then(|o| non_empty(o.title).or_else(|| non_empty(Some(o.name)))),
+        update_frequency: non_empty(raw.frequency),
         original_url,
         last_modified_at: raw
             .metadata_modified
@@ -267,6 +279,14 @@ fn into_metadata(raw: CkanDataset) -> DatasetMetadata {
             .and_then(parse_ckan_timestamp),
         upstream_categories: categories,
     }
+}
+
+/// Treat `Some("")` as `None`. CKAN sources frequently emit empty
+/// strings for "unset" fields; if we left them through, `Option::or`
+/// chains would short-circuit on the empty string and bypass the
+/// intended fallback (e.g. `title → display_name → name`).
+fn non_empty(s: Option<String>) -> Option<String> {
+    s.filter(|x| !x.is_empty())
 }
 
 /// CKAN's `metadata_modified` is ISO-8601 without a timezone suffix —
@@ -605,6 +625,45 @@ mod tests {
         let (offset, limit) = parse_cursor(None, 100).expect("ok");
         assert_eq!(offset, 0);
         assert_eq!(limit, 100);
+    }
+
+    /// Regression for Copilot PR #94 round 3: `Some("")` in a CKAN
+    /// optional-string field used to short-circuit `Option::or` chains
+    /// and drop the value entirely (or surface as an empty string in
+    /// the output). The `non_empty` helper now normalises empties to
+    /// `None` so the fallback ladder keeps running.
+    #[tokio::test]
+    async fn empty_strings_fall_back_to_next_option() {
+        let dataset = json!({
+            "id": "regress",
+            "name": "regress-slug",
+            "title": "regress-zh",
+            "license_title": "",
+            "license_id": "CC-BY-4.0",
+            "organization": {"name": "the-agency", "title": ""},
+            "groups": [
+                {"name": "real-name", "title": "", "display_name": ""},
+                {"name": "fallback-name", "title": "", "display_name": "Fallback Display"}
+            ],
+            "frequency": ""
+        });
+        let envelope = sample_envelope(1, &[dataset]);
+        let server = mock_server_with_pages(envelope, None).await;
+        let d = connector(&server)
+            .list_datasets(None)
+            .await
+            .unwrap()
+            .items
+            .remove(0);
+
+        // license: empty title → fall through to license_id.
+        assert_eq!(d.license, "CC-BY-4.0");
+        // publisher: empty title → fall through to organization.name.
+        assert_eq!(d.publisher.as_deref(), Some("the-agency"));
+        // groups: each entry should pick the first NON-EMPTY label.
+        assert_eq!(d.upstream_categories, vec!["real-name", "Fallback Display"]);
+        // frequency: empty → None (not Some("")).
+        assert!(d.update_frequency.is_none());
     }
 
     #[test]
