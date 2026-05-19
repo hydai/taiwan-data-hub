@@ -128,6 +128,11 @@ pub enum SqlError {
          (self-joins and cartesian products are rejected to bound execution cost)"
     )]
     TooManyRelations(usize),
+    #[error(
+        "FROM clause must reference `current_dataset` exactly once \
+         (constant-only queries like `SELECT 1` are not useful here)"
+    )]
+    MissingFromCurrentDataset,
     #[error("function `{0}` is not in the allow-list")]
     DisallowedFunction(String),
     #[error("SELECT … INTO is not allowed")]
@@ -259,10 +264,11 @@ fn walk_relations(query: &Query) -> Result<(), SqlError> {
     if let Some(e) = visitor.err {
         return Err(e);
     }
-    if visitor.relation_count > 1 {
-        return Err(SqlError::TooManyRelations(visitor.relation_count));
+    match visitor.relation_count {
+        0 => Err(SqlError::MissingFromCurrentDataset),
+        1 => Ok(()),
+        n => Err(SqlError::TooManyRelations(n)),
     }
-    Ok(())
 }
 
 /// Reject any `TableFactor` shape other than `Table { name, … }` in
@@ -640,6 +646,20 @@ mod tests {
                 "expected rejection for `{sql}`",
             );
         }
+    }
+
+    #[test]
+    fn constant_select_without_from_rejected() {
+        // `SELECT 1` parses cleanly and has zero TableFactor::Table
+        // visits, which used to slip past the `count > 1` check.
+        // The contract is "exactly one reference to current_dataset",
+        // so the zero case needs an explicit error.
+        assert_eq!(assert_err("SELECT 1"), SqlError::MissingFromCurrentDataset,);
+        // `SELECT count(*)` is similarly FROM-less.
+        assert_eq!(
+            assert_err("SELECT count(*)"),
+            SqlError::MissingFromCurrentDataset,
+        );
     }
 
     #[test]
