@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use chrono::Utc;
 use connectors::{DatasetMetadata, SourceId};
 use serde_json::{Map, Value};
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
@@ -60,7 +59,6 @@ impl Storage {
         } else {
             Some(i18n_to_jsonb(&metadata.description_i18n)?)
         };
-        let last_modified = metadata.last_modified_at.unwrap_or_else(Utc::now);
 
         let row: (Uuid,) = sqlx::query_as(UPSERT_SQL)
             .bind(source.as_str())
@@ -73,7 +71,10 @@ impl Storage {
             .bind(metadata.publisher.as_ref())
             .bind(metadata.update_frequency.as_ref())
             .bind(metadata.original_url.as_ref())
-            .bind(last_modified)
+            // `Option<DateTime<Utc>>` is bound as NULL when upstream
+            // omits the timestamp. The SQL COALESCE chain then picks
+            // the right fallback for each path (insert vs. update).
+            .bind(metadata.last_modified_at)
             .fetch_one(&self.pool)
             .await?;
         Ok(row.0)
@@ -110,10 +111,20 @@ pub enum StorageError {
 }
 
 /// ON CONFLICT preserves the internal tier / cache columns and the
-/// `first_seen_at` timestamp; only upstream-controlled columns
-/// refresh. The `RETURNING id` clause lets callers correlate inserts
-/// across runs (`UUIDv7` is sortable, so the value is stable for a
-/// given dataset even after updates).
+/// `first_seen_at` timestamp; only upstream-controlled columns refresh.
+/// The `id` is not modified by the conflict clause, so the row's UUID
+/// stays stable across updates and `RETURNING id` gives callers a key
+/// they can use to correlate later writes. (`UUIDv7`'s sortability is
+/// a separate property — it orders rows by creation time but is not
+/// what guarantees update-stability.)
+///
+/// `last_modified_at` uses `COALESCE($11, ...)` to keep the meaning
+/// of "upstream omitted the timestamp" honest across both code paths:
+///
+/// - INSERT — fall back to `now()` (the column's `NOT NULL` default).
+/// - UPDATE — preserve the existing value (`datasets.last_modified_at`).
+///   Without this, every crawl of a source that doesn't carry
+///   `metadata_modified` would bump the timestamp on every run.
 const UPSERT_SQL: &str = "
     INSERT INTO datasets (
         source, source_id, slug, domain_id,
@@ -124,7 +135,7 @@ const UPSERT_SQL: &str = "
         $1, $2, $3, $4,
         $5, $6,
         $7, $8, $9, $10,
-        $11
+        COALESCE($11, now())
     )
     ON CONFLICT (source, source_id) DO UPDATE SET
         slug              = EXCLUDED.slug,
@@ -135,14 +146,14 @@ const UPSERT_SQL: &str = "
         publisher         = EXCLUDED.publisher,
         update_frequency  = EXCLUDED.update_frequency,
         original_url      = EXCLUDED.original_url,
-        last_modified_at  = EXCLUDED.last_modified_at
+        last_modified_at  = COALESCE($11, datasets.last_modified_at)
     RETURNING id;
 ";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
+    use chrono::{DateTime, Utc};
     use testcontainers_modules::postgres::Postgres as PgContainer;
     use testcontainers_modules::testcontainers::ContainerAsync;
     use testcontainers_modules::testcontainers::ImageExt;
@@ -272,6 +283,47 @@ mod tests {
                 .expect("row");
         assert_eq!(row.0, "bronze", "default tier on first insert");
         assert_eq!(row.1, "0.000");
+    }
+
+    /// Regression for Copilot PR #95 round 1: when upstream omits
+    /// `metadata_modified`, an update must NOT bump `last_modified_at`
+    /// to `now()`. The COALESCE in `UPSERT_SQL` should preserve the
+    /// previous value.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn upsert_preserves_last_modified_at_when_upstream_omits_it() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // First insert: upstream provides a timestamp. Row gets it.
+        let m1 = sample_metadata();
+        let expected = m1.last_modified_at.expect("sample carries a timestamp");
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m1)
+            .await
+            .expect("insert");
+
+        // Second upsert: upstream omits `metadata_modified`. The
+        // stored value MUST stay pinned to the original timestamp;
+        // bumping to `now()` would falsely advertise an update.
+        let mut m2 = sample_metadata();
+        m2.last_modified_at = None;
+        m2.license = "CC-BY-4.0".into();
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m2)
+            .await
+            .expect("update");
+
+        let row: (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT last_modified_at FROM datasets WHERE source_id = $1")
+                .bind("11102")
+                .fetch_one(storage.pool())
+                .await
+                .expect("row");
+        assert_eq!(
+            row.0, expected,
+            "last_modified_at must not move when upstream omits the value",
+        );
     }
 
     #[test]
