@@ -7,11 +7,12 @@
 //!
 //! Configuration is via environment variables:
 //!
-//! | env                  | required | default                       |
-//! |----------------------|----------|-------------------------------|
-//! | `DATABASE_URL`       | yes      | —                             |
-//! | `DATA_GOV_TW_URL`    | no       | `https://data.gov.tw`         |
-//! | `ETL_RUN_AT_STARTUP` | no       | `false`                       |
+//! | env                       | required | default                       |
+//! |---------------------------|----------|-------------------------------|
+//! | `DATABASE_URL`            | yes      | —                             |
+//! | `DATA_GOV_TW_URL`         | no       | `https://data.gov.tw`         |
+//! | `ETL_DB_MAX_CONNECTIONS`  | no       | `20`                          |
+//! | `ETL_RUN_AT_STARTUP`      | no       | `false`                       |
 //!
 //! When `ETL_RUN_AT_STARTUP=true` (handy for local dev / CI smoke
 //! tests) the worker runs a single immediate pass before settling
@@ -23,6 +24,7 @@ use std::env;
 
 use anyhow::{Context, Result};
 use connectors::data_gov_tw::DataGovTwConnector;
+use sqlx::postgres::PgPoolOptions;
 use storage::Storage;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing_subscriber::EnvFilter;
@@ -47,9 +49,7 @@ async fn main() -> Result<()> {
 
     let database_url =
         env::var("DATABASE_URL").context("DATABASE_URL is required for the ETL worker")?;
-    let storage = Storage::connect(&database_url)
-        .await
-        .context("storage::connect failed — is Postgres reachable?")?;
+    let storage = connect_storage(&database_url).await?;
 
     let connector = build_data_gov_tw_connector()?;
 
@@ -99,6 +99,33 @@ async fn main() -> Result<()> {
         .context("scheduler shutdown failed")?;
     tracing::info!("ETL worker stopped");
     Ok(())
+}
+
+/// Default pool size — wider than `Storage::connect`'s gateway-tuned
+/// 5 because the crawler interleaves dataset upserts and domain-id
+/// lookups concurrently across many tokio tasks. 20 leaves headroom
+/// for cohabitation with the gateway against a shared Postgres
+/// without monopolising connection slots.
+const DEFAULT_ETL_MAX_CONNECTIONS: u32 = 20;
+
+/// Construct the ETL-tuned `Storage`. `Storage::connect` is sized for
+/// the gateway (`max_connections`=5) and explicitly says the crawler
+/// should build its own pool via `from_pool`. Honour the contract:
+/// read `ETL_DB_MAX_CONNECTIONS` (default 20), build a `PgPool`, and
+/// wrap it.
+async fn connect_storage(database_url: &str) -> Result<Storage> {
+    let max_connections = env::var("ETL_DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_ETL_MAX_CONNECTIONS);
+    let pool = PgPoolOptions::new()
+        .max_connections(max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        .connect(database_url)
+        .await
+        .context("could not connect ETL pool — is Postgres reachable?")?;
+    tracing::info!(max_connections, "ETL pool ready");
+    Ok(Storage::from_pool(pool))
 }
 
 fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {

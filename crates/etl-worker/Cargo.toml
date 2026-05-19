@@ -21,6 +21,7 @@ connectors = { path = "../connectors" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 anyhow = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-cron-scheduler = { workspace = true }

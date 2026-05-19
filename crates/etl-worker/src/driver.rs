@@ -65,8 +65,13 @@ pub async fn run_one_pass<C: SourceConnector>(
     let mut skip_warn_remaining: u32 = SKIP_WARN_BUDGET;
 
     loop {
-        summary.pages = summary.pages.saturating_add(1);
+        // Increment AFTER a successful page fetch so the counter
+        // reflects pages we actually completed. If `list_datasets`
+        // errors, the `?` propagates and `pages` stays at the
+        // last-good value — matters for the summary an operator
+        // reads after a crash.
         let Page { items, next, total } = connector.list_datasets(cursor.clone()).await?;
+        summary.pages = summary.pages.saturating_add(1);
         // `?total` renders the `Option<u64>` via Debug — `None` /
         // `Some(123)` — without allocating a fallback `String` per
         // page even when debug logging is disabled. Matters for a
