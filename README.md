@@ -81,11 +81,15 @@ Taiwan Data Hub ships two MCP transports off the same dispatcher:
 ```bash
 git clone https://github.com/hydai/taiwan-data-hub.git
 cd taiwan-data-hub
-cargo build --release -p mcp-stdio -p gateway
+cargo build --release --locked -p mcp-stdio -p gateway
 # Resulting binaries:
 #   target/release/mcp-stdio
 #   target/release/gateway
 ```
+
+`--locked` matches CI and avoids silently updating `Cargo.lock` to
+the latest semver-compatible versions. Drop it only if you're
+intentionally bumping a dependency.
 
 Use the absolute path from the snippets below — most MCP clients won't
 resolve `~` or `$HOME` inside the config JSON.
@@ -112,7 +116,8 @@ set GATEWAY_ADDR=127.0.0.1:8080
 .\target\release\gateway.exe
 ```
 
-Then run the Inspector:
+Then run the Inspector. The `--cli` flag runs it headlessly and
+prints a single JSON-RPC result — handy for verification and CI:
 
 ```bash
 # stdio
@@ -128,6 +133,20 @@ npx -y @modelcontextprotocol/inspector --cli \
 
 Both should return the current tool list (one entry today:
 `list_domains`).
+
+For interactive exploration (browser UI, call any tool, see logs),
+drop `--cli`:
+
+```bash
+# stdio — Inspector spawns mcp-stdio for you
+npx @modelcontextprotocol/inspector cargo run --release -p mcp-stdio
+
+# Streamable HTTP — point Inspector at the running gateway
+npx @modelcontextprotocol/inspector http://127.0.0.1:8080/mcp
+```
+
+The interactive form opens `http://localhost:6274` and is the form
+referenced in [`docs/DESIGN.md`](docs/DESIGN.md) §14.
 
 ### 3. Wire your client
 
@@ -267,10 +286,10 @@ Streamable HTTP:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Client shows 0 tools | Path uses `~` or `$HOME` | Replace with the absolute path |
-| `Failed to spawn process` | Binary not built | Re-run `cargo build --release -p mcp-stdio` |
+| `Failed to spawn process` | Binary not built | Re-run `cargo build --release --locked -p mcp-stdio` |
 | HTTP config times out | Gateway not running, or wrong port | Start the gateway (see step 2) |
 | `Bad Request: missing Host header` | Reverse proxy or raw-socket client stripped `Host:`. Browsers and modern HTTP clients (`curl`, `httpie`, `reqwest`, fetch) always set it automatically. | Send the header explicitly — `curl -H "Host: 127.0.0.1:8080" ...` — or fix the proxy config |
-| Server reports `name: "rmcp"` | Old build before the identity fix | `cargo build --release` against `main` |
+| Server reports `name: "rmcp"` | Old build before the identity fix | `cargo build --release --locked` against `main` |
 
 ### Screenshots
 
