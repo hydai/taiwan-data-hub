@@ -106,9 +106,13 @@ fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
     if let Ok(url) = env::var("DATA_GOV_TW_URL") {
         builder = builder.base_url(url);
     }
+    // `.context` preserves `BuildError` as the underlying source so
+    // anyhow's chain reporting surfaces "invalid URL" vs. "reqwest
+    // client build failed" verbatim. A bare `anyhow!(\"...: {e}\")`
+    // flattens that chain into a string and drops the root cause.
     builder
         .build()
-        .map_err(|e| anyhow::anyhow!("could not build data.gov.tw connector: {e}"))
+        .context("could not build data.gov.tw connector")
 }
 
 fn run_at_startup() -> bool {
@@ -118,16 +122,29 @@ fn run_at_startup() -> bool {
         .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-/// Sleep until SIGTERM or SIGINT arrives so the scheduler can run
-/// indefinitely under `docker compose` / systemd / k8s.
+/// Sleep until a shutdown signal arrives so the scheduler can run
+/// indefinitely under `docker compose` / systemd / k8s, or Windows
+/// (the README still lists Windows in the Quickstart).
+///
+/// Unix gets the rich SIGTERM/SIGINT pair (so `docker stop` SIGTERM
+/// drains cleanly). Other platforms fall back to `ctrl_c()` which
+/// covers SIGINT-equivalent shutdown without pulling in
+/// `tokio::signal::unix` (which only compiles on Unix).
 async fn wait_for_shutdown() {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM");
-    let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT");
-    tokio::select! {
-        _ = sigterm.recv() => tracing::info!("received SIGTERM"),
-        _ = sigint.recv() => tracing::info!("received SIGINT"),
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM");
+        let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT");
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+            _ = sigint.recv() => tracing::info!("received SIGINT"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("received Ctrl-C");
     }
 }
 

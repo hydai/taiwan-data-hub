@@ -45,15 +45,24 @@ pub async fn run_one_pass<C: SourceConnector>(
     let source = connector.source_id();
     let mut summary = CrawlSummary::default();
     let mut cursor = None;
-    let mut domain_cache: BTreeMap<String, i16> = BTreeMap::new();
+    // `Option<i16>` rather than `i16`: caches **negative** lookups too
+    // (a domain slug not present in the `domains` table seed). Without
+    // this, every dataset that maps to a missing-slug would re-issue
+    // the SQL probe AND re-emit a WARN log line, which under a YAML /
+    // migration mismatch could mean 50k+ extra queries per crawl.
+    let mut domain_cache: BTreeMap<String, Option<i16>> = BTreeMap::new();
 
     loop {
         summary.pages = summary.pages.saturating_add(1);
         let Page { items, next, total } = connector.list_datasets(cursor.clone()).await?;
+        // `?total` renders the `Option<u64>` via Debug — `None` /
+        // `Some(123)` — without allocating a fallback `String` per
+        // page even when debug logging is disabled. Matters for a
+        // 50k-row crawl that paginates ~500 times.
         tracing::debug!(
             page = summary.pages,
             batch = items.len(),
-            total = total.map_or("unknown".to_owned(), |t| t.to_string()),
+            ?total,
             "fetched page"
         );
 
@@ -89,32 +98,35 @@ pub async fn run_one_pass<C: SourceConnector>(
 
 /// Resolve `meta.upstream_categories` → `domain_id` via
 /// [`tools_data::domains::map_to_domain`], then look up the surrogate
-/// id in Postgres. Caches the lookup so a 50k-row crawl issues at
-/// most 20 queries (one per matched domain).
+/// id in Postgres. Caches both **positive** lookups (so a 50k-row
+/// crawl issues at most 20 queries) and **negative** ones (so a
+/// missing-from-DB slug doesn't re-query + re-warn for every dataset
+/// that maps to it).
 async fn resolve_domain_id(
     storage: &Storage,
     meta: &DatasetMetadata,
-    cache: &mut BTreeMap<String, i16>,
+    cache: &mut BTreeMap<String, Option<i16>>,
 ) -> Result<Option<i16>, CrawlError> {
     let Some(domain) = domains::map_to_domain(&meta.upstream_categories) else {
         return Ok(None);
     };
-    if let Some(id) = cache.get(&domain.slug) {
-        return Ok(Some(*id));
+    if let Some(cached) = cache.get(&domain.slug) {
+        return Ok(*cached);
     }
-    let Some(id) = storage.domain_id_for_slug(&domain.slug).await? else {
+    let resolved = storage.domain_id_for_slug(&domain.slug).await?;
+    if resolved.is_none() {
         // Mapping returned a slug not present in the DB — very unusual
         // (domains are seeded at migration time) but plausible if a
-        // future YAML revision is missing its migration. Treat as
-        // "no domain" rather than crashing the crawl.
+        // future YAML revision is missing its migration. WARN once,
+        // cache the miss, then treat all subsequent datasets that
+        // resolve to this slug as "no domain" silently.
         tracing::warn!(
             slug = %domain.slug,
-            "domain seed not in DB; mapping skipped",
+            "domain seed not in DB; mapping skipped (further misses cached, won't re-warn)",
         );
-        return Ok(None);
-    };
-    cache.insert(domain.slug.clone(), id);
-    Ok(Some(id))
+    }
+    cache.insert(domain.slug.clone(), resolved);
+    Ok(resolved)
 }
 
 #[cfg(test)]
