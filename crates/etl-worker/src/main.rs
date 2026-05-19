@@ -183,8 +183,13 @@ fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
 }
 
 fn run_at_startup() -> Result<bool> {
+    // Trim before matching so `ETL_RUN_AT_STARTUP=" true "` (common
+    // when templated env files leave surrounding whitespace) still
+    // resolves to true — consistent with the trim+empty-skip pattern
+    // applied to `ETL_DB_MAX_CONNECTIONS` and `DATA_GOV_TW_URL`.
     Ok(read_optional_env("ETL_RUN_AT_STARTUP")?
         .as_deref()
+        .map(str::trim)
         .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes")))
 }
 
