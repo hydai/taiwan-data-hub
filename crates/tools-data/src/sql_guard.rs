@@ -57,6 +57,14 @@ pub const DEFAULT_MAX_LIMIT: u64 = 10_000;
 
 /// Function allow-list, lowercase. Reasonable analytics surface
 /// without exposing system or filesystem-touching primitives.
+///
+/// This list only gates `Expr::Function` calls. Other expression
+/// shapes — `Expr::Case`, `Expr::BinaryOp`, `Expr::Cast`,
+/// `Expr::Between`, `Expr::IsNull`, … — flow through the visitor
+/// unchallenged because they're built-in SQL forms (not function
+/// calls) and there's no reason to forbid them. In particular,
+/// `CASE WHEN … THEN … ELSE … END` works fine and does NOT need an
+/// entry here.
 const ALLOWED_FUNCTIONS: &[&str] = &[
     // Aggregates
     "count",
@@ -102,8 +110,6 @@ const ALLOWED_FUNCTIONS: &[&str] = &[
     "nullif",
     "greatest",
     "least",
-    // Cardinality helpers people commonly reach for
-    "case",
 ];
 
 /// Errors a malformed or disallowed query can produce.
@@ -601,6 +607,23 @@ mod tests {
             let err = validate(sql, DEFAULT_MAX_LIMIT);
             assert!(err.is_err(), "expected error for `{sql}`, got {err:?}");
         }
+    }
+
+    /// `CASE WHEN … THEN … ELSE … END` is a built-in SQL form, NOT
+    /// a function call, so the function allow-list doesn't gate it
+    /// either way. Pin this so a future maintainer cleaning up
+    /// `ALLOWED_FUNCTIONS` doesn't think they broke CASE support.
+    #[test]
+    fn case_expression_passes_without_function_allowlist_entry() {
+        assert_ok("SELECT CASE WHEN tier = 'platinum' THEN 1 ELSE 0 END FROM current_dataset");
+        // Searched-CASE with multiple WHEN arms also works.
+        assert_ok(
+            "SELECT CASE \
+                WHEN tier = 'platinum' THEN 'top' \
+                WHEN tier = 'gold' THEN 'mid' \
+                ELSE 'low' \
+             END FROM current_dataset",
+        );
     }
 
     #[test]
