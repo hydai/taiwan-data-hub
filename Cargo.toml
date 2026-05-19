@@ -46,6 +46,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 url = "2"
 wiremock = "0.6"
+# sqlx 0.8.6 per DESIGN.md §5; rustls TLS to match the rest of the stack.
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate"] }
+uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
+testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

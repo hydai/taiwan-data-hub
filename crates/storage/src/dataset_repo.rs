@@ -1,0 +1,336 @@
+//! `datasets` table repository.
+
+use std::collections::BTreeMap;
+
+use connectors::{DatasetMetadata, SourceId};
+use serde_json::{Map, Value};
+use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use uuid::Uuid;
+
+/// `PostgreSQL` pool wrapper. `Clone` is cheap — the inner pool is
+/// `Arc`-backed.
+#[derive(Debug, Clone)]
+pub struct Storage {
+    pool: Pool<Postgres>,
+}
+
+impl Storage {
+    /// Connect to Postgres at `database_url`. The pool is sized for the
+    /// gateway's expected fan-out (5 connections), not for a heavy ETL
+    /// crawl — the crawler should construct its own [`Storage`] with a
+    /// larger pool via [`Self::from_pool`] once #1.4c lands.
+    pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect(database_url)
+            .await?;
+        Ok(Self { pool })
+    }
+
+    /// Wrap an existing pool — used by tests (testcontainers) and by
+    /// callers that need to share a pool across crates.
+    pub fn from_pool(pool: Pool<Postgres>) -> Self {
+        Self { pool }
+    }
+
+    pub fn pool(&self) -> &Pool<Postgres> {
+        &self.pool
+    }
+
+    /// Insert or update the `datasets` row matching `(source,
+    /// source_id)`. Returns the row's UUID — newly minted on insert,
+    /// preserved on update.
+    ///
+    /// Upstream-controlled columns are refreshed on every call.
+    /// Internal columns — `tier`, `tier_score`, `tier_override`,
+    /// `cached`, `cache_path`, `tsv`, `first_seen_at` — are left
+    /// untouched on update so the tier classifier and FTS pipeline
+    /// can run independently of the crawl cadence.
+    pub async fn upsert_dataset(
+        &self,
+        domain_id: i16,
+        source: SourceId,
+        metadata: &DatasetMetadata,
+    ) -> Result<Uuid, StorageError> {
+        let title = i18n_to_jsonb(&metadata.title_i18n)?;
+        let description = if metadata.description_i18n.is_empty() {
+            None
+        } else {
+            Some(i18n_to_jsonb(&metadata.description_i18n)?)
+        };
+
+        let row: (Uuid,) = sqlx::query_as(UPSERT_SQL)
+            .bind(source.as_str())
+            .bind(&metadata.source_id)
+            .bind(&metadata.slug)
+            .bind(domain_id)
+            .bind(title)
+            .bind(description)
+            .bind(&metadata.license)
+            .bind(metadata.publisher.as_ref())
+            .bind(metadata.update_frequency.as_ref())
+            .bind(metadata.original_url.as_ref())
+            // `Option<DateTime<Utc>>` is bound as NULL when upstream
+            // omits the timestamp. The SQL COALESCE chain then picks
+            // the right fallback for each path (insert vs. update).
+            .bind(metadata.last_modified_at)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.0)
+    }
+}
+
+/// Convert a `BTreeMap<String, String>` into the `jsonb` shape the
+/// schema CHECK constraints expect (`{"zh-TW": "...", "en": "..."}`).
+/// Returns [`StorageError::MissingZhTw`] when the source language is
+/// absent — the schema would reject it loudly anyway, but failing
+/// here keeps the error surface aligned with the connector contract.
+fn i18n_to_jsonb(text: &BTreeMap<String, String>) -> Result<Value, StorageError> {
+    if !text.contains_key("zh-TW") {
+        return Err(StorageError::MissingZhTw);
+    }
+    let mut map = Map::with_capacity(text.len());
+    for (k, v) in text {
+        map.insert(k.clone(), Value::String(v.clone()));
+    }
+    Ok(Value::Object(map))
+}
+
+/// Errors emitted by the storage layer. `sqlx::Error` covers
+/// connection/transport/SQL-level issues; [`Self::MissingZhTw`]
+/// is a domain-level invariant check.
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("i18n payload missing required `zh-TW` key")]
+    MissingZhTw,
+    #[error("JSON encoding error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// ON CONFLICT preserves the internal tier / cache columns and the
+/// `first_seen_at` timestamp; only upstream-controlled columns refresh.
+/// The `id` is not modified by the conflict clause, so the row's UUID
+/// stays stable across updates and `RETURNING id` gives callers a key
+/// they can use to correlate later writes. (`UUIDv7`'s sortability is
+/// a separate property — it orders rows by creation time but is not
+/// what guarantees update-stability.)
+///
+/// `last_modified_at` uses `COALESCE($11, ...)` to keep the meaning
+/// of "upstream omitted the timestamp" honest across both code paths:
+///
+/// - INSERT — fall back to `now()` (the column's `NOT NULL` default).
+/// - UPDATE — preserve the existing value (`datasets.last_modified_at`).
+///   Without this, every crawl of a source that doesn't carry
+///   `metadata_modified` would bump the timestamp on every run.
+const UPSERT_SQL: &str = "
+    INSERT INTO datasets (
+        source, source_id, slug, domain_id,
+        title_i18n, description_i18n,
+        license, publisher, update_frequency, original_url,
+        last_modified_at
+    ) VALUES (
+        $1, $2, $3, $4,
+        $5, $6,
+        $7, $8, $9, $10,
+        COALESCE($11, now())
+    )
+    ON CONFLICT (source, source_id) DO UPDATE SET
+        slug              = EXCLUDED.slug,
+        domain_id         = EXCLUDED.domain_id,
+        title_i18n        = EXCLUDED.title_i18n,
+        description_i18n  = EXCLUDED.description_i18n,
+        license           = EXCLUDED.license,
+        publisher         = EXCLUDED.publisher,
+        update_frequency  = EXCLUDED.update_frequency,
+        original_url      = EXCLUDED.original_url,
+        last_modified_at  = COALESCE($11, datasets.last_modified_at)
+    RETURNING id;
+";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+    use testcontainers_modules::postgres::Postgres as PgContainer;
+    use testcontainers_modules::testcontainers::ContainerAsync;
+    use testcontainers_modules::testcontainers::ImageExt;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    /// Spin up a fresh Postgres 18 container, run the project's
+    /// migrations against it, and return a [`Storage`] pointed at
+    /// it. The container is held alive by the returned handle —
+    /// drop it to terminate the container.
+    async fn fresh_storage() -> (Storage, ContainerAsync<PgContainer>) {
+        let container = PgContainer::default()
+            .with_tag("18-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let host = container.get_host().await.expect("host");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect");
+
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        (Storage::from_pool(pool), container)
+    }
+
+    fn sample_metadata() -> DatasetMetadata {
+        DatasetMetadata {
+            source_id: "11102".into(),
+            slug: "real-estate-prices".into(),
+            title_i18n: BTreeMap::from([
+                ("zh-TW".to_owned(), "實價登錄價格".to_owned()),
+                ("en".to_owned(), "Real estate prices".to_owned()),
+            ]),
+            description_i18n: BTreeMap::from([(
+                "zh-TW".to_owned(),
+                "全國不動產交易實價揭露".to_owned(),
+            )]),
+            license: "政府資料開放授權條款-第1版".into(),
+            publisher: Some("內政部地政司".into()),
+            update_frequency: Some("每月更新".into()),
+            original_url: Some("https://data.gov.tw/dataset/real-estate-prices".into()),
+            last_modified_at: DateTime::parse_from_rfc3339("2026-04-15T03:30:00Z")
+                .ok()
+                .map(|d| d.with_timezone(&Utc)),
+            upstream_categories: vec!["不動產與土地".into()],
+        }
+    }
+
+    /// realestate-land domain is seeded with id=1 in
+    /// `migrations/0002_seed_domains.sql` (first INSERT row).
+    async fn realestate_land_id(storage: &Storage) -> i16 {
+        let row: (i16,) = sqlx::query_as("SELECT id FROM domains WHERE slug = 'realestate-land'")
+            .fetch_one(storage.pool())
+            .await
+            .expect("seeded domain present");
+        row.0
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn upsert_inserts_then_updates_on_natural_key() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        let m1 = sample_metadata();
+        let id_first = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m1)
+            .await
+            .expect("first upsert");
+
+        // Same natural key, different mutable fields. UUID must
+        // survive the update (UUIDv7 stays stable for the row); the
+        // changed columns must be reflected.
+        let mut m2 = sample_metadata();
+        m2.license = "CC-BY-4.0".into();
+        m2.publisher = Some("地政司".into());
+        let id_second = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m2)
+            .await
+            .expect("second upsert");
+
+        assert_eq!(id_first, id_second, "natural-key upsert must preserve id");
+
+        let row: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT license, slug, publisher FROM datasets WHERE source = $1 AND source_id = $2",
+        )
+        .bind(SourceId::DataGovTw.as_str())
+        .bind(&m1.source_id)
+        .fetch_one(storage.pool())
+        .await
+        .expect("row present after update");
+        assert_eq!(row.0, "CC-BY-4.0", "license must reflect the update");
+        assert_eq!(row.1, "real-estate-prices");
+        assert_eq!(
+            row.2.as_deref(),
+            Some("地政司"),
+            "publisher must reflect the update"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn upsert_preserves_tier_default_on_first_insert() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("insert");
+
+        // `tier_score` is NUMERIC(4,3); reading it back as a typed
+        // value would need the `bigdecimal` feature, so cast to text
+        // on the SQL side and assert against the canonical render.
+        let row: (String, String) =
+            sqlx::query_as("SELECT tier, tier_score::text FROM datasets WHERE source_id = $1")
+                .bind("11102")
+                .fetch_one(storage.pool())
+                .await
+                .expect("row");
+        assert_eq!(row.0, "bronze", "default tier on first insert");
+        assert_eq!(row.1, "0.000");
+    }
+
+    /// Regression for Copilot PR #95 round 1: when upstream omits
+    /// `metadata_modified`, an update must NOT bump `last_modified_at`
+    /// to `now()`. The COALESCE in `UPSERT_SQL` should preserve the
+    /// previous value.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn upsert_preserves_last_modified_at_when_upstream_omits_it() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // First insert: upstream provides a timestamp. Row gets it.
+        let m1 = sample_metadata();
+        let expected = m1.last_modified_at.expect("sample carries a timestamp");
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m1)
+            .await
+            .expect("insert");
+
+        // Second upsert: upstream omits `metadata_modified`. The
+        // stored value MUST stay pinned to the original timestamp;
+        // bumping to `now()` would falsely advertise an update.
+        let mut m2 = sample_metadata();
+        m2.last_modified_at = None;
+        m2.license = "CC-BY-4.0".into();
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m2)
+            .await
+            .expect("update");
+
+        let row: (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT last_modified_at FROM datasets WHERE source_id = $1")
+                .bind("11102")
+                .fetch_one(storage.pool())
+                .await
+                .expect("row");
+        assert_eq!(
+            row.0, expected,
+            "last_modified_at must not move when upstream omits the value",
+        );
+    }
+
+    #[test]
+    fn missing_zh_tw_in_title_i18n_fails_before_db_round_trip() {
+        let mut m = sample_metadata();
+        m.title_i18n.remove("zh-TW");
+        let err = i18n_to_jsonb(&m.title_i18n).unwrap_err();
+        assert!(matches!(err, StorageError::MissingZhTw));
+    }
+}
