@@ -70,7 +70,12 @@ pub async fn run_one_pass<C: SourceConnector>(
         // errors, the `?` propagates and `pages` stays at the
         // last-good value — matters for the summary an operator
         // reads after a crash.
-        let Page { items, next, total } = connector.list_datasets(cursor.clone()).await?;
+        //
+        // `cursor.take()` moves the `Option<Cursor>` (which owns the
+        // underlying `String`) into the call rather than cloning it
+        // per page; `cursor` is unconditionally re-assigned below
+        // from `next`, so the temporary `None` is irrelevant.
+        let Page { items, next, total } = connector.list_datasets(cursor.take()).await?;
         summary.pages = summary.pages.saturating_add(1);
         // `?total` renders the `Option<u64>` via Debug — `None` /
         // `Some(123)` — without allocating a fallback `String` per

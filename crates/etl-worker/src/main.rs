@@ -102,10 +102,13 @@ async fn main() -> Result<()> {
 }
 
 /// Default pool size — wider than `Storage::connect`'s gateway-tuned
-/// 5 because the crawler interleaves dataset upserts and domain-id
-/// lookups concurrently across many tokio tasks. 20 leaves headroom
-/// for cohabitation with the gateway against a shared Postgres
-/// without monopolising connection slots.
+/// 5 because the binary may eventually run multiple connectors in
+/// parallel (#5b adds TWSE / MOEA / CWA / Fishery) and each crawl
+/// already alternates between dataset upserts and domain-id lookups
+/// against the same pool. Today `run_one_pass` processes datasets
+/// sequentially, so 5 would also work; 20 leaves headroom for the
+/// multi-connector scheduler without monopolising connection slots
+/// when the gateway and the worker share a Postgres.
 const DEFAULT_ETL_MAX_CONNECTIONS: u32 = 20;
 
 /// Construct the ETL-tuned `Storage`. `Storage::connect` is sized for
