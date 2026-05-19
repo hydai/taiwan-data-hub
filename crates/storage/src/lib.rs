@@ -14,4 +14,7 @@
 
 mod dataset_repo;
 
-pub use dataset_repo::{Storage, StorageError};
+pub use dataset_repo::{
+    DatasetFileRow, DatasetFull, DatasetKey, DatasetRow, DatasetVersionRow, Storage, StorageError,
+    VersionWithFiles,
+};

@@ -2,10 +2,95 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use connectors::{DatasetMetadata, SourceId};
 use serde_json::{Map, Value};
-use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use sqlx::{FromRow, Pool, Postgres, postgres::PgPoolOptions};
 use uuid::Uuid;
+
+/// Lookup key for [`Storage::get_dataset`].
+#[derive(Debug, Clone)]
+pub enum DatasetKey {
+    /// UUID primary key.
+    Id(Uuid),
+    /// Marketplace slug (`datasets.slug`). Slugs are unique per
+    /// dataset; the storage layer takes the slug at face value
+    /// without checking uniqueness across sources.
+    Slug(String),
+}
+
+impl DatasetKey {
+    pub fn id(id: Uuid) -> Self {
+        Self::Id(id)
+    }
+    pub fn slug(slug: impl Into<String>) -> Self {
+        Self::Slug(slug.into())
+    }
+}
+
+/// One row from the `datasets` table, untouched by i18n resolution —
+/// callers (tool layer) decide which locale to render. JSONB columns
+/// are returned as `serde_json::Value` so tests can assert against
+/// shapes without re-binding the schema in Rust types.
+#[derive(Debug, Clone, FromRow)]
+pub struct DatasetRow {
+    pub id: Uuid,
+    pub source: String,
+    pub source_id: String,
+    pub slug: String,
+    pub domain_id: i16,
+    pub title_i18n: Value,
+    pub description_i18n: Option<Value>,
+    pub tier: String,
+    pub license: String,
+    pub publisher: Option<String>,
+    pub update_frequency: Option<String>,
+    pub original_url: Option<String>,
+    pub schema_json: Option<Value>,
+    pub row_count_estimate: Option<i64>,
+    pub last_modified_at: DateTime<Utc>,
+    pub first_seen_at: DateTime<Utc>,
+}
+
+/// One row from `dataset_versions`.
+#[derive(Debug, Clone, FromRow)]
+pub struct DatasetVersionRow {
+    pub id: Uuid,
+    pub dataset_id: Uuid,
+    pub version: String,
+    pub fetched_at: DateTime<Utc>,
+    pub checksum: Option<String>,
+    pub row_count: Option<i64>,
+    pub schema_diff: Option<Value>,
+}
+
+/// One row from `dataset_files`.
+#[derive(Debug, Clone, FromRow)]
+pub struct DatasetFileRow {
+    pub id: Uuid,
+    pub dataset_version_id: Uuid,
+    pub format: String,
+    pub uri: String,
+    pub byte_size: Option<i64>,
+    pub checksum: Option<String>,
+}
+
+/// A version with its file children attached. Versions stream out
+/// newest-first; files within a version are ordered by format then id
+/// for stable rendering.
+#[derive(Debug, Clone)]
+pub struct VersionWithFiles {
+    pub version: DatasetVersionRow,
+    pub files: Vec<DatasetFileRow>,
+}
+
+/// Complete read view of a dataset — the shape `get_dataset`
+/// (MCP tool #1.6) is built on top of.
+#[derive(Debug, Clone)]
+pub struct DatasetFull {
+    pub dataset: DatasetRow,
+    pub versions: Vec<VersionWithFiles>,
+}
 
 /// `PostgreSQL` pool wrapper. `Clone` is cheap — the inner pool is
 /// `Arc`-backed.
@@ -79,6 +164,92 @@ impl Storage {
             .await?;
         Ok(row.0)
     }
+
+    /// Fetch the full read view for a dataset by id or slug. Returns
+    /// `None` when no row matches; the tool layer translates that to
+    /// the MCP "not found" error.
+    ///
+    /// Runs three round-trips (datasets / versions / files) rather
+    /// than one big JOIN-aggregating query because the read fan-out
+    /// is small (a dataset has tens of versions max, each with a
+    /// handful of files) and three planning-friendly queries beat
+    /// a single mega-statement that grows with every column added
+    /// to the schema.
+    ///
+    /// Wrapped in a `REPEATABLE READ` transaction so the three
+    /// statements observe one snapshot. Postgres's default
+    /// `READ COMMITTED` takes a new snapshot per statement, which
+    /// would let `dataset_versions` and `dataset_files` reflect
+    /// commits that landed between the initial dataset lookup and
+    /// the join — including a file row whose parent version was
+    /// already dropped.
+    pub async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+
+        let dataset: Option<DatasetRow> = match &key {
+            DatasetKey::Id(id) => {
+                sqlx::query_as::<_, DatasetRow>(DATASET_BY_ID_SQL)
+                    .bind(id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            }
+            DatasetKey::Slug(slug) => {
+                sqlx::query_as::<_, DatasetRow>(DATASET_BY_SLUG_SQL)
+                    .bind(slug)
+                    .fetch_optional(&mut *tx)
+                    .await?
+            }
+        };
+
+        let Some(dataset) = dataset else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let versions: Vec<DatasetVersionRow> = sqlx::query_as(VERSIONS_BY_DATASET_SQL)
+            .bind(dataset.id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+        let version_ids: Vec<Uuid> = versions.iter().map(|v| v.id).collect();
+        let files: Vec<DatasetFileRow> = if version_ids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query_as(FILES_BY_VERSION_IDS_SQL)
+                .bind(&version_ids)
+                .fetch_all(&mut *tx)
+                .await?
+        };
+
+        tx.commit().await?;
+
+        // Group files under their parent version while preserving the
+        // version order (newest first). A linear scan suffices for
+        // realistic version counts.
+        let mut versions_with_files: Vec<VersionWithFiles> = versions
+            .into_iter()
+            .map(|v| VersionWithFiles {
+                version: v,
+                files: Vec::new(),
+            })
+            .collect();
+        for f in files {
+            if let Some(slot) = versions_with_files
+                .iter_mut()
+                .find(|vwf| vwf.version.id == f.dataset_version_id)
+            {
+                slot.files.push(f);
+            }
+        }
+
+        Ok(Some(DatasetFull {
+            dataset,
+            versions: versions_with_files,
+        }))
+    }
 }
 
 /// Convert a `BTreeMap<String, String>` into the `jsonb` shape the
@@ -109,6 +280,45 @@ pub enum StorageError {
     #[error("JSON encoding error: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+// Read-side SQL — column lists are explicit (rather than `SELECT *`)
+// so row decoding stays stable against future schema additions; any
+// new field added to `DatasetRow` must be added here in lockstep, and
+// the testcontainers tests catch the drift at `cargo test`.
+
+const DATASET_BY_ID_SQL: &str = "
+    SELECT
+        id, source, source_id, slug, domain_id,
+        title_i18n, description_i18n, tier, license, publisher,
+        update_frequency, original_url, schema_json, row_count_estimate,
+        last_modified_at, first_seen_at
+    FROM datasets
+    WHERE id = $1
+";
+
+const DATASET_BY_SLUG_SQL: &str = "
+    SELECT
+        id, source, source_id, slug, domain_id,
+        title_i18n, description_i18n, tier, license, publisher,
+        update_frequency, original_url, schema_json, row_count_estimate,
+        last_modified_at, first_seen_at
+    FROM datasets
+    WHERE slug = $1
+";
+
+const VERSIONS_BY_DATASET_SQL: &str = "
+    SELECT id, dataset_id, version, fetched_at, checksum, row_count, schema_diff
+    FROM dataset_versions
+    WHERE dataset_id = $1
+    ORDER BY fetched_at DESC, id
+";
+
+const FILES_BY_VERSION_IDS_SQL: &str = "
+    SELECT id, dataset_version_id, format, uri, byte_size, checksum
+    FROM dataset_files
+    WHERE dataset_version_id = ANY($1)
+    ORDER BY format, id
+";
 
 /// ON CONFLICT preserves the internal tier / cache columns and the
 /// `first_seen_at` timestamp; only upstream-controlled columns refresh.
@@ -323,6 +533,109 @@ mod tests {
         assert_eq!(
             row.0, expected,
             "last_modified_at must not move when upstream omits the value",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn get_dataset_returns_none_when_no_match() {
+        let (storage, _container) = fresh_storage().await;
+        // By id — Uuid::nil() will never match a real row (and we
+        // don't need the v4 feature just to mint a random one).
+        let by_id = storage
+            .get_dataset(DatasetKey::id(Uuid::nil()))
+            .await
+            .expect("ok");
+        assert!(by_id.is_none(), "unknown UUID must yield None");
+
+        // By slug
+        let by_slug = storage
+            .get_dataset(DatasetKey::slug("nope-not-here"))
+            .await
+            .expect("ok");
+        assert!(by_slug.is_none(), "unknown slug must yield None");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn get_dataset_returns_full_view_by_id_and_slug() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Seed a dataset and synthesise a version + two file rows
+        // (no version-creation API yet — that's #1.4d — so we drive
+        // the schema directly).
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed dataset");
+
+        let version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO dataset_versions (dataset_id, version, checksum, row_count) \
+             VALUES ($1, '2026.04', 'abc123', 1000) RETURNING id",
+        )
+        .bind(dataset_id)
+        .fetch_one(storage.pool())
+        .await
+        .expect("seed version");
+
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri, byte_size) \
+             VALUES ($1, 'csv', 's3://bucket/a.csv', 2048), \
+                    ($1, 'parquet', 's3://bucket/a.parquet', 1024)",
+        )
+        .bind(version_id)
+        .execute(storage.pool())
+        .await
+        .expect("seed files");
+
+        // ── by id ──
+        let by_id = storage
+            .get_dataset(DatasetKey::id(dataset_id))
+            .await
+            .expect("ok")
+            .expect("present");
+        assert_eq!(by_id.dataset.id, dataset_id);
+        assert_eq!(by_id.dataset.slug, "real-estate-prices");
+        assert_eq!(by_id.dataset.tier, "bronze", "default tier on first insert");
+        assert_eq!(by_id.versions.len(), 1);
+        let v0 = &by_id.versions[0];
+        assert_eq!(v0.version.version, "2026.04");
+        assert_eq!(v0.version.checksum.as_deref(), Some("abc123"));
+        assert_eq!(v0.files.len(), 2);
+        // Files are ordered by format; csv comes before parquet.
+        assert_eq!(v0.files[0].format, "csv");
+        assert_eq!(v0.files[1].format, "parquet");
+
+        // ── by slug ── must produce the same view ──
+        let by_slug = storage
+            .get_dataset(DatasetKey::slug("real-estate-prices"))
+            .await
+            .expect("ok")
+            .expect("present");
+        assert_eq!(by_slug.dataset.id, dataset_id);
+        assert_eq!(by_slug.versions.len(), 1);
+        assert_eq!(by_slug.versions[0].files.len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn get_dataset_with_no_versions_returns_empty_versions_vec() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        let full = storage
+            .get_dataset(DatasetKey::id(dataset_id))
+            .await
+            .expect("ok")
+            .expect("present");
+        assert!(
+            full.versions.is_empty(),
+            "fresh dataset has no versions yet (#1.4d will start creating them)",
         );
     }
 
