@@ -224,9 +224,13 @@ fn run_polars_query(path: &Path, sql: &str) -> PolarsResult<DataFrame> {
 /// ```
 ///
 /// `truncated` is `true` iff the row count equals `effective_limit` —
-/// i.e. the LIMIT clause held the result back rather than the source
-/// data being exhausted. Operators read this as "your query might
-/// have more rows; raise LIMIT to see them."
+/// the implementation can't distinguish "LIMIT held more rows back"
+/// from "source data had exactly `effective_limit` rows", so the
+/// flag is a conservative *may* signal: "you might have more rows
+/// upstream; raise LIMIT to confirm." A future iteration could scan
+/// `effective_limit + 1` rows à la the `search_datasets` cursor
+/// trick to make this exact, at the cost of one extra row per
+/// query.
 fn render_dataframe(df: &DataFrame, effective_limit: u64) -> Value {
     let columns: Vec<Value> = df
         .get_column_names()
@@ -458,8 +462,10 @@ fn output_schema() -> Map<String, Value> {
                 "type": "boolean",
                 "description":
                     "True if the result row count equals the LIMIT that ran (whichever was \
-                     smaller: the LIMIT in the user's SQL, or the tool cap). Means there \
-                     may be more rows the LIMIT held back; raise it to see them.",
+                     smaller: the LIMIT in the user's SQL, or the tool cap). A conservative \
+                     `may` signal — there *could* be more rows the LIMIT held back, or the \
+                     source could simply have had exactly that many rows. Raise the LIMIT \
+                     to confirm.",
             },
         }),
     );
