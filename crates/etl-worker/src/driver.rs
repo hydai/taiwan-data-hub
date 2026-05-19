@@ -20,11 +20,30 @@ const SKIP_WARN_BUDGET: u32 = 10;
 
 /// Outcome counters from a single crawl pass. Useful for ops dashboards
 /// and tests; the binary logs these at the end of every run.
+///
+/// `skipped_no_domain` and `skipped_no_seed` are split because they map
+/// to different operator responses: the former is a *content* gap
+/// (extend `config/domains.yaml` or add a per-source mapping override
+/// in #1.4d), the latter is a *deploy* gap (a migration didn't run, or
+/// the YAML adds a slug that the migration hasn't seeded).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CrawlSummary {
     pub upserted: u64,
     pub skipped_no_domain: u64,
+    pub skipped_no_seed: u64,
     pub pages: u32,
+}
+
+/// Outcome of resolving one dataset's upstream categories against the
+/// internal domain table. `Option<i16>` would conflate the two
+/// no-route cases (no upstream match vs. mapped-but-seed-missing) and
+/// force the caller to log a generic message that's misleading for the
+/// seed-missing case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainResolution {
+    Mapped(i16),
+    NoMapping,
+    SeedMissing,
 }
 
 /// Errors that bubble out of one crawl pass.
@@ -89,25 +108,41 @@ pub async fn run_one_pass<C: SourceConnector>(
         );
 
         for meta in items {
-            if let Some(domain_id) = resolve_domain_id(storage, &meta, &mut domain_cache).await? {
-                storage.upsert_dataset(domain_id, source, &meta).await?;
-                summary.upserted = summary.upserted.saturating_add(1);
-            } else {
-                if skip_warn_remaining > 0 {
-                    tracing::warn!(
-                        slug = %meta.slug,
-                        categories = ?meta.upstream_categories,
-                        "no domain match — dataset skipped (further skips this pass log at DEBUG)",
-                    );
-                    skip_warn_remaining -= 1;
-                } else {
+            match resolve_domain_id(storage, &meta, &mut domain_cache).await? {
+                DomainResolution::Mapped(domain_id) => {
+                    storage.upsert_dataset(domain_id, source, &meta).await?;
+                    summary.upserted = summary.upserted.saturating_add(1);
+                }
+                DomainResolution::NoMapping => {
+                    if skip_warn_remaining > 0 {
+                        tracing::warn!(
+                            slug = %meta.slug,
+                            categories = ?meta.upstream_categories,
+                            "no domain match — dataset skipped (further skips this pass log at DEBUG)",
+                        );
+                        skip_warn_remaining -= 1;
+                    } else {
+                        tracing::debug!(
+                            slug = %meta.slug,
+                            categories = ?meta.upstream_categories,
+                            "no domain match — dataset skipped",
+                        );
+                    }
+                    summary.skipped_no_domain = summary.skipped_no_domain.saturating_add(1);
+                }
+                DomainResolution::SeedMissing => {
+                    // `resolve_domain_id` already emitted the one-shot
+                    // WARN naming the offending slug (and cached the
+                    // miss so subsequent datasets routing to it don't
+                    // re-warn). Per-dataset trace stays at DEBUG so a
+                    // `RUST_LOG=debug` run can still surface the full
+                    // affected list without flooding default logs.
                     tracing::debug!(
                         slug = %meta.slug,
-                        categories = ?meta.upstream_categories,
-                        "no domain match — dataset skipped",
+                        "domain mapped but DB seed missing — dataset skipped",
                     );
+                    summary.skipped_no_seed = summary.skipped_no_seed.saturating_add(1);
                 }
-                summary.skipped_no_domain = summary.skipped_no_domain.saturating_add(1);
             }
         }
 
@@ -120,7 +155,8 @@ pub async fn run_one_pass<C: SourceConnector>(
     tracing::info!(
         source = %source,
         upserted = summary.upserted,
-        skipped = summary.skipped_no_domain,
+        skipped_no_domain = summary.skipped_no_domain,
+        skipped_no_seed = summary.skipped_no_seed,
         pages = summary.pages,
         "crawl pass complete"
     );
@@ -133,16 +169,24 @@ pub async fn run_one_pass<C: SourceConnector>(
 /// crawl issues at most 20 queries) and **negative** ones (so a
 /// missing-from-DB slug doesn't re-query + re-warn for every dataset
 /// that maps to it).
+///
+/// Returns a [`DomainResolution`] so the caller can distinguish "no
+/// upstream category matched any domain" from "a domain matched, but
+/// its slug isn't seeded in the DB" — the two cases need different
+/// log messages and different counters.
 async fn resolve_domain_id(
     storage: &Storage,
     meta: &DatasetMetadata,
     cache: &mut BTreeMap<String, Option<i16>>,
-) -> Result<Option<i16>, CrawlError> {
+) -> Result<DomainResolution, CrawlError> {
     let Some(domain) = domains::map_to_domain(&meta.upstream_categories) else {
-        return Ok(None);
+        return Ok(DomainResolution::NoMapping);
     };
     if let Some(cached) = cache.get(&domain.slug) {
-        return Ok(*cached);
+        return Ok(match cached {
+            Some(id) => DomainResolution::Mapped(*id),
+            None => DomainResolution::SeedMissing,
+        });
     }
     let resolved = storage.domain_id_for_slug(&domain.slug).await?;
     if resolved.is_none() {
@@ -150,14 +194,17 @@ async fn resolve_domain_id(
         // (domains are seeded at migration time) but plausible if a
         // future YAML revision is missing its migration. WARN once,
         // cache the miss, then treat all subsequent datasets that
-        // resolve to this slug as "no domain" silently.
+        // resolve to this slug as `SeedMissing` silently.
         tracing::warn!(
             slug = %domain.slug,
             "domain seed not in DB; mapping skipped (further misses cached, won't re-warn)",
         );
     }
     cache.insert(domain.slug.clone(), resolved);
-    Ok(resolved)
+    Ok(match resolved {
+        Some(id) => DomainResolution::Mapped(id),
+        None => DomainResolution::SeedMissing,
+    })
 }
 
 #[cfg(test)]
