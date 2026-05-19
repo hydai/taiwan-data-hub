@@ -90,11 +90,12 @@ pub fn parse(yaml: &str) -> Result<Vec<Domain>, serde_yml::Error> {
     serde_yml::from_str(yaml)
 }
 
-/// Map upstream category strings (CKAN groups, dataset tags, …) to the
-/// best-fit internal domain slug. Best-effort substring match in
-/// either direction against each domain's zh-TW or English name, run
-/// in `sort_order` so a tied match prefers the more general bucket
-/// (`realestate-land` before `economy-business`, etc.).
+/// Map upstream category strings (CKAN groups, dataset tags, …) to
+/// the best-fit internal [`Domain`] (whose `.slug` is the stable
+/// identifier the rest of the system uses). Best-effort substring
+/// match in either direction against each domain's zh-TW or English
+/// name, run in `sort_order` so a tied match prefers the more
+/// general bucket (`realestate-land` before `economy-business`, etc.).
 ///
 /// Returns `None` when no upstream category contains — or is
 /// contained by — any domain name. The ETL caller decides the
