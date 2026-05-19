@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         cron_utc = NIGHTLY_TPE_2AM_IN_UTC,
-        "ETL worker scheduled; waiting for SIGTERM / SIGINT"
+        "ETL worker scheduled; waiting for shutdown signal"
     );
 
     wait_for_shutdown().await;
