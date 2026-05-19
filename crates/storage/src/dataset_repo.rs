@@ -871,6 +871,56 @@ mod tests {
         );
     }
 
+    /// Pin the natural-key dedup semantic: returning to a
+    /// previously-seen `(dataset_id, version)` pair must no-op via
+    /// `ON CONFLICT DO NOTHING`. A metadata oscillation A → B → A
+    /// records exactly two rows, not three.
+    ///
+    /// This is the deliberate trade-off the storage layer makes:
+    /// concurrency safety (no read-then-write race) at the cost of
+    /// losing oscillation history. Pin it here so a future refactor
+    /// back to "differs from latest" without proper locking fails CI.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_version_oscillation_collapses_to_seen_set() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        let v_a = "ts#sha256:aaaa";
+        let v_b = "ts#sha256:bbbb";
+        let a1 = storage
+            .record_version_if_changed(dataset_id, v_a, "sha256:aaaa")
+            .await
+            .expect("A first");
+        let b1 = storage
+            .record_version_if_changed(dataset_id, v_b, "sha256:bbbb")
+            .await
+            .expect("B");
+        let a2 = storage
+            .record_version_if_changed(dataset_id, v_a, "sha256:aaaa")
+            .await
+            .expect("A second");
+
+        assert!(a1.is_some(), "A first records");
+        assert!(b1.is_some(), "B records");
+        assert!(
+            a2.is_none(),
+            "A again no-ops via natural-key dedup (not a new row)",
+        );
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM dataset_versions WHERE dataset_id = $1")
+                .bind(dataset_id)
+                .fetch_one(storage.pool())
+                .await
+                .expect("count");
+        assert_eq!(count.0, 2, "A → B → A collapses to two rows");
+    }
+
     /// Schema-diff contract for #1.4d: first insert produces a row,
     /// repeat with same checksum is a no-op, different checksum
     /// produces a second row.

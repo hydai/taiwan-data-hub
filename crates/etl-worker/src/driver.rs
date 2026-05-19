@@ -292,26 +292,27 @@ fn feed_i18n_field(hasher: &mut Sha256, label: &str, map: &BTreeMap<String, Stri
 
 /// Human-comparable version label for a `dataset_versions` row.
 ///
-/// Always appends a checksum-prefix suffix so two distinct
-/// checksums NEVER collide on the same version label — even when
-/// upstream's `last_modified_at` stays put across a metadata edit
-/// (e.g., publisher changes but the timestamp doesn't). The
+/// Appends the **full** SHA-256 hex digest as a suffix so the
+/// version label is injectively derived from the checksum — two
+/// distinct checksums produce two distinct version labels, with
+/// no probabilistic gap to worry about. The
 /// `record_version_if_changed` storage call relies on this
-/// uniqueness for its `ON CONFLICT (dataset_id, version) DO NOTHING`
-/// shape: a checksum change must surface as a new version label.
+/// injectivity for its `ON CONFLICT (dataset_id, version) DO NOTHING`
+/// shape: a checksum change always surfaces as a new version label,
+/// so the conflict path only fires when we've genuinely seen this
+/// exact checksum for this exact dataset before.
 ///
 /// Shapes:
-/// - `last_modified_at` present: `"2026-04-15T03:30:00+00:00#abc012345678"`
-///   (timestamp first so operators recognise the era at a glance;
-///   `#`-separated hash suffix disambiguates content)
-/// - missing: `"sha256:abc012345678"` (no good human-readable era,
-///   so the hash leads)
+/// - `last_modified_at` present: `"<rfc3339-ts>#<sha256-hex>"` —
+///   timestamp first so operators recognise the era at a glance;
+///   `#`-separated full hash makes the label content-addressable.
+/// - missing: `"<sha256-hex>"` (no good human-readable era, so the
+///   hash leads; the `sha256:` prefix from `metadata_checksum` is
+///   already present).
 fn version_string(meta: &DatasetMetadata, checksum: &str) -> String {
-    let hex = checksum.strip_prefix("sha256:").unwrap_or(checksum);
-    let prefix: String = hex.chars().take(12).collect();
     match meta.last_modified_at {
-        Some(ts) => format!("{}#{prefix}", ts.to_rfc3339()),
-        None => format!("sha256:{prefix}"),
+        Some(ts) => format!("{}#{checksum}", ts.to_rfc3339()),
+        None => checksum.to_owned(),
     }
 }
 
@@ -361,7 +362,7 @@ async fn resolve_domain_id<W: DatasetWriter>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::sync::Mutex;
 
     use super::*;
@@ -403,16 +404,22 @@ mod tests {
     /// upstream category that maps via `tools_data::domains` to a slug
     /// **not** in this table exercises the `SeedMissing` branch.
     ///
-    /// Tracks per-slug `Uuid`s (assigned on first upsert) and a
-    /// per-dataset version history so `record_version_if_changed`
-    /// can faithfully no-op on same-checksum calls.
+    /// Mirrors the real storage's **natural-key dedup** for
+    /// `record_version_if_changed`: tracks the set of
+    /// `(dataset_id, version)` pairs seen so far, and the second
+    /// call with the same pair returns `None` — same shape as
+    /// Postgres's `ON CONFLICT (dataset_id, version) DO NOTHING`.
+    /// Without this fidelity, unit tests would happily accept calls
+    /// that real Postgres would reject (e.g. an A → B → A
+    /// oscillation appearing to insert three rows in the stub but
+    /// only two in production).
     struct StubStorage {
         domains: HashMap<String, i16>,
         upserts: Mutex<Vec<(i16, String)>>,
         /// slug → dataset uuid
         dataset_ids: Mutex<HashMap<String, Uuid>>,
-        /// dataset uuid → list of (version, checksum) inserts
-        versions: Mutex<HashMap<Uuid, Vec<(String, String)>>>,
+        /// Versions we've seen — mirrors UNIQUE (`dataset_id`, version).
+        seen_versions: Mutex<HashSet<(Uuid, String)>>,
     }
 
     #[async_trait]
@@ -442,15 +449,14 @@ mod tests {
             &self,
             dataset_id: Uuid,
             version: &str,
-            checksum: &str,
+            _checksum: &str,
         ) -> Result<Option<Uuid>, StorageError> {
-            let mut all = self.versions.lock().unwrap();
-            let entries = all.entry(dataset_id).or_default();
-            if entries.last().is_some_and(|(_, prev)| prev == checksum) {
-                return Ok(None);
+            let mut seen = self.seen_versions.lock().unwrap();
+            if seen.insert((dataset_id, version.to_owned())) {
+                Ok(Some(Uuid::new_v4()))
+            } else {
+                Ok(None)
             }
-            entries.push((version.to_owned(), checksum.to_owned()));
-            Ok(Some(Uuid::new_v4()))
         }
     }
 
@@ -497,13 +503,13 @@ mod tests {
     }
 
     #[test]
-    fn version_string_always_includes_checksum_suffix() {
+    fn version_string_embeds_full_checksum() {
         let no_ts = fixture_meta("x", "y");
         assert!(no_ts.last_modified_at.is_none());
         let fallback = version_string(&no_ts, "sha256:abcdef0123456789");
         assert_eq!(
-            fallback, "sha256:abcdef012345",
-            "no-ts shape uses sha256: prefix + 12 hex chars",
+            fallback, "sha256:abcdef0123456789",
+            "no-ts shape is just the checksum",
         );
 
         let mut with_ts = no_ts.clone();
@@ -514,8 +520,8 @@ mod tests {
         );
         let from_ts = version_string(&with_ts, "sha256:abcdef0123456789");
         assert_eq!(
-            from_ts, "2026-04-15T03:30:00+00:00#abcdef012345",
-            "with-ts shape is `<ts>#<hashprefix>`",
+            from_ts, "2026-04-15T03:30:00+00:00#sha256:abcdef0123456789",
+            "with-ts shape is `<ts>#<checksum>`",
         );
     }
 
@@ -532,9 +538,14 @@ mod tests {
                 .unwrap()
                 .with_timezone(&chrono::Utc),
         );
-        let v1 = version_string(&meta, "sha256:aaaaaaaaaaaa1111");
-        let v2 = version_string(&meta, "sha256:bbbbbbbbbbbb2222");
-        assert_ne!(v1, v2, "same ts + different checksum must differ");
+        let real_a = metadata_checksum(&meta);
+        let mut meta_b = meta.clone();
+        meta_b.license = "different".into();
+        let real_b = metadata_checksum(&meta_b);
+        assert_ne!(real_a, real_b, "fixture sanity");
+        let v_a = version_string(&meta, &real_a);
+        let v_b = version_string(&meta, &real_b);
+        assert_ne!(v_a, v_b, "same ts + different checksum must differ");
     }
 
     fn fixture_meta(slug: &str, category: &str) -> DatasetMetadata {
@@ -583,7 +594,7 @@ mod tests {
             domains: HashMap::from([("environment".to_owned(), 7_i16)]),
             upserts: Mutex::new(Vec::new()),
             dataset_ids: Mutex::new(HashMap::new()),
-            versions: Mutex::new(HashMap::new()),
+            seen_versions: Mutex::new(HashSet::new()),
         };
 
         let summary = run_one_pass(&connector, &storage).await.expect("crawl ok");
@@ -621,7 +632,7 @@ mod tests {
             domains: HashMap::from([("environment".to_owned(), 7_i16)]),
             upserts: Mutex::new(Vec::new()),
             dataset_ids: Mutex::new(HashMap::new()),
-            versions: Mutex::new(HashMap::new()),
+            seen_versions: Mutex::new(HashSet::new()),
         };
 
         // First pass — version row recorded.
