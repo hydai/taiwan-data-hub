@@ -110,7 +110,13 @@ pub fn map_to_domain<S: AsRef<str>>(upstream: &[S]) -> Option<&'static Domain> {
             .chain(d.name.other.values().map(String::as_str));
         for cand in candidates {
             for raw in upstream {
-                let raw = raw.as_ref();
+                // Trim BEFORE the emptiness check so whitespace-only
+                // inputs (e.g. CKAN sometimes emits `" "` for a missing
+                // group title) don't slip through and substring-match
+                // any candidate that happens to contain a space — that
+                // would silently land such datasets under whatever
+                // domain comes first in `sort_order`.
+                let raw = raw.as_ref().trim();
                 if raw.is_empty() {
                     continue;
                 }
@@ -232,6 +238,30 @@ mod tests {
             map_to_domain(&["totally unrelated category nobody uses"]).is_none(),
             "non-matching category → None",
         );
+    }
+
+    #[test]
+    fn map_to_domain_returns_none_for_whitespace_only_categories() {
+        // Without the trim-before-emptiness-check fix, a lone space
+        // would substring-match the first English candidate containing
+        // a space (e.g. "Real estate & land") and silently misroute
+        // the dataset.
+        assert!(map_to_domain(&[" "]).is_none(), "single space → None");
+        assert!(
+            map_to_domain(&["\t\n  "]).is_none(),
+            "tabs + newline + spaces → None",
+        );
+    }
+
+    #[test]
+    fn map_to_domain_trims_surrounding_whitespace_before_matching() {
+        // Trimming makes the matcher resilient to upstream whitespace
+        // hygiene issues (CKAN payloads often have trailing newlines
+        // from XML→JSON conversion).
+        let d = map_to_domain(&["  環境  "]).expect("trimmed zh-TW match");
+        assert_eq!(d.slug, "environment");
+        let d = map_to_domain(&["\tReal estate & land\n"]).expect("trimmed en match");
+        assert_eq!(d.slug, "realestate-land");
     }
 
     #[test]
