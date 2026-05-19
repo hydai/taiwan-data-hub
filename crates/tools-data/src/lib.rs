@@ -8,8 +8,9 @@
 //! - [`register_db_tools`] — tools that need Postgres. Takes a
 //!   concrete [`storage::Storage`] handle and wires every tool that
 //!   implements its narrowest required trait (today: `get_dataset`
-//!   via [`storage::DatasetReader`] + `search_datasets` via
-//!   [`storage::DatasetSearcher`]). Binaries call this only when
+//!   via [`storage::DatasetReader`], `search_datasets` via
+//!   [`storage::DatasetSearcher`], and `query_rows` via
+//!   [`storage::DatasetCacheLookup`]). Binaries call this only when
 //!   `DATABASE_URL` is configured and the pool connects; a personal-
 //!   mode install without Postgres simply ships fewer tools.
 //! - [`register_db_tools_with`] — lower-level entry point that takes
@@ -20,15 +21,18 @@
 pub mod domains;
 pub mod get_dataset;
 pub mod list_domains;
+pub mod query_rows;
 pub mod search_datasets;
+pub mod sql_guard;
 
 pub use get_dataset::{GetDatasetTool, TOOL_NAME as GET_DATASET_TOOL_NAME};
 pub use list_domains::{ListDomainsTool, TOOL_NAME as LIST_DOMAINS_TOOL_NAME};
+pub use query_rows::{QueryRowsTool, TOOL_NAME as QUERY_ROWS_TOOL_NAME};
 pub use search_datasets::{SearchDatasetsTool, TOOL_NAME as SEARCH_DATASETS_TOOL_NAME};
 
 use mcp_core::DispatcherBuilder;
 use std::sync::Arc;
-use storage::{DatasetReader, DatasetSearcher, Storage};
+use storage::{DatasetCacheLookup, DatasetReader, DatasetSearcher, Storage};
 
 /// Register every data tool that has no runtime dependencies.
 ///
@@ -54,8 +58,9 @@ pub fn register_db_tools(builder: DispatcherBuilder, storage: Storage) -> Dispat
     // backed but the trait-object wrapping needs to happen at this
     // boundary).
     let reader: Arc<dyn DatasetReader> = Arc::new(storage.clone());
-    let searcher: Arc<dyn DatasetSearcher> = Arc::new(storage);
-    register_db_tools_with(builder, reader, searcher)
+    let searcher: Arc<dyn DatasetSearcher> = Arc::new(storage.clone());
+    let cache: Arc<dyn DatasetCacheLookup> = Arc::new(storage);
+    register_db_tools_with(builder, reader, searcher, cache)
 }
 
 /// Lower-level entry point that takes the trait objects directly, so
@@ -66,8 +71,10 @@ pub fn register_db_tools_with(
     builder: DispatcherBuilder,
     reader: Arc<dyn DatasetReader>,
     searcher: Arc<dyn DatasetSearcher>,
+    cache: Arc<dyn DatasetCacheLookup>,
 ) -> DispatcherBuilder {
     builder
         .register(GetDatasetTool::from_arc(reader))
         .register(SearchDatasetsTool::from_arc(searcher))
+        .register(QueryRowsTool::from_arc(cache))
 }

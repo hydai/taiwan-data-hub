@@ -1,0 +1,649 @@
+//! `query_rows` MCP tool — runs a user SQL string against a dataset's
+//! cached Parquet via Polars, gated by the [`crate::sql_guard`] AST
+//! whitelist.
+//!
+//! Pipeline:
+//!
+//! ```text
+//!   user SQL  ──► sql_guard::validate  ──► Polars SQLContext
+//!                                            │
+//!                                            └─► scan_parquet(cache_path)
+//!                                                registered as `current_dataset`
+//! ```
+//!
+//! Defense-in-depth (DESIGN.md §6 + §9 / #1.7 DoD):
+//!
+//! - AST whitelist before Polars sees the SQL.
+//! - Table whitelist: SQL can reference only `current_dataset`.
+//! - `LIMIT` clamped to [`sql_guard::DEFAULT_MAX_LIMIT`] (`10_000`).
+//! - `tokio::time::timeout` so a runaway scan can't pin a worker
+//!   thread forever — see [`QUERY_TIMEOUT`].
+//!
+//! Streaming + memory limit are tracked in #1.7's follow-ups; the
+//! Polars `new_streaming` feature is on so the engine streams when it
+//! can, but enforcing a hard memory ceiling needs Polars 0.53's
+//! `engine_affinity` plumbing which is out of scope for this PR.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
+use polars::prelude::*;
+use polars::sql::SQLContext;
+use serde_json::{Map, Value, json};
+use storage::{DatasetCacheLookup, DatasetCacheRef, DatasetKey};
+use uuid::Uuid;
+
+use crate::sql_guard::{self, ALLOWED_TABLE, DEFAULT_MAX_LIMIT};
+
+/// MCP tool name. Stable identifier — clients pin to this string.
+pub const TOOL_NAME: &str = "query_rows";
+
+/// Per-call deadline. Five seconds matches DESIGN.md §6's "tokio
+/// timeout(5s)". A runaway scan would otherwise tie up an executor
+/// thread until the OOM killer steps in.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reads from any [`DatasetCacheLookup`]; production code plugs in a
+/// `storage::Storage`, tests plug in an in-memory stub.
+#[derive(Clone)]
+pub struct QueryRowsTool {
+    lookup: Arc<dyn DatasetCacheLookup>,
+}
+
+impl QueryRowsTool {
+    pub fn new<L: DatasetCacheLookup>(lookup: L) -> Self {
+        Self {
+            lookup: Arc::new(lookup),
+        }
+    }
+
+    pub fn from_arc(lookup: Arc<dyn DatasetCacheLookup>) -> Self {
+        Self { lookup }
+    }
+}
+
+impl std::fmt::Debug for QueryRowsTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryRowsTool").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl ToolHandler for QueryRowsTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: TOOL_NAME.to_string(),
+            description: format!(
+                "Run a SQL query against a dataset's cached Parquet. SQL must reference \
+                 only `{ALLOWED_TABLE}`; LIMIT is capped at {DEFAULT_MAX_LIMIT}. Specify the \
+                 dataset by `id` (UUID) or `slug`; exactly one is required. Returns up to \
+                 the LIMIT rows plus a `truncated` flag. If the dataset hasn't been \
+                 materialised yet, the tool returns a NotFound-shaped error asking the caller \
+                 to invoke `materialize_dataset` first."
+            ),
+            input_schema: input_schema(),
+            output_schema: Some(output_schema()),
+        }
+    }
+
+    async fn call(&self, args: Value) -> Result<Value, ToolError> {
+        let req = Request::parse(&args)?;
+        let validated = sql_guard::validate(&req.sql, DEFAULT_MAX_LIMIT)
+            .map_err(|e| ToolError::InvalidArguments(format!("sql: {e}")))?;
+
+        let cache = self
+            .lookup
+            .dataset_cache(req.key.clone())
+            .await
+            .map_err(|e| ToolError::Execution(format!("storage: {e}")))?;
+        let Some(cache) = cache else {
+            return Err(ToolError::NotFound(format!(
+                "dataset not found ({})",
+                req.lookup_str(),
+            )));
+        };
+
+        let parquet_path = parquet_path_for_query(&cache)?;
+        let effective_limit = validated.effective_limit();
+        let validated_sql = validated.as_str().to_owned();
+        let exec =
+            tokio::task::spawn_blocking(move || run_polars_query(&parquet_path, &validated_sql));
+
+        let df = match tokio::time::timeout(QUERY_TIMEOUT, exec).await {
+            Ok(Ok(Ok(df))) => df,
+            Ok(Ok(Err(e))) => {
+                return Err(ToolError::Execution(format!("polars: {e}")));
+            }
+            Ok(Err(join_err)) => {
+                return Err(ToolError::Execution(format!(
+                    "query worker crashed: {join_err}"
+                )));
+            }
+            Err(_) => {
+                return Err(ToolError::Execution(format!(
+                    "query exceeded {}s deadline",
+                    QUERY_TIMEOUT.as_secs(),
+                )));
+            }
+        };
+
+        Ok(render_dataframe(&df, effective_limit))
+    }
+}
+
+/// Resolve the file-system path Polars should scan, given a cache
+/// reference. We only support `file://` and bare-path URIs for now;
+/// `s3://` lands when #1.8 materialises to `SeaweedFS`.
+fn parquet_path_for_query(cache: &DatasetCacheRef) -> Result<PathBuf, ToolError> {
+    let (true, Some(raw)) = (cache.cached, cache.cache_path.as_deref()) else {
+        return Err(ToolError::NotFound(format!(
+            "dataset `{}` is not materialised yet — call `materialize_dataset` first",
+            cache.slug,
+        )));
+    };
+
+    if let Some(stripped) = raw.strip_prefix("file://") {
+        Ok(PathBuf::from(stripped))
+    } else if raw.contains("://") {
+        // s3://, https://, etc. — not yet supported.
+        Err(ToolError::Execution(format!(
+            "cache scheme not yet supported: {raw}"
+        )))
+    } else {
+        Ok(PathBuf::from(raw))
+    }
+}
+
+/// Blocking helper that runs on `spawn_blocking`. Returns the
+/// `DataFrame` so the async path can serialise it to JSON.
+fn run_polars_query(path: &Path, sql: &str) -> PolarsResult<DataFrame> {
+    // `PlRefPath` only implements `From<&str>`; lossy conversion is
+    // fine for the file:// path use case (we already rejected anything
+    // with a scheme upstream).
+    let path_str = path.to_string_lossy();
+    let lazy = LazyFrame::scan_parquet(path_str.as_ref().into(), ScanArgsParquet::default())?;
+    let mut ctx = SQLContext::new();
+    ctx.register(ALLOWED_TABLE, lazy);
+    ctx.execute(sql)?.collect()
+}
+
+/// Convert a Polars `DataFrame` to the MCP JSON shape:
+///
+/// ```json
+/// { "columns": ["a", "b"], "rows": [[1, "x"], …], "truncated": false }
+/// ```
+///
+/// `truncated` is `true` iff the row count equals `effective_limit` —
+/// i.e. the LIMIT clause held the result back rather than the source
+/// data being exhausted. Operators read this as "your query might
+/// have more rows; raise LIMIT to see them."
+fn render_dataframe(df: &DataFrame, effective_limit: u64) -> Value {
+    let columns: Vec<Value> = df
+        .get_column_names()
+        .iter()
+        .map(|c| Value::String(c.to_string()))
+        .collect();
+
+    let height = df.height();
+    let mut rows: Vec<Value> = Vec::with_capacity(height);
+    for row_idx in 0..height {
+        let mut row = Vec::with_capacity(df.width());
+        for column in df.columns() {
+            row.push(any_value_to_json(
+                &column.get(row_idx).unwrap_or(AnyValue::Null),
+            ));
+        }
+        rows.push(Value::Array(row));
+    }
+
+    json!({
+        "columns": columns,
+        "rows": rows,
+        "truncated": (height as u64) >= effective_limit,
+    })
+}
+
+/// Best-effort conversion from a Polars cell to JSON. Anything we
+/// don't have a dedicated mapping for falls back to its Debug
+/// representation as a string — preserves information without
+/// pretending we support a richer type than we do.
+fn any_value_to_json(av: &AnyValue<'_>) -> Value {
+    match av {
+        AnyValue::Null => Value::Null,
+        AnyValue::Boolean(b) => Value::Bool(*b),
+        AnyValue::String(s) => Value::String((*s).to_string()),
+        AnyValue::StringOwned(s) => Value::String(s.to_string()),
+        AnyValue::Int8(n) => json!(*n),
+        AnyValue::Int16(n) => json!(*n),
+        AnyValue::Int32(n) => json!(*n),
+        AnyValue::Int64(n) => json!(*n),
+        AnyValue::UInt8(n) => json!(*n),
+        AnyValue::UInt16(n) => json!(*n),
+        AnyValue::UInt32(n) => json!(*n),
+        AnyValue::UInt64(n) => json!(*n),
+        AnyValue::Float32(n) if n.is_finite() => json!(*n),
+        AnyValue::Float64(n) if n.is_finite() => json!(*n),
+        // NaN / Inf can't round-trip through JSON; surface them as
+        // their textual form rather than mangling to null.
+        AnyValue::Float32(n) => Value::String(format!("{n}")),
+        AnyValue::Float64(n) => Value::String(format!("{n}")),
+        other => Value::String(format!("{other}")),
+    }
+}
+
+/// Parsed `tools/call` arguments. Mirrors `get_dataset`'s lookup
+/// shape (id XOR slug) plus the `sql` string.
+struct Request {
+    key: DatasetKey,
+    /// Borrow-friendly description of the key for error messages.
+    lookup_repr: String,
+    sql: String,
+}
+
+impl Request {
+    fn parse(args: &Value) -> Result<Self, ToolError> {
+        let obj = args
+            .as_object()
+            .ok_or_else(|| ToolError::InvalidArguments("arguments must be a JSON object".into()))?;
+
+        let id = optional_string(obj, "id")?
+            .map(|s| Uuid::parse_str(&s))
+            .transpose()
+            .map_err(|e| ToolError::InvalidArguments(format!("`id` is not a valid UUID: {e}")))?;
+        let slug = optional_string(obj, "slug")?;
+
+        let (key, lookup_repr) = match (id, slug) {
+            (Some(id), None) => (DatasetKey::Id(id), format!("id={id}")),
+            (None, Some(slug)) => {
+                let repr = format!("slug={slug}");
+                (DatasetKey::Slug(slug), repr)
+            }
+            (None, None) => {
+                return Err(ToolError::InvalidArguments(
+                    "exactly one of `id` or `slug` is required".into(),
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(ToolError::InvalidArguments(
+                    "only one of `id` or `slug` may be specified".into(),
+                ));
+            }
+        };
+
+        let sql = match obj.get("sql") {
+            None | Some(Value::Null) => {
+                return Err(ToolError::InvalidArguments("`sql` is required".into()));
+            }
+            Some(Value::String(s)) if s.trim().is_empty() => {
+                return Err(ToolError::InvalidArguments(
+                    "`sql` must be non-empty".into(),
+                ));
+            }
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(ToolError::InvalidArguments(format!(
+                    "`sql` must be a string, got {}",
+                    kind_of(other)
+                )));
+            }
+        };
+
+        Ok(Self {
+            key,
+            lookup_repr,
+            sql,
+        })
+    }
+
+    fn lookup_str(&self) -> &str {
+        &self.lookup_repr
+    }
+}
+
+fn optional_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>, ToolError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.is_empty() => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(ToolError::InvalidArguments(format!(
+            "`{key}` must be a string, got {}",
+            kind_of(other),
+        ))),
+    }
+}
+
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn input_schema() -> Map<String, Value> {
+    let mut props = Map::new();
+    props.insert(
+        "id".into(),
+        json!({
+            "type": "string",
+            "format": "uuid",
+            "description": "Dataset UUID. Exactly one of `id` or `slug` is required.",
+        }),
+    );
+    props.insert(
+        "slug".into(),
+        json!({
+            "type": "string",
+            "description": "Marketplace slug. Exactly one of `id` or `slug` is required.",
+        }),
+    );
+    props.insert(
+        "sql".into(),
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "description": format!(
+                "SELECT statement against `{ALLOWED_TABLE}` (the virtual table this tool binds \
+                 to the dataset's cached Parquet). LIMIT is capped at {DEFAULT_MAX_LIMIT}; \
+                 functions, JOINs, CTEs, and subqueries are restricted — see the AST whitelist."
+            ),
+        }),
+    );
+    let mut schema = Map::new();
+    schema.insert("type".into(), Value::String("object".into()));
+    schema.insert(
+        "required".into(),
+        Value::Array(vec![Value::String("sql".into())]),
+    );
+    schema.insert("additionalProperties".into(), Value::Bool(false));
+    schema.insert("properties".into(), Value::Object(props));
+    schema
+}
+
+fn output_schema() -> Map<String, Value> {
+    let mut schema = Map::new();
+    schema.insert("type".into(), Value::String("object".into()));
+    schema.insert(
+        "required".into(),
+        Value::Array(
+            ["columns", "rows", "truncated"]
+                .iter()
+                .map(|s| Value::String((*s).to_string()))
+                .collect(),
+        ),
+    );
+    schema.insert(
+        "properties".into(),
+        json!({
+            "columns": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Column names in the order matching each row.",
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "description": "One row, cell values in `columns` order.",
+                },
+            },
+            "truncated": {
+                "type": "boolean",
+                "description": format!(
+                    "True if exactly {DEFAULT_MAX_LIMIT} rows came back — there may be more \
+                     upstream that the cap held back."
+                ),
+            },
+        }),
+    );
+    schema
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use mcp_core::ToolError;
+    use polars::prelude::{ParquetWriter, df};
+    use storage::StorageError;
+    use tempfile::TempDir;
+
+    /// In-memory `DatasetCacheLookup`. Returns the same `DatasetCacheRef`
+    /// for every key so we can drive the tool through scan + execute
+    /// without a database.
+    #[derive(Clone)]
+    struct StubLookup {
+        response: Arc<Mutex<Option<DatasetCacheRef>>>,
+    }
+
+    impl StubLookup {
+        fn new(response: Option<DatasetCacheRef>) -> Self {
+            Self {
+                response: Arc::new(Mutex::new(response)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DatasetCacheLookup for StubLookup {
+        async fn dataset_cache(
+            &self,
+            _key: DatasetKey,
+        ) -> Result<Option<DatasetCacheRef>, StorageError> {
+            Ok(self.response.lock().unwrap().clone())
+        }
+    }
+
+    /// Write a tiny Parquet to a temp file and return its path plus
+    /// the [`TempDir`] guard (caller must keep the guard alive).
+    fn write_fixture_parquet() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("fixture.parquet");
+        let mut df = df! {
+            "id" => &[1_i64, 2, 3],
+            "name" => &["alice", "bob", "carol"],
+            "score" => &[10.5_f64, 12.0, 7.25],
+        }
+        .expect("build df");
+        let file = std::fs::File::create(&path).expect("create parquet");
+        ParquetWriter::new(file).finish(&mut df).expect("write");
+        (dir, path)
+    }
+
+    fn cache_ref_for(path: &Path) -> DatasetCacheRef {
+        DatasetCacheRef {
+            id: Uuid::nil(),
+            slug: "fixture".into(),
+            cached: true,
+            cache_path: Some(path.to_string_lossy().into_owned()),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn happy_path_returns_columns_rows_and_truncated_flag() {
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let out = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id, name FROM current_dataset ORDER BY id",
+            }))
+            .await
+            .expect("query ok");
+
+        let columns: Vec<&str> = out["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(columns, vec!["id", "name"]);
+
+        let rows = out["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][1], "alice");
+
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_cache_returns_not_found_with_materialize_hint() {
+        let lookup = StubLookup::new(Some(DatasetCacheRef {
+            id: Uuid::nil(),
+            slug: "fixture".into(),
+            cached: false,
+            cache_path: None,
+        }));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset",
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::NotFound(m) => {
+                assert!(m.contains("materialize_dataset"), "got: {m}");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_dataset_returns_not_found() {
+        let lookup = StubLookup::new(None);
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({"slug": "no-such-thing", "sql": "SELECT 1 FROM current_dataset"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::NotFound(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bad_sql_returns_invalid_arguments() {
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "DROP TABLE current_dataset",
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidArguments(m) => assert!(m.contains("sql"), "got: {m}"),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_table_in_sql_rejected() {
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT 1 FROM pg_tables",
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(m.contains("current_dataset"), "got: {m}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_sql_field_rejected() {
+        let lookup = StubLookup::new(Some(DatasetCacheRef {
+            id: Uuid::nil(),
+            slug: "fixture".into(),
+            cached: true,
+            cache_path: Some("/nonexistent".into()),
+        }));
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool.call(json!({"slug": "fixture"})).await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn both_id_and_slug_rejected() {
+        let lookup = StubLookup::new(None);
+        let tool = QueryRowsTool::new(lookup);
+
+        let err = tool
+            .call(json!({
+                "id": Uuid::nil().to_string(),
+                "slug": "fixture",
+                "sql": "SELECT 1 FROM current_dataset",
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(m.contains("only one"), "got: {m}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn truncated_true_when_limit_holds_back_more_rows() {
+        // Fixture has 3 rows; user-supplied `LIMIT 1` clamps to 1
+        // (effective_limit = 1). Query yields 1 row, which equals
+        // effective_limit ⇒ truncated=true. Operators read this as
+        // "there's more upstream — raise LIMIT to see it."
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let out = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 1",
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(out["truncated"], true);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn truncated_false_when_data_exhausted_within_limit() {
+        // 3-row fixture, LIMIT 100 → returns 3 rows < effective_limit
+        // (100). truncated=false because the data ran out, not the
+        // cap. This is the user's "you have everything" signal.
+        let (_guard, path) = write_fixture_parquet();
+        let lookup = StubLookup::new(Some(cache_ref_for(&path)));
+        let tool = QueryRowsTool::new(lookup);
+
+        let out = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 100",
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(out["truncated"], false);
+        assert_eq!(out["rows"].as_array().unwrap().len(), 3);
+    }
+}

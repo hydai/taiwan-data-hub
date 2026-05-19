@@ -51,6 +51,13 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
 testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
 tokio-cron-scheduler = "0.15.1"
+# `query_rows` SQL surface — versions per DESIGN.md §5.
+# Polars features: `lazy` for LazyFrame, `parquet` for scan_parquet,
+# `sql` for SQLContext, `new_streaming` to bound memory on large
+# scans (the old `streaming` feature was renamed in 0.53).
+polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming"] }
+sqlparser = { version = "0.61.0", features = ["visitor"] }
+tempfile = "3.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

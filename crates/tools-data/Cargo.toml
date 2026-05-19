@@ -17,12 +17,18 @@ mcp-core = { path = "../mcp-core" }
 storage = { path = "../storage" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
+# `query_rows` (#1.7) needs Polars to scan cached Parquet and
+# sqlparser-rs for the AST whitelist that gates the user SQL.
+polars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = { workspace = true }
+sqlparser = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
