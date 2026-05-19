@@ -143,11 +143,15 @@ fn package_tool_outcome(
             Ok(CallToolResult::structured(value))
         }
         Ok(value) => Ok(CallToolResult::success(vec![value_to_content(value)])),
-        Err(ToolError::NotFound(missing)) => Err(McpError::invalid_params(
-            format!("unknown tool: {missing}"),
-            None,
-        )),
-        Err(ToolError::InvalidArguments(msg)) => Err(McpError::invalid_params(msg, None)),
+        // `NotFound` covers both "this tool isn't registered" (the
+        // dispatcher's case) and "the resource you asked for doesn't
+        // exist" (a tool's own case, e.g. `get_dataset(slug=nope)`).
+        // `InvalidArguments` is the same MCP error class from the
+        // client's perspective — `-32602 Invalid params` — and the
+        // inner message disambiguates. Pass either through unchanged.
+        Err(ToolError::NotFound(msg) | ToolError::InvalidArguments(msg)) => {
+            Err(McpError::invalid_params(msg, None))
+        }
         Err(ToolError::Execution(msg)) => Err(McpError::internal_error(msg, None)),
     }
 }
@@ -280,12 +284,27 @@ mod tests {
     }
 
     #[test]
-    fn not_found_maps_to_invalid_params() {
-        let err = package_tool_outcome("demo", false, Err(ToolError::NotFound("missing".into())))
-            .unwrap_err();
-        let payload = serde_json::to_value(&err).unwrap();
-        assert_eq!(payload["code"], -32602);
-        assert!(payload["message"].as_str().unwrap().contains("missing"));
+    fn not_found_maps_to_invalid_params_passing_inner_message_through() {
+        // Two distinct callers use NotFound:
+        //   - Dispatcher when an unknown tool name is invoked
+        //   - Tools themselves when their *resource* lookup misses
+        // The adapter must not prepend a hard-coded "unknown tool:"
+        // prefix, otherwise a `get_dataset(slug=nope)` failure reads
+        // as "unknown tool: dataset not found" — nonsensical.
+        for inner in [
+            "tool `does_not_exist` is not registered",
+            "dataset not found (slug=nope)",
+        ] {
+            let err = package_tool_outcome("demo", false, Err(ToolError::NotFound(inner.into())))
+                .unwrap_err();
+            let payload = serde_json::to_value(&err).unwrap();
+            assert_eq!(payload["code"], -32602);
+            assert_eq!(
+                payload["message"].as_str().unwrap(),
+                inner,
+                "adapter must pass the NotFound message through unchanged",
+            );
+        }
     }
 
     #[test]

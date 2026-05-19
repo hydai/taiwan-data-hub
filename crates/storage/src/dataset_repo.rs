@@ -2,11 +2,27 @@
 
 use std::collections::BTreeMap;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use connectors::{DatasetMetadata, SourceId};
 use serde_json::{Map, Value};
 use sqlx::{FromRow, Pool, Postgres, postgres::PgPoolOptions};
 use uuid::Uuid;
+
+/// Object-safe read trait so tool implementations (#1.6, #1.7, ...)
+/// can be unit-tested with an in-memory stub rather than depending
+/// on a live Postgres pool. [`Storage`] is the production impl.
+#[async_trait]
+pub trait DatasetReader: Send + Sync + 'static {
+    async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError>;
+}
+
+#[async_trait]
+impl DatasetReader for Storage {
+    async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
+        Storage::get_dataset(self, key).await
+    }
+}
 
 /// Lookup key for [`Storage::get_dataset`].
 #[derive(Debug, Clone)]
