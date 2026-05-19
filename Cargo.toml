@@ -50,6 +50,8 @@ wiremock = "0.6"
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate"] }
 uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
 testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+tokio-cron-scheduler = "0.13"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

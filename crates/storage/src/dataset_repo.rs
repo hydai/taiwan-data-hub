@@ -181,6 +181,20 @@ impl Storage {
         Ok(row.0)
     }
 
+    /// Resolve a domain slug to its surrogate `domain_id`. Returns
+    /// `None` when no row matches — caller decides what to do
+    /// (skip the dataset, default to a fallback bucket, etc.).
+    /// The `domains` table is tiny (20 rows) and changes rarely;
+    /// callers that need to look up many slugs in one crawl should
+    /// cache the result themselves.
+    pub async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError> {
+        let row: Option<(i16,)> = sqlx::query_as("SELECT id FROM domains WHERE slug = $1")
+            .bind(slug)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.0))
+    }
+
     /// Fetch the full read view for a dataset by id or slug. Returns
     /// `None` when no row matches; the tool layer translates that to
     /// the MCP "not found" error.

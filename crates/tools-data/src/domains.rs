@@ -90,6 +90,39 @@ pub fn parse(yaml: &str) -> Result<Vec<Domain>, serde_yml::Error> {
     serde_yml::from_str(yaml)
 }
 
+/// Map upstream category strings (CKAN groups, dataset tags, …) to the
+/// best-fit internal domain slug. Best-effort substring match in
+/// either direction against each domain's zh-TW or English name, run
+/// in `sort_order` so a tied match prefers the more general bucket
+/// (`realestate-land` before `economy-business`, etc.).
+///
+/// Returns `None` when no upstream category contains — or is
+/// contained by — any domain name. The ETL caller decides the
+/// fallback (skip the dataset, log a warning, drop in a "misc"
+/// bucket); the mapper itself stays opinion-free.
+pub fn map_to_domain<S: AsRef<str>>(upstream: &[S]) -> Option<&'static Domain> {
+    if upstream.is_empty() {
+        return None;
+    }
+    for d in embedded() {
+        let candidates = [d.name.zh_tw.as_str()]
+            .into_iter()
+            .chain(d.name.other.values().map(String::as_str));
+        for cand in candidates {
+            for raw in upstream {
+                let raw = raw.as_ref();
+                if raw.is_empty() {
+                    continue;
+                }
+                if cand.contains(raw) || raw.contains(cand) {
+                    return Some(d);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Cached view of the embedded `config/domains.yaml`.
 ///
 /// Panics on first use if the YAML is malformed — which would mean the
@@ -152,6 +185,42 @@ mod tests {
         assert_eq!(text.resolve("en"), "english");
         assert_eq!(text.resolve("ja"), "中文");
         assert_eq!(text.resolve(""), "中文");
+    }
+
+    #[test]
+    fn map_to_domain_matches_zh_tw_substring() {
+        // CKAN's group title equals the domain's zh-TW name exactly.
+        let d = map_to_domain(&["環境"]).expect("matches `environment`");
+        assert_eq!(d.slug, "environment");
+    }
+
+    #[test]
+    fn map_to_domain_matches_english_substring() {
+        let d = map_to_domain(&["Real estate & land"]).expect("matches by en");
+        assert_eq!(d.slug, "realestate-land");
+    }
+
+    #[test]
+    fn map_to_domain_handles_partial_substrings_in_either_direction() {
+        // Upstream tag is a prefix of the domain's en name → match.
+        let d = map_to_domain(&["Real estate"]).expect("prefix matches");
+        assert_eq!(d.slug, "realestate-land");
+        // Upstream tag is a superstring of a domain name → also match.
+        // Use the EXACT en form ("&", not "and") because the matcher
+        // does literal substring containment, not synonym fuzzing.
+        let d = map_to_domain(&["Education & research data archive"]).expect("superstring matches");
+        assert_eq!(d.slug, "education-research");
+    }
+
+    #[test]
+    fn map_to_domain_returns_none_for_empty_or_unknown_categories() {
+        let none: [&str; 0] = [];
+        assert!(map_to_domain(&none).is_none(), "empty input → None");
+        assert!(map_to_domain(&[""]).is_none(), "empty string → None");
+        assert!(
+            map_to_domain(&["totally unrelated category nobody uses"]).is_none(),
+            "non-matching category → None",
+        );
     }
 
     #[test]

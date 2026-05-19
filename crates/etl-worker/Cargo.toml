@@ -13,3 +13,21 @@ description = "cron-driven ETL worker that mirrors upstream data sources"
 workspace = true
 
 [dependencies]
+connectors = { path = "../connectors" }
+storage = { path = "../storage" }
+tools-data = { path = "../tools-data" }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-cron-scheduler = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+testcontainers-modules = { workspace = true }
+wiremock = { workspace = true }
