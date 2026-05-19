@@ -15,8 +15,9 @@ use mcp_core::rmcp::model::Implementation;
 use mcp_core::rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use mcp_core::{Dispatcher, McpServer};
+use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
 use serde::Serialize;
+use storage::Storage;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -166,7 +167,9 @@ async fn main() -> anyhow::Result<()> {
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
     // same `tools_data::register_data_tools` helper, so tools register in
     // one place and reach every transport.
-    let dispatcher = tools_data::register_data_tools(Dispatcher::builder()).build();
+    let mut builder: DispatcherBuilder = tools_data::register_data_tools(Dispatcher::builder());
+    builder = wire_db_tools_if_available(builder).await;
+    let dispatcher = builder.build();
     let tool_count = dispatcher.len();
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");
@@ -192,6 +195,30 @@ async fn main() -> anyhow::Result<()> {
         .context("axum server crashed")?;
 
     Ok(())
+}
+
+/// Register Postgres-backed tools when `DATABASE_URL` is set and a
+/// pool can be established. Mirrors the policy in `mcp-stdio` so
+/// both transports share the same view of which tools are available.
+/// Failure to connect downgrades to "no DB tools" rather than killing
+/// the gateway — `/healthz` and `/readyz` stay independently useful
+/// for ops, and personal-mode installs without Postgres still get a
+/// working MCP server with `list_domains`.
+async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBuilder {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        tracing::info!("DATABASE_URL unset; DB-backed tools disabled (list_domains still works)");
+        return builder;
+    };
+    match Storage::connect(&url).await {
+        Ok(storage) => {
+            tracing::info!("DATABASE_URL connected; registering DB-backed tools");
+            tools_data::register_db_tools(builder, storage)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "DATABASE_URL set but Storage::connect failed; DB tools disabled");
+            builder
+        }
+    }
 }
 
 /// Returns when the process receives SIGINT or SIGTERM. Cancels the shared

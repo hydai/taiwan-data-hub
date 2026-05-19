@@ -11,7 +11,8 @@
 use anyhow::Result;
 use mcp_core::rmcp::model::Implementation;
 use mcp_core::rmcp::{ServiceExt, transport::stdio};
-use mcp_core::{Dispatcher, McpServer};
+use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
+use storage::Storage;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -25,7 +26,9 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let dispatcher = tools_data::register_data_tools(Dispatcher::builder()).build();
+    let mut builder: DispatcherBuilder = tools_data::register_data_tools(Dispatcher::builder());
+    builder = wire_db_tools_if_available(builder).await;
+    let dispatcher = builder.build();
     let tool_count = dispatcher.len();
     let server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     let server =
@@ -42,4 +45,26 @@ async fn main() -> Result<()> {
     })?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Register Postgres-backed tools when `DATABASE_URL` is set and a
+/// pool can be established. Failure (unset env, bad URL, unreachable
+/// pool) downgrades to "no DB tools" rather than killing the
+/// process — personal-mode installs without Postgres still get a
+/// working server with `list_domains`.
+async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBuilder {
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        tracing::info!("DATABASE_URL unset; DB-backed tools disabled (list_domains still works)");
+        return builder;
+    };
+    match Storage::connect(&url).await {
+        Ok(storage) => {
+            tracing::info!("DATABASE_URL connected; registering DB-backed tools");
+            tools_data::register_db_tools(builder, storage)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "DATABASE_URL set but Storage::connect failed; DB tools disabled");
+            builder
+        }
+    }
 }

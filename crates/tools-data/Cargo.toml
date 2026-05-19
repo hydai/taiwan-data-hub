@@ -14,12 +14,15 @@ workspace = true
 
 [dependencies]
 mcp-core = { path = "../mcp-core" }
+storage = { path = "../storage" }
 async-trait = { workspace = true }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

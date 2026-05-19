@@ -82,7 +82,7 @@ impl Dispatcher {
         let tool = self
             .tools
             .get(name)
-            .ok_or_else(|| ToolError::NotFound(name.to_string()))?;
+            .ok_or_else(|| ToolError::NotFound(format!("tool `{name}` is not registered")))?;
         tool.call(args).await
     }
 
@@ -173,10 +173,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_unknown_tool_returns_not_found() {
+    async fn call_unknown_tool_returns_not_found_with_named_message() {
         let d = Dispatcher::default();
         let err = d.call_tool("missing", Value::Null).await.unwrap_err();
-        assert!(matches!(err, ToolError::NotFound(name) if name == "missing"));
+        match err {
+            ToolError::NotFound(msg) => {
+                assert!(msg.contains("missing"), "{msg}");
+                assert!(msg.contains("not registered"), "{msg}");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
     }
 
     #[tokio::test]
