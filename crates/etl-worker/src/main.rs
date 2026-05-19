@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
 
     let connector = build_data_gov_tw_connector()?;
 
-    if run_at_startup() {
+    if run_at_startup()? {
         tracing::info!("ETL_RUN_AT_STARTUP=true; running an immediate pass");
         match run_one_pass(&connector, &storage).await {
             Ok(summary) => tracing::info!(?summary, "startup pass complete"),
@@ -117,7 +117,7 @@ const DEFAULT_ETL_MAX_CONNECTIONS: u32 = 20;
 /// read `ETL_DB_MAX_CONNECTIONS` (default 20), build a `PgPool`, and
 /// wrap it.
 async fn connect_storage(database_url: &str) -> Result<Storage> {
-    let max_connections = parse_max_connections(env::var("ETL_DB_MAX_CONNECTIONS").ok())?;
+    let max_connections = parse_max_connections(read_optional_env("ETL_DB_MAX_CONNECTIONS")?)?;
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -159,8 +159,9 @@ fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
     // value, common in Docker / k8s optional-var templating) behaves
     // like "unset" rather than passing `""` to `base_url` and failing
     // URL parsing at boot. Same shape as `parse_max_connections`.
-    let override_url = env::var("DATA_GOV_TW_URL")
-        .ok()
+    // `read_optional_env` bubbles up `VarError::NotUnicode` so a
+    // garbled value doesn't silently degrade to the default URL.
+    let override_url = read_optional_env("DATA_GOV_TW_URL")?
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
     if let Some(url) = override_url {
@@ -175,11 +176,30 @@ fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
         .context("could not build data.gov.tw connector")
 }
 
-fn run_at_startup() -> bool {
-    env::var("ETL_RUN_AT_STARTUP")
-        .ok()
+fn run_at_startup() -> Result<bool> {
+    Ok(read_optional_env("ETL_RUN_AT_STARTUP")?
         .as_deref()
-        .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes")))
+}
+
+/// Read an optional env var, distinguishing the three states the
+/// caller usually cares about:
+///
+/// - `Ok(None)` — not set; caller should fall back to a default
+/// - `Ok(Some(s))` — set to a valid UTF-8 string `s`
+/// - `Err(_)` — set, but the value isn't valid UTF-8
+///
+/// `env::var(...).ok()` collapses the third case into the first
+/// (silently using the default for a garbled value), which weakens
+/// the "fail fast on misconfig" contract this binary leans on.
+fn read_optional_env(name: &str) -> Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} is set but contains non-UTF-8 bytes")
+        }
+    }
 }
 
 /// Sleep until a shutdown signal arrives so the scheduler can run
@@ -270,4 +290,11 @@ mod tests {
         // parse-error path as non-numeric input.
         assert!(parse_max_connections(Some("-1".into())).is_err());
     }
+
+    // `read_optional_env` isn't unit-tested directly: exercising the
+    // `NotUnicode` branch needs `std::env::{set_var, remove_var}` which
+    // are `unsafe` under Rust 2024, and the workspace forbids unsafe.
+    // The function's contract is small enough to verify by inspection,
+    // and `connect_storage` / `build_data_gov_tw_connector` exercise
+    // the happy path on every boot.
 }
