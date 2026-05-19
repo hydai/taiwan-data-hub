@@ -426,7 +426,12 @@ fn clamp_limit_expr(expr: &Expr, max_limit: u64) -> Result<u64, SqlError> {
         Value::Number(raw, _) => raw
             .parse::<u64>()
             .map_err(|_| SqlError::LimitNotLiteral(raw.clone()))?,
-        _ => return Err(SqlError::LimitNotLiteral(format!("{value:?}"))),
+        // String literals (`LIMIT '5'`), `NULL`, etc. — fall back to
+        // the expression's Display rendering, which mirrors the SQL
+        // the user actually wrote (`'5'`, `NULL`). The previous
+        // `{value:?}` produced sqlparser AST Debug names like
+        // `SingleQuotedString("5")` which were noise for a caller.
+        _ => return Err(SqlError::LimitNotLiteral(expr.to_string())),
     };
     Ok(n.min(max_limit))
 }
@@ -504,6 +509,30 @@ mod tests {
         match assert_err("SELECT a FROM current_dataset LIMIT a") {
             SqlError::LimitNotLiteral(_) => {}
             other => panic!("expected LimitNotLiteral, got {other}"),
+        }
+    }
+
+    /// Non-integer literal values (string `'5'`, `NULL`) surface their
+    /// SQL form in the error rather than the sqlparser-internal
+    /// Debug shape — `Display` mirrors what the user actually typed.
+    #[test]
+    fn limit_string_literal_error_message_uses_sql_form() {
+        let err = assert_err("SELECT a FROM current_dataset LIMIT '5'");
+        match err {
+            SqlError::LimitNotLiteral(s) => assert_eq!(s, "'5'"),
+            other => panic!("expected LimitNotLiteral, got {other}"),
+        }
+        // sqlparser may decide LIMIT NULL doesn't parse on some
+        // dialects; only assert the error variant + message form
+        // when it does parse far enough to reach the validator.
+        if let Err(SqlError::LimitNotLiteral(s)) = validate(
+            "SELECT a FROM current_dataset LIMIT NULL",
+            DEFAULT_MAX_LIMIT,
+        ) {
+            assert!(
+                s.eq_ignore_ascii_case("null"),
+                "LIMIT NULL message should mirror SQL form, got {s:?}",
+            );
         }
     }
 

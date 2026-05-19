@@ -183,9 +183,16 @@ fn parquet_path_for_query(cache: &CacheRef) -> Result<PathBuf, ToolError> {
         // scheme back to the caller; the full URI may carry bucket
         // names, internal hostnames, or (post-#1.8) signed-URL query
         // params we don't want leaking out of the server.
+        //
+        // Server-side logs ALSO redact: aggregated log backends
+        // (Loki / Splunk / S3-archived JSON) retain whatever we
+        // emit, and any operator with read access could recover a
+        // signature. We log scheme + the pre-`?` path so ops still
+        // has enough context to debug without the secret.
         tracing::warn!(
             slug = %cache.slug,
-            cache_path = %raw,
+            cache_scheme = %scheme,
+            cache_path_redacted = %redact_uri_for_log(raw),
             "cache uri scheme not yet supported by query_rows",
         );
         Err(ToolError::Execution(format!(
@@ -194,6 +201,19 @@ fn parquet_path_for_query(cache: &CacheRef) -> Result<PathBuf, ToolError> {
     } else {
         Ok(PathBuf::from(raw))
     }
+}
+
+/// Strip the query string and fragment from a URI for log output.
+/// Signed URLs (S3, GCS, presigned cloud APIs) carry their signature
+/// and expiry in the query string; without redaction those would
+/// land in aggregated log backends and could be replayed by any
+/// operator with log-read access. Returns the input verbatim for
+/// non-URI strings so this is safe to call on bare filesystem paths
+/// too.
+fn redact_uri_for_log(uri: &str) -> String {
+    let head = uri.split_once('?').map_or(uri, |(head, _)| head);
+    let head = head.split_once('#').map_or(head, |(head, _)| head);
+    head.to_owned()
 }
 
 /// Pull the `scheme` part out of a `scheme://...` URI. Returns a
@@ -667,6 +687,30 @@ mod tests {
             }
             other => panic!("expected Execution, got {other:?}"),
         }
+    }
+
+    /// `redact_uri_for_log` must drop the query string (where signed
+    /// URLs carry the signature) and any fragment. Bare paths and
+    /// scheme+host pass through unchanged so operators still get
+    /// enough context to debug.
+    #[test]
+    fn redact_uri_for_log_drops_query_string_and_fragment() {
+        assert_eq!(
+            redact_uri_for_log("s3://bucket/key.parquet?signature=secret"),
+            "s3://bucket/key.parquet",
+        );
+        assert_eq!(
+            redact_uri_for_log("https://example.com/path?token=abc#frag"),
+            "https://example.com/path",
+        );
+        assert_eq!(
+            redact_uri_for_log("https://example.com/path#frag"),
+            "https://example.com/path",
+        );
+        // No query / fragment → identity.
+        assert_eq!(redact_uri_for_log("file:///tmp/x"), "file:///tmp/x");
+        assert_eq!(redact_uri_for_log("/local/path"), "/local/path");
+        assert_eq!(redact_uri_for_log(""), "");
     }
 
     #[test]
