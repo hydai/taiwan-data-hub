@@ -127,6 +127,11 @@ pub enum ConnectorError {
     BadStatus { status: u16, body: String },
     #[error("could not parse upstream response: {0}")]
     Decode(String),
+    /// Local misconfiguration — invalid URL, bad builder argument, etc.
+    /// Distinct from [`Self::Decode`] which is always about *upstream's*
+    /// response shape.
+    #[error("connector misconfiguration: {0}")]
+    Config(String),
     #[error("invalid cursor for {connector}: {reason}")]
     InvalidCursor {
         // Field name avoids `source` because thiserror reserves that for

@@ -50,13 +50,13 @@ impl DataGovTwConnector {
         Builder::default()
     }
 
-    fn build_request_url(&self, offset: u32) -> Result<Url, BuildError> {
+    fn build_request_url(&self, offset: u64, limit: u32) -> Result<Url, BuildError> {
         let mut url = self
             .base_url
             .join(DEFAULT_PATH)
             .map_err(|e| BuildError::InvalidUrl(e.to_string()))?;
         url.query_pairs_mut()
-            .append_pair("limit", &self.page_size.to_string())
+            .append_pair("limit", &limit.to_string())
             .append_pair("offset", &offset.to_string());
         Ok(url)
     }
@@ -127,12 +127,16 @@ impl SourceConnector for DataGovTwConnector {
     }
 
     async fn list_datasets(&self, cursor: Option<Cursor>) -> Result<Page, crate::ConnectorError> {
-        let offset = parse_offset(cursor.as_ref())?;
+        // `limit` is taken from the cursor when present so a resumed walk
+        // keeps its original page size even if the connector is rebuilt
+        // with a different `page_size`. On a fresh walk we fall back to
+        // the connector's configured default.
+        let (offset, limit) = parse_cursor(cursor.as_ref(), self.page_size)?;
         let url = self
-            .build_request_url(offset)
-            .map_err(|e| crate::ConnectorError::Decode(e.to_string()))?;
+            .build_request_url(offset, limit)
+            .map_err(|e| crate::ConnectorError::Config(e.to_string()))?;
 
-        tracing::debug!(%url, offset, page_size = self.page_size, "GET data.gov.tw catalog");
+        tracing::debug!(%url, offset, limit, "GET data.gov.tw catalog");
 
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
@@ -166,20 +170,12 @@ impl SourceConnector for DataGovTwConnector {
             .collect::<Vec<_>>();
 
         let total = result.count;
-        let fetched = u64::from(offset) + items.len() as u64;
+        let fetched = offset.saturating_add(items.len() as u64);
         let next = match total {
-            Some(t) if fetched < t => Some(Cursor::new(format!(
-                "{}:{}",
-                fetched.min(u64::from(u32::MAX)),
-                self.page_size
-            ))),
+            Some(t) if fetched < t => Some(Cursor::new(format!("{fetched}:{limit}"))),
             // When total is unknown we keep paging until upstream returns
             // an empty page; an empty `items` therefore signals end-of-stream.
-            None if !items.is_empty() => Some(Cursor::new(format!(
-                "{}:{}",
-                fetched.min(u64::from(u32::MAX)),
-                self.page_size
-            ))),
+            None if !items.is_empty() => Some(Cursor::new(format!("{fetched}:{limit}"))),
             _ => None,
         };
 
@@ -187,21 +183,43 @@ impl SourceConnector for DataGovTwConnector {
     }
 }
 
-fn parse_offset(cursor: Option<&Cursor>) -> Result<u32, crate::ConnectorError> {
-    let Some(c) = cursor else { return Ok(0) };
-    let (offset, _limit) =
+/// Decode a cursor into `(offset, limit)`. A `None` cursor yields the
+/// fresh-walk defaults `(0, default_limit)`. A malformed cursor — wrong
+/// shape, non-numeric components, or a zero `limit` — is reported as
+/// [`crate::ConnectorError::InvalidCursor`].
+fn parse_cursor(
+    cursor: Option<&Cursor>,
+    default_limit: u32,
+) -> Result<(u64, u32), crate::ConnectorError> {
+    let Some(c) = cursor else {
+        return Ok((0, default_limit));
+    };
+    let (off_str, lim_str) =
         c.as_str()
             .split_once(':')
             .ok_or_else(|| crate::ConnectorError::InvalidCursor {
                 connector: SourceId::DataGovTw,
                 reason: format!("expected `<offset>:<limit>`, got `{}`", c.as_str()),
             })?;
-    offset
-        .parse::<u32>()
+    let offset: u64 = off_str
+        .parse()
         .map_err(|e| crate::ConnectorError::InvalidCursor {
             connector: SourceId::DataGovTw,
-            reason: format!("offset not a u32: {e}"),
-        })
+            reason: format!("offset not a u64: {e}"),
+        })?;
+    let limit: u32 = lim_str
+        .parse()
+        .map_err(|e| crate::ConnectorError::InvalidCursor {
+            connector: SourceId::DataGovTw,
+            reason: format!("limit not a u32: {e}"),
+        })?;
+    if limit == 0 {
+        return Err(crate::ConnectorError::InvalidCursor {
+            connector: SourceId::DataGovTw,
+            reason: "limit must be > 0".to_owned(),
+        });
+    }
+    Ok((offset, limit))
 }
 
 fn into_metadata(raw: CkanDataset) -> DatasetMetadata {
@@ -522,6 +540,79 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, crate::ConnectorError::InvalidCursor { .. }));
+    }
+
+    #[tokio::test]
+    async fn cursor_limit_overrides_connector_page_size_on_resume() {
+        // Connector configured page_size = 2, but the cursor encodes
+        // limit = 7 — the request must use 7 so a walk resumes with the
+        // same chunk size it started with.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(query_param("offset", "100"))
+            .and(query_param("limit", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_envelope(200, &[])))
+            .mount(&server)
+            .await;
+
+        let _ = connector(&server)
+            .list_datasets(Some(Cursor::new("100:7")))
+            .await
+            .expect("matching mock");
+    }
+
+    #[tokio::test]
+    async fn zero_limit_in_cursor_is_invalid() {
+        let server = MockServer::start().await;
+        let err = connector(&server)
+            .list_datasets(Some(Cursor::new("0:0")))
+            .await
+            .unwrap_err();
+        match err {
+            crate::ConnectorError::InvalidCursor { reason, .. } => {
+                assert!(reason.contains("limit"), "{reason}");
+            }
+            other => panic!("expected InvalidCursor, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn u64_offset_in_cursor_does_not_overflow() {
+        // u32::MAX + 1 — would overflow a u32-based cursor.
+        let server = MockServer::start().await;
+        let huge = u64::from(u32::MAX) + 1;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(query_param("offset", huge.to_string()))
+            .and(query_param("limit", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_envelope(0, &[])))
+            .mount(&server)
+            .await;
+
+        let page = connector(&server)
+            .list_datasets(Some(Cursor::new(format!("{huge}:2"))))
+            .await
+            .expect("ok");
+        assert!(page.items.is_empty());
+    }
+
+    #[test]
+    fn parse_cursor_defaults_to_zero_offset_and_provided_limit() {
+        let (offset, limit) = parse_cursor(None, 100).expect("ok");
+        assert_eq!(offset, 0);
+        assert_eq!(limit, 100);
+    }
+
+    #[test]
+    fn parse_cursor_rejects_negative_or_non_numeric() {
+        for raw in ["abc:10", "-1:10", "10:-1", "10:abc", ":", "10:"] {
+            let err = parse_cursor(Some(&Cursor::new(raw)), 100).unwrap_err();
+            assert!(
+                matches!(err, crate::ConnectorError::InvalidCursor { .. }),
+                "{raw} should be rejected",
+            );
+        }
     }
 
     #[test]
