@@ -200,11 +200,17 @@ fn render_dataframe(df: &DataFrame, effective_limit: u64) -> Value {
         .map(|c| Value::String(c.to_string()))
         .collect();
 
+    // Hoist `df.columns()` and `df.width()` out of the row loop —
+    // `columns()` returns a `&[Column]` slice in 0.53 but calling it
+    // per row is still avoidable indirection that scales linearly
+    // with row count.
+    let columns_slice = df.columns();
+    let width = columns_slice.len();
     let height = df.height();
     let mut rows: Vec<Value> = Vec::with_capacity(height);
     for row_idx in 0..height {
-        let mut row = Vec::with_capacity(df.width());
-        for column in df.columns() {
+        let mut row = Vec::with_capacity(width);
+        for column in columns_slice {
             row.push(any_value_to_json(
                 &column.get(row_idx).unwrap_or(AnyValue::Null),
             ));

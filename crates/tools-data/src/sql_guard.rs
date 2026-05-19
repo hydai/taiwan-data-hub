@@ -8,16 +8,25 @@
 //!
 //! The contract:
 //!
-//! 1. **Single SELECT statement** — no `;` chaining, no DDL/DML.
-//! 2. **No CTEs, no set ops, no subqueries** — keeps the surface tiny.
-//! 3. **Only `current_dataset`** — the one virtual table the Polars
-//!    SQL context binds; nothing else may appear in `FROM` or `JOIN`.
-//! 4. **Function allow-list** — every function call is checked against
-//!    `ALLOWED_FUNCTIONS`. System-y things (`pg_*`, `current_user`,
-//!    `version()`) are rejected because they're not in the list.
+//! 1. **Single top-level SELECT** — no `;` chaining, no DDL/DML, no
+//!    `VALUES (…)` body, no `INSERT … RETURNING` wrapped as Query.
+//! 2. **No CTEs, no set ops, no subqueries, no FETCH FIRST** — keeps
+//!    the surface tiny and prevents bypassing the LIMIT clamp.
+//! 3. **Exactly one reference to `current_dataset`** — rejects
+//!    self-joins and cartesian products. Even with a forced LIMIT
+//!    on the output, materialising an N×N intermediate is an easy
+//!    cost-amplifier.
+//! 4. **Function allow-list** — every function call is checked
+//!    against `ALLOWED_FUNCTIONS`. System-y things (`pg_*`,
+//!    `current_user`, `version()`) are rejected because they're not
+//!    in the list.
 //! 5. **`LIMIT` clamp** — if the user didn't supply a `LIMIT`, inject
 //!    one. If they did, clamp it down. Cap is [`DEFAULT_MAX_LIMIT`]
 //!    (`10_000`) per `DESIGN.md` §9.
+//! 6. **No OFFSET** — forces the engine to materialise-and-discard
+//!    the prefix, which sidesteps the resource bound LIMIT provides.
+//!    Cursored pagination (`WHERE id > … ORDER BY id LIMIT N`) is
+//!    both faster and safe.
 //!
 //! Each layer should hold even if the others are bypassed. The
 //! validator returns the post-validation SQL string with LIMIT
@@ -111,12 +120,21 @@ pub enum SqlError {
     Subquery,
     #[error("only the `current_dataset` virtual table is allowed; got `{0}`")]
     DisallowedTable(String),
+    #[error(
+        "exactly one reference to `current_dataset` is allowed; got {0} \
+         (self-joins and cartesian products are rejected to bound execution cost)"
+    )]
+    TooManyRelations(usize),
     #[error("function `{0}` is not in the allow-list")]
     DisallowedFunction(String),
     #[error("SELECT … INTO is not allowed")]
     SelectInto,
     #[error("LIMIT must be a non-negative literal integer; got `{0}`")]
     LimitNotLiteral(String),
+    #[error("OFFSET is not allowed (use cursored pagination via WHERE id > … ORDER BY id)")]
+    Offset,
+    #[error("FETCH FIRST … ROWS ONLY is not allowed; use LIMIT instead")]
+    Fetch,
 }
 
 /// The validated SQL ready to hand to Polars. Wraps the string in a
@@ -164,14 +182,29 @@ pub fn validate(sql: &str, max_limit: u64) -> Result<ValidatedSql, SqlError> {
     }
 
     // Reject UNION/INTERSECT/EXCEPT and any top-level set operation
-    // before deeper validation runs.
-    if let sqlparser::ast::SetExpr::SetOperation { .. } = query.body.as_ref() {
-        return Err(SqlError::SetOperation);
+    // before deeper validation runs. Also reject non-SELECT query
+    // bodies (`VALUES (...)`, `INSERT ... RETURNING ...` wrapped as
+    // Query, etc.) — only top-level SELECTs are admitted.
+    match query.body.as_ref() {
+        sqlparser::ast::SetExpr::Select(_) => {}
+        sqlparser::ast::SetExpr::SetOperation { .. } => return Err(SqlError::SetOperation),
+        _ => return Err(SqlError::NotSelect),
     }
 
-    walk_relations(&query)?;
+    // ANSI `FETCH FIRST n ROWS ONLY` would bypass our LIMIT clamp.
+    // Reject it; the user can spell the same intent with LIMIT.
+    if query.fetch.is_some() {
+        return Err(SqlError::Fetch);
+    }
+
+    // Walk expressions BEFORE relations so a subquery against
+    // `current_dataset` surfaces as `Subquery` rather than getting
+    // caught by the relation-count check (which would otherwise win
+    // because each subquery reference adds to the count).
     walk_expressions(&query)?;
+    walk_relations(&query)?;
     walk_select_into(&query)?;
+    reject_offset(&query)?;
 
     let effective_limit = enforce_limit(&mut query, max_limit)?;
     Ok(ValidatedSql {
@@ -180,15 +213,20 @@ pub fn validate(sql: &str, max_limit: u64) -> Result<ValidatedSql, SqlError> {
     })
 }
 
-/// Visitor that collects the first disallowed table reference.
+/// Visitor that collects the first disallowed table reference AND
+/// counts total relation occurrences so the validator can reject
+/// self-joins / cartesian products at the AST layer (a forced LIMIT
+/// doesn't bound the *cost* of materialising a 1M × 1M intermediate).
 struct RelationVisitor {
     err: Option<SqlError>,
+    relation_count: usize,
 }
 
 impl Visitor for RelationVisitor {
     type Break = ();
 
     fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<()> {
+        self.relation_count += 1;
         let qname = object_name_string(relation);
         if !qname.eq_ignore_ascii_case(ALLOWED_TABLE) {
             self.err = Some(SqlError::DisallowedTable(qname));
@@ -199,9 +237,38 @@ impl Visitor for RelationVisitor {
 }
 
 fn walk_relations(query: &Query) -> Result<(), SqlError> {
-    let mut visitor = RelationVisitor { err: None };
+    let mut visitor = RelationVisitor {
+        err: None,
+        relation_count: 0,
+    };
     let _ = query.visit(&mut visitor);
-    visitor.err.map_or(Ok(()), Err)
+    if let Some(e) = visitor.err {
+        return Err(e);
+    }
+    if visitor.relation_count > 1 {
+        return Err(SqlError::TooManyRelations(visitor.relation_count));
+    }
+    Ok(())
+}
+
+/// Reject any OFFSET in either LIMIT-clause shape. OFFSET forces the
+/// engine to materialise-and-discard the prefix, which sidesteps the
+/// resource bound LIMIT provides. Callers wanting pagination should
+/// use cursored WHERE conditions instead.
+fn reject_offset(query: &Query) -> Result<(), SqlError> {
+    match &query.limit_clause {
+        None => Ok(()),
+        Some(LimitClause::LimitOffset { offset, .. }) => {
+            if offset.is_some() {
+                Err(SqlError::Offset)
+            } else {
+                Ok(())
+            }
+        }
+        // `OffsetCommaLimit` is MySQL-style `LIMIT offset, count` —
+        // by definition it carries an OFFSET, so reject unconditionally.
+        Some(LimitClause::OffsetCommaLimit { .. }) => Err(SqlError::Offset),
+    }
 }
 
 /// Visitor that collects the first disallowed function call OR
@@ -256,6 +323,10 @@ fn walk_select_into(query: &Query) -> Result<(), SqlError> {
 /// reference or function call) are rejected so we can't be fooled by
 /// a runtime-computed huge value. Returns the value the LIMIT was
 /// settled to.
+///
+/// `reject_offset` is expected to have run first and shaken out the
+/// `OffsetCommaLimit` variant, so this function only sees the
+/// no-offset shapes.
 fn enforce_limit(query: &mut Query, max_limit: u64) -> Result<u64, SqlError> {
     match &mut query.limit_clause {
         None => {
@@ -277,11 +348,10 @@ fn enforce_limit(query: &mut Query, max_limit: u64) -> Result<u64, SqlError> {
             *limit = Some(literal_u64(new_limit));
             Ok(new_limit)
         }
-        Some(LimitClause::OffsetCommaLimit { limit, .. }) => {
-            let new_limit = clamp_limit_expr(limit, max_limit)?;
-            *limit = literal_u64(new_limit);
-            Ok(new_limit)
-        }
+        // Unreachable: `reject_offset` returns `SqlError::Offset` for
+        // any clause carrying an OFFSET before we get here. Surface
+        // it as a defensive bug rather than fabricating a limit.
+        Some(LimitClause::OffsetCommaLimit { .. }) => Err(SqlError::Offset),
     }
 }
 
@@ -527,6 +597,62 @@ mod tests {
                 "expected rejection for `{sql}`",
             );
         }
+    }
+
+    #[test]
+    fn self_join_rejected_even_against_allowed_table() {
+        // `FROM current_dataset a, current_dataset b` would let an
+        // attacker materialise N×N intermediate rows before LIMIT
+        // applies. The visitor counts relation occurrences and
+        // refuses anything > 1.
+        let err =
+            assert_err("SELECT 1 FROM current_dataset a, current_dataset b WHERE a.id = b.id");
+        match err {
+            SqlError::TooManyRelations(n) => assert_eq!(n, 2),
+            other => panic!("expected TooManyRelations, got {other}"),
+        }
+    }
+
+    #[test]
+    fn join_against_allowed_table_rejected_for_relation_count() {
+        let err = assert_err(
+            "SELECT 1 FROM current_dataset \
+             JOIN current_dataset cd2 ON current_dataset.id = cd2.id",
+        );
+        assert!(matches!(err, SqlError::TooManyRelations(_)), "got {err}");
+    }
+
+    #[test]
+    fn values_body_rejected() {
+        // VALUES parses as a Statement::Query whose body is
+        // SetExpr::Values — without the SELECT-only check it would
+        // sneak past as "a Query, so admit it".
+        assert_eq!(assert_err("VALUES (1)"), SqlError::NotSelect);
+    }
+
+    #[test]
+    fn offset_rejected() {
+        assert_eq!(
+            assert_err("SELECT a FROM current_dataset OFFSET 1000000000"),
+            SqlError::Offset,
+        );
+        assert_eq!(
+            assert_err("SELECT a FROM current_dataset LIMIT 10 OFFSET 5"),
+            SqlError::Offset,
+        );
+    }
+
+    #[test]
+    fn fetch_first_n_rows_only_rejected() {
+        // ANSI FETCH would bypass our LIMIT clamp; reject it.
+        let err = validate(
+            "SELECT a FROM current_dataset FETCH FIRST 100 ROWS ONLY",
+            DEFAULT_MAX_LIMIT,
+        );
+        assert!(
+            matches!(err, Err(SqlError::Fetch)),
+            "expected Fetch, got {err:?}",
+        );
     }
 
     /// LIMIT clause must end up as a literal positive integer ≤ cap.
