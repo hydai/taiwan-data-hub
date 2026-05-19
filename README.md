@@ -149,8 +149,15 @@ chat input.
 
 #### Cursor
 
-Config file: `~/.cursor/mcp.json` (or *Settings → MCP* in the UI,
-which writes the same file).
+Current Cursor builds keep MCP servers in a dedicated file:
+
+- **Global:** `~/.cursor/mcp.json`
+- **Per-project:** `<project>/.cursor/mcp.json`
+
+The *Settings → MCP* panel in the UI writes the same file. Older
+Cursor versions embedded MCP servers in the VS Code-style
+`settings.json` — if you're on a pre-1.0 build, look for an `mcp`
+block there instead and migrate it to `mcp.json`.
 
 stdio:
 
@@ -180,9 +187,19 @@ Reload the Cursor window after saving.
 
 #### Cline (VS Code extension)
 
-Open the Cline panel → ☰ menu → *MCP Servers* → *Edit*. Cline writes
-to `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
-on macOS; the exact path varies by OS.
+Cline stores MCP servers in `cline_mcp_settings.json` under the VS
+Code extension's globalStorage — *not* a generic `mcp.json`. Open
+the Cline panel → ☰ menu → *MCP Servers* → *Edit* to have Cline open
+the correct file for your OS.
+
+The on-disk path on macOS is:
+
+```text
+~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json
+```
+
+On Linux replace `~/Library/Application Support` with
+`~/.config`; on Windows it lives under `%APPDATA%\Code\User\globalStorage\...`.
 
 stdio:
 
