@@ -1,8 +1,9 @@
 //! stdio MCP shim for local AI clients (Claude Desktop, Cursor, Cline).
 //!
-//! Skeleton wiring per design issue #1.1: builds an empty [`mcp_core::Dispatcher`]
-//! and serves it over rmcp's stdio transport. Subsequent issues register tools
-//! against the dispatcher; this binary stays unchanged.
+//! Builds an `mcp_core::Dispatcher` seeded by `tools_data::register_data_tools`
+//! and serves it over rmcp's stdio transport. The gateway crate wires the
+//! same registration helper for HTTP — adding a new tool there means
+//! editing one function in `tools-data`, not both binaries.
 //!
 //! Run via `cargo run -p mcp-stdio` (or the Inspector wrapper:
 //! `npx @modelcontextprotocol/inspector cargo run -p mcp-stdio`).
@@ -24,13 +25,15 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let dispatcher = Dispatcher::default();
+    let dispatcher = tools_data::register_data_tools(Dispatcher::builder()).build();
+    let tool_count = dispatcher.len();
     let server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    let server = McpServer::new(dispatcher, server_info)
-        .with_instructions("Taiwan Data Hub MCP server (skeleton — no tools registered yet).");
+    let server =
+        McpServer::new(dispatcher, server_info).with_instructions("Taiwan Data Hub MCP server.");
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
+        tools = tool_count,
         "starting stdio MCP server"
     );
 

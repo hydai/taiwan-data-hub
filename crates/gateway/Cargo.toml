@@ -16,6 +16,7 @@ workspace = true
 # rmcp is consumed exclusively via the `mcp_core::rmcp` re-export so the SDK
 # binding lives in a single crate; do not add a direct `rmcp` dep here.
 mcp-core = { path = "../mcp-core" }
+tools-data = { path = "../tools-data" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
