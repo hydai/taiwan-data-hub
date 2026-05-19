@@ -5,11 +5,17 @@
 //!
 //! - [`register_data_tools`] — always-on tools that need no
 //!   database (today: `list_domains`).
-//! - [`register_db_tools`] — tools backed by a
-//!   `storage::DatasetReader`. Binaries call this only when a
-//!   `DATABASE_URL` is configured and the pool connects
-//!   successfully. A personal-mode install without Postgres simply
-//!   ships fewer tools.
+//! - [`register_db_tools`] — tools that need Postgres. Takes a
+//!   concrete [`storage::Storage`] handle and wires every tool that
+//!   implements its narrowest required trait (today: `get_dataset`
+//!   via [`storage::DatasetReader`] + `search_datasets` via
+//!   [`storage::DatasetSearcher`]). Binaries call this only when
+//!   `DATABASE_URL` is configured and the pool connects; a personal-
+//!   mode install without Postgres simply ships fewer tools.
+//! - [`register_db_tools_with`] — lower-level entry point that takes
+//!   the trait objects (`Arc<dyn DatasetReader>` etc.) directly so
+//!   tests can plug in in-memory stubs per trait without going
+//!   through `Storage`.
 
 pub mod domains;
 pub mod get_dataset;
