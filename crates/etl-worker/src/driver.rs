@@ -224,13 +224,19 @@ where
 ///   for the corpus size (~50k datasets) but the cost is trivial.
 ///
 /// Field selection rationale:
-/// - `source_id` + `slug` — identity, but constant per (source,
-///   `source_id`) so they don't drive churn
+/// - `source_id` — the (`source`, `source_id`) pair is the natural
+///   key in the `datasets` table; including it in the checksum
+///   pins identity but doesn't drive churn (it never changes for
+///   a given dataset row).
+/// - `slug` — CKAN's `name` can change while `source_id` stays put
+///   (e.g. an agency renames the published dataset), and the slug
+///   feeds marketplace URLs (`/data/<slug>`). Treating a slug rename
+///   as version-worthy churn lets us record the URL-affecting edit.
 /// - `title_i18n` + `description_i18n` + `publisher` —
-///   user-visible churn
+///   user-visible churn.
 /// - `license` + `update_frequency` + `original_url` — operational
-///   churn that downstream tooling cares about
-/// - `last_modified_at` — upstream's own freshness signal
+///   churn that downstream tooling cares about.
+/// - `last_modified_at` — upstream's own freshness signal.
 ///
 /// We deliberately exclude `upstream_categories` because the ETL
 /// already maps those to a `domain_id` via `map_to_domain`, and we
@@ -306,13 +312,13 @@ fn feed_i18n_field(hasher: &mut Sha256, label: &str, map: &BTreeMap<String, Stri
 /// so the conflict path only fires when we've genuinely seen this
 /// exact checksum for this exact dataset before.
 ///
-/// Shapes:
-/// - `last_modified_at` present: `"<rfc3339-ts>#<sha256-hex>"` —
+/// Shapes (note the `sha256:` prefix is part of the checksum string
+/// emitted by [`metadata_checksum`] and is preserved here):
+/// - `last_modified_at` present: `"<rfc3339-ts>#sha256:<64-hex>"` —
 ///   timestamp first so operators recognise the era at a glance;
 ///   `#`-separated full hash makes the label content-addressable.
-/// - missing: `"<sha256-hex>"` (no good human-readable era, so the
-///   hash leads; the `sha256:` prefix from `metadata_checksum` is
-///   already present).
+/// - missing: `"sha256:<64-hex>"` (no good human-readable era, so
+///   the hash leads).
 fn version_string(meta: &DatasetMetadata, checksum: &str) -> String {
     match meta.last_modified_at {
         Some(ts) => format!("{}#{checksum}", ts.to_rfc3339()),

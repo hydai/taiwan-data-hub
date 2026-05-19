@@ -400,9 +400,11 @@ impl Storage {
     /// from `checksum` so two distinct checksums never collide on
     /// the same version label (otherwise this method would silently
     /// drop a real change). The ETL driver's `version_string` helper
-    /// embeds the full SHA-256 hex in the label
-    /// (`"<rfc3339-ts>#<sha256-hex>"` or `"<sha256-hex>"`) to
-    /// guarantee this mathematically rather than probabilistically.
+    /// embeds the full `sha256:<64-hex>` checksum string into the
+    /// label so the result is `"<rfc3339-ts>#sha256:<64-hex>"` when
+    /// upstream carries a `last_modified_at`, or `"sha256:<64-hex>"`
+    /// otherwise. 256 bits of entropy makes this injectivity
+    /// mathematical, not probabilistic.
     pub async fn record_version_if_changed(
         &self,
         dataset_id: Uuid,
@@ -923,12 +925,16 @@ mod tests {
         assert_eq!(count.0, 2, "A → B → A collapses to two rows");
     }
 
-    /// Schema-diff contract for #1.4d: first insert produces a row,
-    /// repeat with same checksum is a no-op, different checksum
-    /// produces a second row.
+    /// Schema-diff contract for #1.4d: the storage layer dedups on
+    /// `(dataset_id, version)` (the table's UNIQUE constraint backed
+    /// by `ON CONFLICT DO NOTHING`). First call with a new version
+    /// inserts; repeat with the same `(dataset_id, version)` is a
+    /// no-op; a different version inserts another row. The
+    /// `checksum` argument is stored but does NOT participate in
+    /// the dedup decision.
     #[tokio::test]
     #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
-    async fn record_version_writes_only_on_checksum_change() {
+    async fn record_version_dedupes_on_dataset_id_and_version() {
         let (storage, _container) = fresh_storage().await;
         let domain_id = realestate_land_id(&storage).await;
         let dataset_id = storage
