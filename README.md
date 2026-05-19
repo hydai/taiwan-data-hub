@@ -25,10 +25,13 @@ differentiators:
 
 ## Status
 
-**Pre-alpha · design phase.** Implementation has not started yet. The full
-system design lives in [`docs/DESIGN.md`](docs/DESIGN.md). Eight milestones
-(M0–M7) decompose the work into 80 sub-issues, summing to roughly 6–9 months
-for a 2–3 person team to reach v1.0.
+**Pre-alpha.** M0 Foundations complete. M1 MCP MVP in progress — the stdio
+and Streamable HTTP transports are live and `list_domains` is the first tool
+to ship. Subsequent M1 work brings the `data.gov.tw` crawler online and
+adds the four remaining base tools. The full system design lives in
+[`docs/DESIGN.md`](docs/DESIGN.md); eight milestones (M0–M7) decompose the
+work into 80 sub-issues, summing to roughly 6–9 months for a 2–3 person team
+to reach v1.0.
 
 If you want to follow along or contribute, watch this repository.
 
@@ -50,8 +53,8 @@ Full version-pinned dependency table: [`docs/DESIGN.md` §5](docs/DESIGN.md).
 
 | Milestone | Scope | Status |
 |---|---|---|
-| **M0** Foundations | Repo, CI, Docker, healthchecks | not started |
-| **M1** MCP MVP | 5 base MCP tools + data.gov.tw ingest | not started |
+| **M0** Foundations | Repo, CI, Docker, healthchecks | complete |
+| **M1** MCP MVP | 5 base MCP tools + data.gov.tw ingest | in progress |
 | **M2** Marketplace UI | 20 domains, dataset detail, collections | not started |
 | **M3** Rich MCP + Utility Wave 1 | Rich tools + 20 TW utility tools + hot cache | not started |
 | **M4** Auth + Personal/Multi-user Mode | Email + OAuth + mode switch | not started |
@@ -60,6 +63,171 @@ Full version-pinned dependency table: [`docs/DESIGN.md` §5](docs/DESIGN.md).
 | **M7** Discovery + REST + i18n | `/llms.txt`, `/.well-known/*`, OpenAPI, 5 languages | not started |
 
 **MVP (v0.1)** = M0 + M1 + M2, estimated 6–8 weeks for 2 people.
+
+## MCP Quickstart
+
+Taiwan Data Hub ships two MCP transports off the same dispatcher:
+
+- **stdio** (`mcp-stdio` binary) — the universal mode; works with every
+  MCP client today. The client spawns the binary and talks JSON-RPC over
+  stdin/stdout.
+- **Streamable HTTP** (`gateway` binary at `/mcp`) — the new MCP 2025-11-25
+  transport. Supported by recent versions of Claude Desktop, Cursor,
+  Cline, and the official Inspector. Use this when you want one shared
+  server process for several clients.
+
+### 1. Build the binaries
+
+```bash
+git clone https://github.com/hydai/taiwan-data-hub.git
+cd taiwan-data-hub
+cargo build --release -p mcp-stdio -p gateway
+# Resulting binaries:
+#   target/release/mcp-stdio
+#   target/release/gateway
+```
+
+Use the absolute path from the snippets below — most MCP clients won't
+resolve `~` or `$HOME` inside the config JSON.
+
+### 2. Verify with the MCP Inspector (optional)
+
+```bash
+# stdio
+npx -y @modelcontextprotocol/inspector --cli \
+  /ABSOLUTE/PATH/TO/target/release/mcp-stdio \
+  --method tools/list
+
+# Streamable HTTP (start the gateway in another terminal first:
+#   GATEWAY_ADDR=127.0.0.1:8080 ./target/release/gateway)
+npx -y @modelcontextprotocol/inspector --cli \
+  http://127.0.0.1:8080/mcp --transport http \
+  --method tools/list
+```
+
+Both should return the current tool list (one entry today:
+`list_domains`).
+
+### 3. Wire your client
+
+Pick the snippet for your client and replace `/ABSOLUTE/PATH/TO/...`
+with the actual path from step 1.
+
+#### Claude Desktop
+
+Config file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+stdio:
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "command": "/ABSOLUTE/PATH/TO/target/release/mcp-stdio"
+    }
+  }
+}
+```
+
+Streamable HTTP (Claude Desktop 1.x+ with HTTP-transport support):
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Restart Claude Desktop and look for the 🛠️ tools indicator on the
+chat input.
+
+#### Cursor
+
+Config file: `~/.cursor/mcp.json` (or *Settings → MCP* in the UI,
+which writes the same file).
+
+stdio:
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "command": "/ABSOLUTE/PATH/TO/target/release/mcp-stdio"
+    }
+  }
+}
+```
+
+Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Reload the Cursor window after saving.
+
+#### Cline (VS Code extension)
+
+Open the Cline panel → ☰ menu → *MCP Servers* → *Edit*. Cline writes
+to `~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json`
+on macOS; the exact path varies by OS.
+
+stdio:
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "command": "/ABSOLUTE/PATH/TO/target/release/mcp-stdio",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "taiwan-data-hub": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Client shows 0 tools | Path uses `~` or `$HOME` | Replace with the absolute path |
+| `Failed to spawn process` | Binary not built | Re-run `cargo build --release -p mcp-stdio` |
+| HTTP config times out | Gateway not running, or wrong port | `GATEWAY_ADDR=127.0.0.1:8080 ./target/release/gateway` |
+| `Bad Request: missing Host header` | Calling /mcp without a `Host:` header | Use a client (curl needs `-H "Host: 127.0.0.1:8080"`) |
+| Server reports `name: "rmcp"` | Old build before the identity fix | `cargo build --release` against `main` |
+
+### Screenshots
+
+Working-integration screenshots and a recorded demo gif are tracked
+as a manual follow-up to this PR; they require running the proprietary
+Claude Desktop / Cursor / Cline clients which can't be reproduced from
+CI. Contributions welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
