@@ -507,7 +507,6 @@ mod tests {
 
     /// Docker-free `SourceConnector` that yields a pre-baked queue of
     /// pages and panics if the driver requests more than were set up.
-    /// Stub connector that yields a pre-baked queue of pages.
     /// `not_modified_first` lets a test inject a 304 response in front
     /// of the page queue — handy for exercising the conditional-fetch
     /// short-circuit without a real wiremock setup.
