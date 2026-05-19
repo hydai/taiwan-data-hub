@@ -115,11 +115,25 @@ where
                     summary.upserted = summary.upserted.saturating_add(1);
                 }
                 DomainResolution::NoMapping => {
-                    if skip_warn_remaining > 0 {
+                    // Only the FIRST WARN this pass carries the
+                    // "budget exists" explanation; subsequent budgeted
+                    // WARNs are concise. Otherwise WARN #2..N would
+                    // each claim "further skips log at DEBUG" while
+                    // there are still WARNs coming, which is false
+                    // for every line except the last.
+                    if skip_warn_remaining == SKIP_WARN_BUDGET {
                         tracing::warn!(
                             slug = %meta.slug,
                             categories = ?meta.upstream_categories,
-                            "no domain match — dataset skipped (further skips this pass log at DEBUG)",
+                            skip_warn_budget = SKIP_WARN_BUDGET,
+                            "no domain match — dataset skipped (WARNs bounded per pass; further skips beyond the budget log at DEBUG)",
+                        );
+                        skip_warn_remaining -= 1;
+                    } else if skip_warn_remaining > 0 {
+                        tracing::warn!(
+                            slug = %meta.slug,
+                            categories = ?meta.upstream_categories,
+                            "no domain match — dataset skipped",
                         );
                         skip_warn_remaining -= 1;
                     } else {
