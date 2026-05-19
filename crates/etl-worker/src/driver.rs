@@ -11,6 +11,13 @@ use connectors::{DatasetMetadata, Page, SourceConnector};
 use storage::Storage;
 use tools_data::domains;
 
+/// How many per-dataset "no domain match" lines to log at WARN per
+/// pass before we drop to DEBUG. 10 is enough for an operator to
+/// eyeball the first batch of upstream categories that missed our
+/// mapping table without flooding alerts when the misses are
+/// numerous.
+const SKIP_WARN_BUDGET: u32 = 10;
+
 /// Outcome counters from a single crawl pass. Useful for ops dashboards
 /// and tests; the binary logs these at the end of every run.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +58,11 @@ pub async fn run_one_pass<C: SourceConnector>(
     // the SQL probe AND re-emit a WARN log line, which under a YAML /
     // migration mismatch could mean 50k+ extra queries per crawl.
     let mut domain_cache: BTreeMap<String, Option<i16>> = BTreeMap::new();
+    // Bound the per-dataset skip-WARN volume: at most the first
+    // SKIP_WARN_BUDGET get logged at WARN; the rest land at DEBUG so
+    // ops alerting on WARN doesn't get drowned out under a large
+    // crawl. The aggregate count surfaces in the summary INFO line.
+    let mut skip_warn_remaining: u32 = SKIP_WARN_BUDGET;
 
     loop {
         summary.pages = summary.pages.saturating_add(1);
@@ -71,11 +83,20 @@ pub async fn run_one_pass<C: SourceConnector>(
                 storage.upsert_dataset(domain_id, source, &meta).await?;
                 summary.upserted = summary.upserted.saturating_add(1);
             } else {
-                tracing::warn!(
-                    slug = %meta.slug,
-                    categories = ?meta.upstream_categories,
-                    "no domain match — dataset skipped",
-                );
+                if skip_warn_remaining > 0 {
+                    tracing::warn!(
+                        slug = %meta.slug,
+                        categories = ?meta.upstream_categories,
+                        "no domain match — dataset skipped (further skips this pass log at DEBUG)",
+                    );
+                    skip_warn_remaining -= 1;
+                } else {
+                    tracing::debug!(
+                        slug = %meta.slug,
+                        categories = ?meta.upstream_categories,
+                        "no domain match — dataset skipped",
+                    );
+                }
                 summary.skipped_no_domain = summary.skipped_no_domain.saturating_add(1);
             }
         }
@@ -189,7 +210,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "success": true,
                 "result": {
-                    "count": 3,
+                    "count": 4,
                     "results": [
                         ckan_dataset("1", "land-prices", "不動產與土地"),
                         ckan_dataset("2", "air-quality", "環境"),
@@ -207,7 +228,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "success": true,
                 "result": {
-                    "count": 3,
+                    "count": 4,
                     "results": [
                         ckan_dataset("3", "school-roster", "教育與研究"),
                         ckan_dataset("4", "mystery-meat", "Something Off-Taxonomy"),
