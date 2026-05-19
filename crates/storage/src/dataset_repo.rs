@@ -69,6 +69,14 @@ pub trait DatasetWriter: Send + Sync + 'static {
 
     /// See [`Storage::domain_id_for_slug`].
     async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError>;
+
+    /// See [`Storage::record_version_if_changed`].
+    async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError>;
 }
 
 #[async_trait]
@@ -84,6 +92,15 @@ impl DatasetWriter for Storage {
 
     async fn domain_id_for_slug(&self, slug: &str) -> Result<Option<i16>, StorageError> {
         Storage::domain_id_for_slug(self, slug).await
+    }
+
+    async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Storage::record_version_if_changed(self, dataset_id, version, checksum).await
     }
 }
 
@@ -360,6 +377,62 @@ impl Storage {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    /// Insert a new `dataset_versions` row iff `checksum` differs
+    /// from the latest version's checksum. Returns `Some(new_id)`
+    /// when a row was inserted, `None` when no change (latest's
+    /// checksum already matches).
+    ///
+    /// Used by the ETL driver to record schema-diff history per
+    /// `DESIGN.md` §9 (the #1.4 Definition of Done specifies
+    /// "schema diff detection stores into `dataset_versions`"). The
+    /// caller computes the checksum from the upstream metadata;
+    /// the storage layer only needs to know whether it's *different
+    /// from last time*.
+    ///
+    /// Wrapped in a transaction so the read-then-write is atomic
+    /// against concurrent crawlers (today there's only one, but
+    /// #5b adds multiple connector workers).
+    pub async fn record_version_if_changed(
+        &self,
+        dataset_id: Uuid,
+        version: &str,
+        checksum: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        let latest: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT checksum FROM dataset_versions \
+             WHERE dataset_id = $1 \
+             ORDER BY fetched_at DESC, id DESC \
+             LIMIT 1",
+        )
+        .bind(dataset_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        // Latest's checksum matches → no-op. Latest's checksum is
+        // NULL or absent → write a new version (we have nothing to
+        // compare against).
+        if let Some((Some(prev_checksum),)) = latest.as_ref()
+            && prev_checksum == checksum
+        {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
+        let inserted: (Uuid,) = sqlx::query_as(
+            "INSERT INTO dataset_versions (dataset_id, version, checksum) \
+             VALUES ($1, $2, $3) \
+             RETURNING id",
+        )
+        .bind(dataset_id)
+        .bind(version)
+        .bind(checksum)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Some(inserted.0))
     }
 
     /// Fetch the full read view for a dataset by id or slug. Returns
@@ -810,6 +883,50 @@ mod tests {
             Some("地政司"),
             "publisher must reflect the update"
         );
+    }
+
+    /// Schema-diff contract for #1.4d: first insert produces a row,
+    /// repeat with same checksum is a no-op, different checksum
+    /// produces a second row.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_version_writes_only_on_checksum_change() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        // First call records a fresh version.
+        let v1 = storage
+            .record_version_if_changed(dataset_id, "2026-04-15", "checksum-A")
+            .await
+            .expect("first version");
+        assert!(v1.is_some(), "first call must insert");
+
+        // Same checksum → no new row.
+        let v2 = storage
+            .record_version_if_changed(dataset_id, "2026-04-15", "checksum-A")
+            .await
+            .expect("no-op");
+        assert!(v2.is_none(), "matching checksum must not insert");
+
+        // Different checksum → new row.
+        let v3 = storage
+            .record_version_if_changed(dataset_id, "2026-05-01", "checksum-B")
+            .await
+            .expect("second version");
+        assert!(v3.is_some(), "changed checksum must insert");
+        assert_ne!(v1.unwrap(), v3.unwrap());
+
+        let count: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM dataset_versions WHERE dataset_id = $1")
+                .bind(dataset_id)
+                .fetch_one(storage.pool())
+                .await
+                .expect("count");
+        assert_eq!(count.0, 2, "exactly two version rows after A → A → B");
     }
 
     #[tokio::test]
