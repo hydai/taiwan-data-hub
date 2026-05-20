@@ -50,9 +50,4 @@
 			{/each}
 		</ul>
 	</section>
-
-	<footer class="mt-12 text-xs text-neutral-400">
-		Apache-2.0 ·
-		<a class="underline" href="https://github.com/hydai/taiwan-data-hub">GitHub</a>
-	</footer>
 </main>
