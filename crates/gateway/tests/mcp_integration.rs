@@ -330,7 +330,10 @@ mcp_integration_test!(list_domains_happy_returns_20_seeded_domains, |h| {
 mcp_integration_test!(list_domains_unknown_locale_falls_back_to_zh_tw, |h| {
     Box::pin(async move {
         // Unknown locale tags are accepted; missing keys fall back
-        // to zh-TW per `COALESCE(col->>$lang, col->>'zh-TW')`. The
+        // to zh-TW via `I18nText::resolve` in `tools-data/domains.rs`
+        // (the tool reads from the embedded YAML, not from the
+        // `domains` SQL table — the SQL `COALESCE` fallback pattern
+        // is a separate path used by the dataset-level tools). The
         // response still echoes the requested locale label even
         // though every value resolved to the zh-TW fallback.
         let res = h
