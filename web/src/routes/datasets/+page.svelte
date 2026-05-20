@@ -4,6 +4,16 @@
 	we keep this route present so the layout shell's nav link
 	resolves rather than 404'ing.
 -->
+<script lang="ts">
+	import MetaTags from '$lib/seo/MetaTags.svelte';
+</script>
+
+<MetaTags
+	title="Datasets"
+	description="Browse all Taiwan public-data datasets on Taiwan Data Hub. Detail pages with MCP wiring instructions land in #2.6."
+	schemaType="CollectionPage"
+/>
+
 <div class="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
 	<h1 class="text-3xl font-bold tracking-tight text-neutral-900">Datasets</h1>
 	<p class="mt-3 text-neutral-600">
