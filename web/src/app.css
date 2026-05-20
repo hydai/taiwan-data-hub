@@ -4,9 +4,10 @@
  * Taiwan Data Hub — design tokens (Tailwind 4, CSS-first config)
  *
  * No tailwind.config.js exists; Tailwind 4 derives utilities from the CSS
- * custom properties declared inside `@theme`. Adding `--color-primary-500`
- * here, for example, makes `bg-primary-500 text-primary-500
- * ring-primary-500 …` available throughout the app automatically.
+ * custom properties declared inside `@theme`. Adding a single token, e.g.
+ * `--color-primary-500`, automatically generates every matching utility:
+ * `bg-primary-500`, `text-primary-500`, `border-primary-500`,
+ * `ring-primary-500`, `from-primary-500`, and so on.
  *
  * Naming follows the M2 #2.1 DoD: primary / neutral / semantic colors,
  * typography, plus a small spacing/radius layer. Full reference and
