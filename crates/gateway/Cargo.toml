@@ -36,10 +36,11 @@ anyhow = { workspace = true }
 # Postgres. Brings in the same crates the binary wires at runtime
 # plus polars (for fixture Parquet) and connectors (for SourceId).
 [dev-dependencies]
+# tokio is already a normal dep with `macros` + `rt-multi-thread`
+# enabled at the workspace level — no need to re-declare it here.
 connectors = { path = "../connectors" }
 chrono = { workspace = true }
 polars = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 testcontainers-modules = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
