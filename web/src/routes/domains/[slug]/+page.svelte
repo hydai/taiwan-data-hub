@@ -132,8 +132,11 @@
 		</div>
 
 		<!-- Filter bar. Each pill is a plain <a href={?…}>; the URL
-		     is the filter state. Clicking an active pill clears it. -->
-		<div class="mb-6 space-y-3" aria-label="Filters">
+		     is the filter state. Clicking an active pill clears it.
+		     role="group" gives this <div> an implicit ARIA role so
+		     aria-label is actually exposed to screen readers — a bare
+		     <div aria-label> is silently dropped per WAI-ARIA spec. -->
+		<div class="mb-6 space-y-3" role="group" aria-label="Filters">
 			{#if data.facets.tiers.length > 0}
 				<div class="flex flex-wrap items-center gap-2">
 					<span class="text-xs font-semibold tracking-wide text-neutral-500 uppercase">Tier</span>
