@@ -21,18 +21,24 @@
 pub mod domains;
 pub mod get_dataset;
 pub mod list_domains;
+pub mod materialize_dataset;
 pub mod query_rows;
 pub mod search_datasets;
 pub mod sql_guard;
 
 pub use get_dataset::{GetDatasetTool, TOOL_NAME as GET_DATASET_TOOL_NAME};
 pub use list_domains::{ListDomainsTool, TOOL_NAME as LIST_DOMAINS_TOOL_NAME};
+pub use materialize_dataset::{
+    MaterializeDatasetTool, ObjectStoreRouter, TOOL_NAME as MATERIALIZE_DATASET_TOOL_NAME,
+};
 pub use query_rows::{QueryRowsTool, TOOL_NAME as QUERY_ROWS_TOOL_NAME};
 pub use search_datasets::{SearchDatasetsTool, TOOL_NAME as SEARCH_DATASETS_TOOL_NAME};
 
 use mcp_core::DispatcherBuilder;
 use std::sync::Arc;
-use storage::{DatasetCacheLookup, DatasetReader, DatasetSearcher, Storage};
+use storage::{
+    DatasetCacheLookup, DatasetReader, DatasetSearcher, MaterializeView, Storage, UsageRecorder,
+};
 
 /// Register every data tool that has no runtime dependencies.
 ///
@@ -52,15 +58,28 @@ pub fn register_data_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
 /// implements every trait we need; tests can plug in separate stubs
 /// per trait via the lower-level [`register_db_tools_with`] entry
 /// point.
-pub fn register_db_tools(builder: DispatcherBuilder, storage: Storage) -> DispatcherBuilder {
+///
+/// `router` is the [`ObjectStoreRouter`] that backs
+/// `materialize_dataset` — production wires `LocalFsObjectStore` and
+/// `S3ObjectStore` per the deployment shape; tests / personal-mode
+/// without an object store can pass `ObjectStoreRouter::new()` and
+/// the tool will still register (calls will surface a clear "no
+/// backend configured" error).
+pub fn register_db_tools(
+    builder: DispatcherBuilder,
+    storage: Storage,
+    router: ObjectStoreRouter,
+) -> DispatcherBuilder {
     // Wrap once so the per-tool `Arc<dyn Trait>` re-counts cheaply
     // instead of cloning the inner `Storage` (which is itself Arc-
     // backed but the trait-object wrapping needs to happen at this
     // boundary).
     let reader: Arc<dyn DatasetReader> = Arc::new(storage.clone());
     let searcher: Arc<dyn DatasetSearcher> = Arc::new(storage.clone());
-    let cache: Arc<dyn DatasetCacheLookup> = Arc::new(storage);
-    register_db_tools_with(builder, reader, searcher, cache)
+    let cache: Arc<dyn DatasetCacheLookup> = Arc::new(storage.clone());
+    let view: Arc<dyn MaterializeView> = Arc::new(storage.clone());
+    let recorder: Arc<dyn UsageRecorder> = Arc::new(storage);
+    register_db_tools_with(builder, reader, searcher, cache, view, recorder, router)
 }
 
 /// Lower-level entry point that takes the trait objects directly, so
@@ -72,9 +91,17 @@ pub fn register_db_tools_with(
     reader: Arc<dyn DatasetReader>,
     searcher: Arc<dyn DatasetSearcher>,
     cache: Arc<dyn DatasetCacheLookup>,
+    view: Arc<dyn MaterializeView>,
+    recorder: Arc<dyn UsageRecorder>,
+    router: ObjectStoreRouter,
 ) -> DispatcherBuilder {
     builder
         .register(GetDatasetTool::from_arc(reader))
         .register(SearchDatasetsTool::from_arc(searcher))
         .register(QueryRowsTool::from_arc(cache))
+        .register(MaterializeDatasetTool::from_arcs(
+            view,
+            recorder,
+            Arc::new(router),
+        ))
 }

@@ -1247,6 +1247,7 @@ dependencies = [
  "anyhow",
  "axum",
  "mcp-core",
+ "object-store",
  "serde",
  "serde_json",
  "storage",
@@ -1257,6 +1258,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2137,6 +2139,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "object-store"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4561,6 +4578,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "mcp-core",
+ "object-store",
  "polars",
  "serde",
  "serde_json",
@@ -4571,6 +4589,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 

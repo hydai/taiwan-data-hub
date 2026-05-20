@@ -163,6 +163,76 @@ impl DatasetSearcher for Storage {
     }
 }
 
+/// Object-safe view for `materialize_dataset` (#1.8): finds the
+/// latest `dataset_version` and its file children for a given
+/// dataset key. Returns `None` when no dataset matches the key,
+/// `Some(_)` with an empty `files` vec when the dataset exists but
+/// has never been materialised yet.
+#[async_trait]
+pub trait MaterializeView: Send + Sync + 'static {
+    async fn latest_materialise_view(
+        &self,
+        key: DatasetKey,
+    ) -> Result<Option<DatasetLatestFiles>, StorageError>;
+}
+
+#[async_trait]
+impl MaterializeView for Storage {
+    async fn latest_materialise_view(
+        &self,
+        key: DatasetKey,
+    ) -> Result<Option<DatasetLatestFiles>, StorageError> {
+        Storage::latest_materialise_view(self, key).await
+    }
+}
+
+/// What `materialize_dataset` needs from storage in one shot.
+#[derive(Debug, Clone)]
+pub struct DatasetLatestFiles {
+    pub dataset_id: Uuid,
+    pub slug: String,
+    /// `None` when the dataset has no versions at all (first crawl
+    /// hasn't completed yet); `Some` once any version exists. The
+    /// tool treats `None` and "version exists but `files` is empty"
+    /// identically — both translate to "not materialised yet".
+    pub latest_version_id: Option<Uuid>,
+    pub files: Vec<DatasetFileRow>,
+}
+
+/// Object-safe writer for `usage_records`. Decoupled from
+/// [`DatasetWriter`] so tools that only need to log usage don't drag
+/// in the catalog-mutating surface.
+#[async_trait]
+pub trait UsageRecorder: Send + Sync + 'static {
+    async fn record_usage(&self, record: &NewUsageRecord<'_>) -> Result<Uuid, StorageError>;
+}
+
+#[async_trait]
+impl UsageRecorder for Storage {
+    async fn record_usage(&self, record: &NewUsageRecord<'_>) -> Result<Uuid, StorageError> {
+        Storage::record_usage(self, record).await
+    }
+}
+
+/// Audit row to insert into `usage_records`. Borrowed fields keep
+/// the call sites zero-allocation when the tool layer already owns
+/// the strings.
+#[derive(Debug, Clone)]
+pub struct NewUsageRecord<'a> {
+    pub dataset_id: Uuid,
+    pub dataset_version_id: Option<Uuid>,
+    /// MCP tool name. CHECK-constrained in SQL.
+    pub tool: &'a str,
+    /// File format the caller asked for; `None` for read-only tools.
+    pub format: Option<&'a str>,
+    /// Auth surface (`"anonymous"` / `"user"` / `"api_key"`).
+    pub principal_kind: &'a str,
+    /// Opaque caller identifier. `None` for anonymous.
+    pub principal_id: Option<&'a str>,
+    /// Bytes the caller is authorised to fetch. `None` when unknown.
+    pub byte_size: Option<i64>,
+}
+
 /// Filters + paging knobs for [`DatasetSearcher::search_datasets`].
 ///
 /// All filter fields are `Option<String>` so a caller threading
@@ -678,6 +748,97 @@ impl Storage {
         let next_offset = has_more.then(|| params.offset.saturating_add(params.limit));
 
         Ok(SearchPage { hits, next_offset })
+    }
+
+    /// Look up the latest version of a dataset together with all of
+    /// its `dataset_files` rows in a single round-trip. Powers the
+    /// `materialize_dataset` MCP tool (#1.8).
+    ///
+    /// Returns `None` when no dataset matches; returns `Some(_)`
+    /// with `latest_version_id = None` and `files = []` when the
+    /// dataset exists but has never been ingested. Returns
+    /// `Some(_)` with a populated `latest_version_id` and possibly
+    /// empty `files` when versions exist but no concrete files have
+    /// been registered (e.g. metadata-only datasets) — the tool
+    /// layer translates either to the same "not materialised yet"
+    /// error.
+    pub async fn latest_materialise_view(
+        &self,
+        key: DatasetKey,
+    ) -> Result<Option<DatasetLatestFiles>, StorageError> {
+        let row: Option<(Uuid, String)> = match key {
+            DatasetKey::Id(id) => sqlx::query_as("SELECT id, slug FROM datasets WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StorageError::from)?,
+            DatasetKey::Slug(slug) => {
+                sqlx::query_as("SELECT id, slug FROM datasets WHERE slug = $1")
+                    .bind(slug)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(StorageError::from)?
+            }
+        };
+        let Some((dataset_id, slug)) = row else {
+            return Ok(None);
+        };
+
+        let latest: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM dataset_versions WHERE dataset_id = $1 \
+             ORDER BY fetched_at DESC LIMIT 1",
+        )
+        .bind(dataset_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+
+        let latest_version_id = latest.map(|(id,)| id);
+        let files: Vec<DatasetFileRow> = if let Some(version_id) = latest_version_id {
+            sqlx::query_as(
+                "SELECT id, dataset_version_id, format, uri, byte_size, checksum \
+                 FROM dataset_files WHERE dataset_version_id = $1 ORDER BY format, id",
+            )
+            .bind(version_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StorageError::from)?
+        } else {
+            Vec::new()
+        };
+
+        Ok(Some(DatasetLatestFiles {
+            dataset_id,
+            slug,
+            latest_version_id,
+            files,
+        }))
+    }
+
+    /// Insert one `usage_records` row. Returns the new row's UUID.
+    /// CHECK constraints on `tool`, `format`, `principal_kind` are
+    /// enforced by Postgres — a violation surfaces as
+    /// [`StorageError::Sqlx`] with constraint-name detail, which is
+    /// loud enough to flag a Rust-side enum/string drift in CI.
+    pub async fn record_usage(&self, record: &NewUsageRecord<'_>) -> Result<Uuid, StorageError> {
+        let row: (Uuid,) = sqlx::query_as(
+            "INSERT INTO usage_records \
+                 (dataset_id, dataset_version_id, tool, format, \
+                  principal_kind, principal_id, byte_size) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             RETURNING id",
+        )
+        .bind(record.dataset_id)
+        .bind(record.dataset_version_id)
+        .bind(record.tool)
+        .bind(record.format)
+        .bind(record.principal_kind)
+        .bind(record.principal_id)
+        .bind(record.byte_size)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(row.0)
     }
 }
 
@@ -1631,5 +1792,152 @@ mod tests {
             .expect("page 2");
         assert_eq!(page2.hits.len(), 1);
         assert_eq!(page2.next_offset, None);
+    }
+
+    /// `materialize_dataset` (#1.8) needs the dataset id + latest
+    /// version + every `dataset_files` row in one round-trip.
+    /// Verifies the three observable states: dataset missing →
+    /// `None`; dataset present but no version → `Some(_)` with
+    /// `latest_version_id = None / files = []`; dataset with
+    /// multiple versions → returns ONLY the newest version's files
+    /// (the tool layer never wants to mix versions).
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn latest_materialise_view_returns_only_newest_version_files() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Missing dataset → None.
+        let none = storage
+            .latest_materialise_view(DatasetKey::Slug("never-existed".to_owned()))
+            .await
+            .expect("query ok");
+        assert!(none.is_none(), "missing slug yields None");
+
+        // Insert dataset + two versions, oldest first.
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+
+        let v_old = storage
+            .record_version_if_changed(dataset_id, "2026-04-01", "sha256:old")
+            .await
+            .expect("v_old")
+            .expect("inserted");
+        let v_new = storage
+            .record_version_if_changed(dataset_id, "2026-05-01", "sha256:new")
+            .await
+            .expect("v_new")
+            .expect("inserted");
+
+        // Seed dataset_files manually — the ETL doesn't write them
+        // yet (that's a separate sub-issue), so the tool relies on
+        // whoever populates the table.
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri, byte_size, checksum) \
+             VALUES ($1, 'parquet', 'file:///cache/old.parquet', 100, 'cs-old'), \
+                    ($2, 'parquet', 'file:///cache/new.parquet', 200, 'cs-new'), \
+                    ($2, 'csv',     'file:///cache/new.csv',     300, NULL)",
+        )
+        .bind(v_old)
+        .bind(v_new)
+        .execute(storage.pool())
+        .await
+        .expect("seed files");
+
+        let view = storage
+            .latest_materialise_view(DatasetKey::Id(dataset_id))
+            .await
+            .expect("query ok")
+            .expect("dataset present");
+        assert_eq!(view.dataset_id, dataset_id);
+        assert_eq!(view.slug, "real-estate-prices");
+        assert_eq!(view.latest_version_id, Some(v_new));
+        assert_eq!(view.files.len(), 2, "only newest version's files");
+        let formats: std::collections::HashSet<_> =
+            view.files.iter().map(|f| f.format.as_str()).collect();
+        assert!(formats.contains("parquet"));
+        assert!(formats.contains("csv"));
+        assert!(
+            !view
+                .files
+                .iter()
+                .any(|f| f.uri == "file:///cache/old.parquet"),
+            "older version's file must not leak into latest view"
+        );
+    }
+
+    /// Pin the `usage_records` write contract: a successful insert
+    /// returns a fresh UUID; the row carries the CHECK-constrained
+    /// enum strings; concurrent inserts produce distinct ids.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_usage_persists_row_with_uuid() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+        let version_id = storage
+            .record_version_if_changed(dataset_id, "2026-05-01", "sha256:1")
+            .await
+            .expect("version")
+            .expect("inserted");
+
+        let uid = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: Some(version_id),
+                tool: "materialize_dataset",
+                format: Some("parquet"),
+                principal_kind: "anonymous",
+                principal_id: None,
+                byte_size: Some(2048),
+            })
+            .await
+            .expect("insert");
+        assert_ne!(uid, Uuid::nil());
+
+        // Round-trip read: confirm the row landed with the right
+        // shape and the FK to dataset_versions is wired.
+        let row: (
+            Uuid,
+            Uuid,
+            Option<Uuid>,
+            String,
+            Option<String>,
+            String,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT id, dataset_id, dataset_version_id, tool, format, principal_kind, byte_size \
+                 FROM usage_records WHERE id = $1",
+        )
+        .bind(uid)
+        .fetch_one(storage.pool())
+        .await
+        .expect("readback");
+        assert_eq!(row.0, uid);
+        assert_eq!(row.1, dataset_id);
+        assert_eq!(row.2, Some(version_id));
+        assert_eq!(row.3, "materialize_dataset");
+        assert_eq!(row.4.as_deref(), Some("parquet"));
+        assert_eq!(row.5, "anonymous");
+        assert_eq!(row.6, Some(2048));
+
+        // CHECK constraint trips on bad enum value.
+        let bad = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: None,
+                tool: "made_up_tool",
+                format: None,
+                principal_kind: "anonymous",
+                principal_id: None,
+                byte_size: None,
+            })
+            .await;
+        assert!(bad.is_err(), "CHECK constraint must reject unknown tool");
     }
 }

@@ -16,6 +16,7 @@ workspace = true
 # rmcp is consumed exclusively via the `mcp_core::rmcp` re-export so the SDK
 # binding lives in a single crate; do not add a direct `rmcp` dep here.
 mcp-core = { path = "../mcp-core" }
+object-store = { path = "../object-store" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 axum = { workspace = true }
@@ -27,4 +28,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = { workspace = true }
 anyhow = { workspace = true }
