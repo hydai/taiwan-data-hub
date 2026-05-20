@@ -78,7 +78,14 @@ jobs:
       # anything the runner image might be serving.
       GATEWAY_ADDR: 127.0.0.1:18080
       MCP_ENDPOINT: http://127.0.0.1:18080/mcp
-      READY_ENDPOINT: http://127.0.0.1:18080/readyz
+      # The gateway's `/readyz` probe currently 503s whenever
+      # `DATABASE_URL` is set because the sqlx pool ping is still
+      # a TODO (see `dependency_ready` in gateway/src/main.rs).
+      # For the inspector workflow we just need "the HTTP server is
+      # listening"; `/healthz` answers that without depending on the
+      # readiness wiring. Swap back to `/readyz` once the real DB
+      # ping lands.
+      READY_ENDPOINT: http://127.0.0.1:18080/healthz
       # Empty router is fine for the inspector smoke test: the
       # tools register and the protocol surface is exercised; a
       # real materialize_dataset call would surface "no backend
@@ -115,15 +122,19 @@ jobs:
           ./target/release/gateway > gateway.log 2>&1 &
           echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
 
-      - name: Wait for /readyz
+      - name: Wait for gateway to listen
         run: |
+          # `/healthz` returns 200 once the axum router is bound;
+          # this is a process-up probe, not a deep readiness check.
+          # See the `READY_ENDPOINT` env comment for why we don't
+          # use `/readyz` here.
           for i in $(seq 1 30); do
             if curl --silent --fail "$READY_ENDPOINT"; then
-              echo "gateway ready after ${i}s"; exit 0
+              echo "gateway listening after ${i}s"; exit 0
             fi
             sleep 1
           done
-          echo "gateway did not become ready"; cat gateway.log; exit 1
+          echo "gateway did not become reachable"; cat gateway.log; exit 1
 
       - name: Run MCP Inspector CLI
         # The Inspector CLI returns a non-zero exit code if the
