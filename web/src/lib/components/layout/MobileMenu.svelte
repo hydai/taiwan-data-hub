@@ -23,22 +23,19 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import { navLinks } from '$lib/components/layout/nav-links';
+	import type { Locale } from '$lib/components/layout/Header.svelte';
 	import { cn } from '$lib/utils';
+	import { fade, fly } from 'svelte/transition';
 
 	type Props = {
 		isOpen: boolean;
 		onClose: () => void;
+		locale: Locale;
+		onLocaleChange: (next: Locale) => void;
 	};
 
-	let { isOpen, onClose }: Props = $props();
-
-	// `as const` narrows each `href` to its literal type so it satisfies
-	// SvelteKit's `RouteId` union for `resolve(...)` without a cast.
-	const navLinks = [
-		{ href: '/domains', label: 'Domains' },
-		{ href: '/datasets', label: 'Datasets' },
-		{ href: '/collections', label: 'Collections' }
-	] as const;
+	let { isOpen, onClose, locale, onLocaleChange }: Props = $props();
 
 	let panel: HTMLDivElement | undefined = $state();
 
@@ -97,16 +94,21 @@
 		aria-label="Mobile navigation"
 		class="fixed inset-0 z-50 md:hidden"
 	>
-		<button
-			type="button"
-			aria-label="Close menu (backdrop)"
-			tabindex="-1"
+		<!-- Backdrop is mouse-only dismissal — keyboard users have ESC
+		     and the close button inside the panel, so the backdrop is
+		     hidden from the a11y tree and only carries a click handler.
+		     aria-hidden="true" already exempts this from Svelte's a11y
+		     warnings about onclick on a static element. -->
+		<div
+			aria-hidden="true"
 			onclick={onClose}
+			transition:fade={{ duration: 150 }}
 			class="absolute inset-0 bg-neutral-950/40"
-		></button>
+		></div>
 
 		<div
 			bind:this={panel}
+			transition:fly={{ x: 320, duration: 200 }}
 			class="absolute inset-y-0 right-0 flex w-72 max-w-[80%] flex-col bg-neutral-50 shadow-xl"
 		>
 			<div class="flex items-center justify-between border-b border-neutral-200 px-5 py-4">
@@ -149,8 +151,11 @@
 
 			<div class="space-y-3 border-t border-neutral-200 p-5">
 				<div class="flex items-center justify-between">
-					<span class="text-sm font-medium text-neutral-700">Language</span>
+					<label class="text-sm font-medium text-neutral-700" for="locale-mobile">Language</label>
 					<select
+						id="locale-mobile"
+						value={locale}
+						onchange={(e) => onLocaleChange(e.currentTarget.value as Locale)}
 						class="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-sm text-neutral-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
 					>
 						<option value="zh-TW">繁中</option>

@@ -1,5 +1,5 @@
 <!--
-	Skip-to-content link — required by WCAG 2.1.4.1 (Bypass Blocks).
+	Skip-to-content link — satisfies WCAG 2.4.1 (Bypass Blocks, Level A).
 	Visually hidden until keyboard-focused; the first tab stop on every
 	page. Anchor target is `#main` on the <main> element in +layout.svelte.
 

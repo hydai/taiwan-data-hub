@@ -14,7 +14,10 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import { navLinks } from '$lib/components/layout/nav-links';
 	import { cn } from '$lib/utils';
+
+	export type Locale = 'zh-TW' | 'en';
 
 	type Props = {
 		/** Whether the mobile-menu overlay is currently open. */
@@ -23,22 +26,13 @@
 		onToggleMenu: () => void;
 		/** Operating mode from the gateway; "personal" hides auth UI. */
 		mode: 'personal' | 'multi-user';
+		/** Currently selected locale — owned by +layout.svelte so the
+		 * mobile-menu language picker stays in sync with the desktop one. */
+		locale: Locale;
+		onLocaleChange: (next: Locale) => void;
 	};
 
-	let { isMenuOpen, onToggleMenu, mode }: Props = $props();
-
-	// `as const` narrows each `href` to its literal type so it satisfies
-	// SvelteKit's `RouteId` union for `resolve(...)` without a cast.
-	const navLinks = [
-		{ href: '/domains', label: 'Domains' },
-		{ href: '/datasets', label: 'Datasets' },
-		{ href: '/collections', label: 'Collections' }
-	] as const;
-
-	// Locale switcher is a placeholder UI until Paraglide v2 ships in #7.x;
-	// at that point `setLocale(locale)` from `$lib/paraglide` will replace
-	// the local state mutation.
-	let locale = $state<'zh-TW' | 'en'>('zh-TW');
+	let { isMenuOpen, onToggleMenu, mode, locale, onLocaleChange }: Props = $props();
 </script>
 
 <header
@@ -73,7 +67,8 @@
 			<label class="sr-only" for="locale">Language</label>
 			<select
 				id="locale"
-				bind:value={locale}
+				value={locale}
+				onchange={(e) => onLocaleChange(e.currentTarget.value as Locale)}
 				class="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-sm text-neutral-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
 			>
 				<option value="zh-TW">繁中</option>
