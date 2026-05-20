@@ -276,9 +276,15 @@ fn build_object_store_router() -> ObjectStoreRouter {
                     secret_access_key: secret,
                     session_token: non_empty_env("S3_SESSION_TOKEN"),
                 };
-                let store = S3ObjectStore::new(endpoint_url, region, creds);
-                tracing::info!("s3 object store wired (s3:// URIs)");
-                router = router.with_s3(Arc::new(store) as Arc<dyn ObjectStore>);
+                match S3ObjectStore::new(endpoint_url, region, creds) {
+                    Ok(store) => {
+                        tracing::info!("s3 object store wired (s3:// URIs)");
+                        router = router.with_s3(Arc::new(store) as Arc<dyn ObjectStore>);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "S3_* set but S3ObjectStore init failed");
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "S3_ENDPOINT is not a valid URL");

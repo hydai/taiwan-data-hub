@@ -21,9 +21,15 @@ CREATE TABLE usage_records (
     id                  UUID PRIMARY KEY DEFAULT uuidv7(),
     dataset_id          UUID NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
     dataset_version_id  UUID REFERENCES dataset_versions(id) ON DELETE SET NULL,
+    -- Dataset-scoped tools only. `list_domains` and `search_datasets`
+    -- don't reference a single dataset (they enumerate or query the
+    -- catalog), so they don't write here — keeping them out of the
+    -- CHECK matches the `dataset_id NOT NULL` shape and stops a
+    -- future writer from stuffing an arbitrary id just to satisfy
+    -- the FK. Adding catalog-wide audit later means a separate
+    -- table with its own shape, not relaxing this one.
     tool                TEXT NOT NULL CHECK (tool IN (
-                            'list_domains', 'search_datasets', 'get_dataset',
-                            'query_rows', 'materialize_dataset'
+                            'get_dataset', 'query_rows', 'materialize_dataset'
                         )),
     format              TEXT CHECK (format IS NULL OR format IN (
                             'csv', 'json', 'jsonl', 'parquet', 'xml', 'pdf', 'zip'

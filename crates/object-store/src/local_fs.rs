@@ -86,6 +86,21 @@ impl LocalFsObjectStore {
                 "LocalFs signing secret must be at least 32 bytes".to_owned(),
             ));
         }
+        // Origin-only: a `base_url` with a path / query / fragment
+        // would interact unintuitively with `Url::join` later (the
+        // `files/dl/...` segment would be appended relative to the
+        // configured path rather than the origin). Reject up front
+        // so a misconfigured `OBJECT_STORE_BASE_URL` fails at boot
+        // instead of producing silently-broken signed URLs.
+        let path = base_url.path();
+        if !(path.is_empty() || path == "/")
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
+        {
+            return Err(ObjectStoreError::InvalidUri(format!(
+                "base_url must be an origin (no path/query/fragment), got {base_url}"
+            )));
+        }
         Ok(Self {
             base_url,
             secret,
@@ -374,6 +389,40 @@ mod tests {
             LocalFsObjectStore::new(Url::parse("https://hub").unwrap(), b"too short".to_vec())
                 .unwrap_err();
         assert!(matches!(err, ObjectStoreError::SigningFailed(_)));
+    }
+
+    /// `base_url` must be an origin: any path / query / fragment
+    /// would interact badly with `Url::join` later, producing
+    /// surprising signed URLs. The construction-time check fails
+    /// fast on misconfiguration.
+    #[tokio::test]
+    async fn rejects_non_origin_base_url() {
+        for bad in [
+            "https://hub.example.com/api",
+            "https://hub.example.com/api/",
+            "https://hub.example.com/?foo=1",
+            "https://hub.example.com/#frag",
+        ] {
+            let err = LocalFsObjectStore::new(Url::parse(bad).unwrap(), TEST_SECRET.to_vec())
+                .expect_err("non-origin base_url must be rejected");
+            assert!(
+                matches!(err, ObjectStoreError::InvalidUri(_)),
+                "expected InvalidUri for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_bare_origin_with_or_without_trailing_slash() {
+        for ok in [
+            "https://hub.example.com",
+            "https://hub.example.com/",
+            "http://localhost:8080",
+            "http://localhost:8080/",
+        ] {
+            LocalFsObjectStore::new(Url::parse(ok).unwrap(), TEST_SECRET.to_vec())
+                .expect("origin (with or without trailing slash) accepted");
+        }
     }
 
     #[tokio::test]

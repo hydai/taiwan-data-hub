@@ -33,4 +33,3 @@ uuid = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time"] }
-url = { workspace = true }

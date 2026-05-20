@@ -86,14 +86,35 @@ impl S3ObjectStore {
     /// (`http://seaweedfs:8333`, `https://s3.eu-west-1.amazonaws.com`);
     /// `region` is the `SigV4` region label (`"us-east-1"` is the safe
     /// default for `SeaweedFS`).
-    pub fn new(endpoint: Url, region: String, credentials: S3Credentials) -> Self {
-        Self {
+    ///
+    /// Returns [`ObjectStoreError::InvalidUri`] when the endpoint
+    /// carries a non-empty path / query / fragment. `build_request_url`
+    /// later overwrites the path with the `/{bucket}/{key}` form, so
+    /// any configured prefix would silently disappear from the
+    /// signature — surfacing the misconfiguration at construction is
+    /// safer than producing presigned URLs that 404 against a
+    /// reverse-proxied deployment.
+    pub fn new(
+        endpoint: Url,
+        region: String,
+        credentials: S3Credentials,
+    ) -> Result<Self, ObjectStoreError> {
+        let path = endpoint.path();
+        if !(path.is_empty() || path == "/")
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+        {
+            return Err(ObjectStoreError::InvalidUri(format!(
+                "S3 endpoint must be an origin (no path/query/fragment), got {endpoint}"
+            )));
+        }
+        Ok(Self {
             endpoint,
             region,
             credentials,
             path_style: true,
             now_fn: Utc::now,
-        }
+        })
     }
 
     /// Use virtual-hosted-style URLs (bucket in the host). Only set
@@ -324,6 +345,7 @@ mod tests {
             "us-east-1".to_owned(),
             creds(),
         )
+        .unwrap()
         .with_now_fn(fixed_now);
         let signed = store
             .presign_get(
@@ -360,6 +382,7 @@ mod tests {
             "us-east-1".to_owned(),
             creds(),
         )
+        .unwrap()
         .with_now_fn(fixed_now);
         let signed_a = store
             .presign_get(
@@ -384,7 +407,8 @@ mod tests {
             Url::parse("http://seaweedfs.local:8333").unwrap(),
             "us-east-1".to_owned(),
             creds(),
-        );
+        )
+        .unwrap();
         let err = store
             .presign_get("file:///not/s3", Duration::from_secs(60))
             .await
@@ -398,12 +422,47 @@ mod tests {
             Url::parse("http://seaweedfs.local:8333").unwrap(),
             "us-east-1".to_owned(),
             creds(),
-        );
+        )
+        .unwrap();
         let err = store
             .presign_get("s3://b/k", Duration::from_secs(8 * 24 * 60 * 60))
             .await
             .unwrap_err();
         assert!(matches!(err, ObjectStoreError::TtlOutOfRange { .. }));
+    }
+
+    /// Pin the construction-time origin check. Any path / query /
+    /// fragment on `endpoint` would silently disappear at signing
+    /// time because `build_request_url` rewrites the path; rejecting
+    /// at construction surfaces misconfiguration loudly.
+    #[tokio::test]
+    async fn rejects_endpoint_with_path_prefix() {
+        for bad in [
+            "https://proxy.example.com/s3",
+            "https://proxy.example.com/s3/",
+            "https://proxy.example.com/?foo=1",
+            "https://proxy.example.com/#frag",
+        ] {
+            let err = S3ObjectStore::new(Url::parse(bad).unwrap(), "us-east-1".to_owned(), creds())
+                .expect_err("non-origin endpoint must be rejected");
+            assert!(
+                matches!(err, ObjectStoreError::InvalidUri(_)),
+                "expected InvalidUri for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_bare_origin_and_trailing_slash() {
+        for ok in [
+            "https://s3.amazonaws.com",
+            "https://s3.amazonaws.com/",
+            "http://seaweedfs.local:8333",
+            "http://seaweedfs.local:8333/",
+        ] {
+            S3ObjectStore::new(Url::parse(ok).unwrap(), "us-east-1".to_owned(), creds())
+                .expect("origin (with or without trailing slash) accepted");
+        }
     }
 
     #[test]
