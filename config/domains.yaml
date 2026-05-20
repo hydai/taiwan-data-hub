@@ -8,6 +8,11 @@
 #   description: optional. If present, must be a mapping with a non-empty
 #                zh-TW string (and optionally en, etc.) — validated by
 #                scripts/regen-domain-seed.py before SQL emission.
+#   typical_questions:
+#                optional list of 2-3 i18n questions this domain answers
+#                well — surfaced on /domains/[slug] to orient AI-agent
+#                authors. zh-TW required per question; en optional. Add
+#                more domains here as content lands.
 #
 # Block-style mappings (not flow `{k: v, …}`) because the en values
 # contain commas which would confuse YAML's flow-map parser.
@@ -25,6 +30,13 @@
   description:
     zh-TW: 實價登錄、地價、土地公告現值
     en: Transaction prices, land valuations, public-notice values
+  typical_questions:
+    - zh-TW: 雙北市這一年新成屋的均價走勢?
+      en: How has new-build pricing in Taipei / New Taipei trended this year?
+    - zh-TW: 哪些縣市公告現值漲幅最高?
+      en: Which counties saw the largest jumps in official land valuations?
+    - zh-TW: 預售屋與成屋的價差通常多少?
+      en: What's the typical spread between presale and existing-home prices?
 
 - slug: economy-business
   kind: topical
@@ -55,6 +67,11 @@
   description:
     zh-TW: 預算、決算、債務
     en: Budgets, accounts, public debt
+  typical_questions:
+    - zh-TW: 中央政府教育預算佔總預算的比例多少?
+      en: What share of the central-government budget goes to education?
+    - zh-TW: 過去十年國債餘額的成長率?
+      en: How has public debt grown over the past decade?
 
 - slug: tax-revenue
   kind: topical
@@ -75,6 +92,13 @@
   description:
     zh-TW: 公路、鐵路、空運、海運
     en: Roads, rail, aviation, maritime
+  typical_questions:
+    - zh-TW: 哪條捷運線在尖峰時段最擁擠?
+      en: Which metro line is most congested at peak hours?
+    - zh-TW: 過去一年哪些路段事故率最高?
+      en: Which highway segments had the highest accident rate last year?
+    - zh-TW: 高鐵與臺鐵的旅次成長比?
+      en: How does ridership growth compare between HSR and conventional rail?
 
 - slug: public-safety
   kind: topical
@@ -115,6 +139,13 @@
   description:
     zh-TW: 醫療、健保、食品稽查
     en: Medical care, NHI, food inspection
+  typical_questions:
+    - zh-TW: 哪些縣市每萬人醫師數最低?
+      en: Which counties have the lowest doctors-per-10k ratio?
+    - zh-TW: 過去一年最常被召回的食品類別?
+      en: Which food categories were recalled most frequently last year?
+    - zh-TW: 各疫苗的接種覆蓋率差異有多大?
+      en: How does vaccination coverage vary across vaccines?
 
 - slug: environment
   kind: topical
@@ -135,6 +166,13 @@
   description:
     zh-TW: 各級學校、學位、研究經費
     en: Schools, degrees, R&D funding
+  typical_questions:
+    - zh-TW: 全臺有多少所中小學? 公私立比例多少?
+      en: How many K-12 schools are there? Public vs. private split?
+    - zh-TW: 哪些大學的科系最多元?
+      en: Which universities offer the broadest range of programs?
+    - zh-TW: 就學貸款核貸件數的長期趨勢?
+      en: What's the long-term trend in student-loan disbursements?
 
 - slug: agriculture-fisheries
   kind: topical
@@ -175,6 +213,13 @@
   description:
     zh-TW: 文化資產、遊客、賽事
     en: Heritage, tourism, sporting events
+  typical_questions:
+    - zh-TW: 哪些景點旺季的旅客成長最快?
+      en: Which tourist sites have the fastest peak-season visitor growth?
+    - zh-TW: 全臺旅館等級分布如何?
+      en: How are licensed hotels distributed across star-ratings?
+    - zh-TW: 各縣市夜市的數量比較?
+      en: How does night-market density compare across counties?
 
 - slug: foreign-affairs
   kind: topical
