@@ -5,10 +5,7 @@
 			"startServerCommand": "node build/index.js",
 			"startServerReadyPattern": "Listening on",
 			"startServerReadyTimeout": 20000,
-			"url": [
-				"http://127.0.0.1:3000/",
-				"http://127.0.0.1:3000/datasets/sample-dataset"
-			],
+			"url": ["http://127.0.0.1:3000/", "http://127.0.0.1:3000/datasets/sample-dataset"],
 			"numberOfRuns": 3,
 			"settings": {
 				"preset": "desktop"
