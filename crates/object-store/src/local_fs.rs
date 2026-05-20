@@ -16,8 +16,15 @@
 //!
 //! Why this shape:
 //!
-//! - `path` is URL-percent-encoded *as a whole path* (slashes left
-//!   intact so the route's path-extractor still works).
+//! - `path` is restricted to a narrow allowlist
+//!   (`A-Za-z 0-9 / . _ - ~`) so it round-trips through
+//!   `Url` parsing byte-for-byte. We avoid the percent-encoding
+//!   trap where the signed form and the URL-extracted form drift:
+//!   if the input contained a space, `Url::join` would emit `%20`
+//!   in the URL but the MAC would still be over the raw space —
+//!   verification then mismatches. Rejecting at sign time
+//!   surfaces the error early instead of producing a URL that's
+//!   silently broken on the verify path.
 //! - The signed body is `{path}\n{expires}` — newline delimited so a
 //!   path containing `expires=…` text can't ambiguate the MAC input.
 //! - The signature is fixed-width hex (lowercase) for easy
@@ -142,6 +149,22 @@ impl ObjectStore for LocalFsObjectStore {
             ));
         }
 
+        // Restrict to characters that round-trip through `Url`
+        // parsing without re-encoding. Anything else (spaces, `?`,
+        // `#`, control chars, non-ASCII) would create a drift
+        // between the signed bytes and the bytes the gateway
+        // extracts from the URL, silently breaking verification.
+        if !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'~'))
+        {
+            return Err(ObjectStoreError::InvalidUri(
+                "file URI may only contain [A-Za-z0-9/._-~]; \
+                 anything else would force URL-side re-encoding"
+                    .to_owned(),
+            ));
+        }
+
         let expires_at = self.now()
             + chrono::Duration::from_std(ttl).map_err(|e| {
                 ObjectStoreError::TtlOutOfRange {
@@ -170,8 +193,11 @@ impl ObjectStore for LocalFsObjectStore {
 }
 
 /// Verify a `/files/dl/{path}?expires=…&sig=…` request against the
-/// store's secret. Returns the canonical path string on success so
-/// the gateway can resolve it against the cache root.
+/// store's secret. Returns `Ok(())` when the signature is valid and
+/// the URL has not yet expired; the gateway then resolves `path`
+/// against its cache root itself. (We don't return `path` back —
+/// the caller already has it from the request, and giving it back
+/// would imply some kind of canonicalisation step we don't do here.)
 ///
 /// Constant-time comparison via `hmac::Mac::verify_slice` defends
 /// against timing oracles.
@@ -358,5 +384,58 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ObjectStoreError::TtlOutOfRange { .. }));
+    }
+
+    /// Defense for the MAC-encoding drift bug: characters that
+    /// would force `Url` to percent-encode produce signatures that
+    /// won't verify on the gateway side. Reject them at sign time
+    /// so the failure is loud and immediate.
+    #[tokio::test]
+    async fn rejects_path_with_url_encoded_characters() {
+        let store = store();
+        for bad in [
+            "file:///cache/has space.parquet",
+            "file:///cache/has?query.parquet",
+            "file:///cache/has#frag.parquet",
+            "file:///cache/中文.parquet",
+        ] {
+            let err = store
+                .presign_get(bad, Duration::from_secs(3600))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ObjectStoreError::InvalidUri(_)),
+                "expected InvalidUri for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    /// Pin the round-trip for the full URL-encoded charset we DO
+    /// allow. Slashes, dots, dashes, underscores, tildes — exactly
+    /// the set `Url::join` leaves untouched.
+    #[tokio::test]
+    async fn signs_paths_with_full_allowed_charset() {
+        let store = store();
+        let signed = store
+            .presign_get(
+                "file:///cache/data_gov-tw/v1.0/foo.bar~baz.parquet",
+                Duration::from_secs(3600),
+            )
+            .await
+            .expect("allowed charset must sign");
+        let url = Url::parse(&signed.url).unwrap();
+        let pairs: std::collections::HashMap<_, _> = url.query_pairs().collect();
+        let expires: i64 = pairs.get("expires").unwrap().parse().unwrap();
+        let sig = pairs.get("sig").unwrap();
+        // The path the gateway will extract MUST verify against the
+        // path we signed — proving no encoding drift.
+        verify_signed_path(
+            TEST_SECRET,
+            url.path().trim_start_matches("/files/dl/"),
+            expires,
+            sig,
+            fixed_now(),
+        )
+        .expect("URL round-trip MUST verify");
     }
 }

@@ -751,8 +751,16 @@ impl Storage {
     }
 
     /// Look up the latest version of a dataset together with all of
-    /// its `dataset_files` rows in a single round-trip. Powers the
-    /// `materialize_dataset` MCP tool (#1.8).
+    /// its `dataset_files` rows. Powers the `materialize_dataset`
+    /// MCP tool (#1.8).
+    ///
+    /// Implementation runs up to three small queries against the
+    /// pool (dataset row → latest version → files for that
+    /// version). They could be folded into a single CTE but this
+    /// path is invoked once per download URL, not in a tight loop,
+    /// so the two extra round-trips against a pool-owned connection
+    /// don't justify the SQL-side complexity. Re-evaluate if
+    /// profiling ever calls this out.
     ///
     /// Returns `None` when no dataset matches; returns `Some(_)`
     /// with `latest_version_id = None` and `files = []` when the

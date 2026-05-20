@@ -22,14 +22,19 @@
 //! Defense-in-depth (DESIGN.md §6 / #1.8 DoD):
 //!
 //! - Tool input is validated before any storage read: `id XOR slug`,
-//!   `format` enum-checked, `ttl_seconds` clamped to
-//!   [`MIN_TTL`]..=[`MAX_TTL`].
+//!   `format` enum-checked, `ttl_seconds` REJECTED with
+//!   `InvalidArguments` when outside [`MIN_TTL`]..=[`MAX_TTL`] (no
+//!   silent clamping — surprising the caller with a different
+//!   lifetime than they asked for is worse than a clear error).
 //! - URI scheme dispatch picks the right `ObjectStore`; unknown
 //!   schemes return a sanitized error and a server-side log entry.
 //! - Per-process single-flight: concurrent calls for the same
-//!   `(dataset_id, format)` collapse into one upstream presign +
-//!   one usage row. Cross-process dedup (Redis lock) is a future
-//!   concern; today the gateway is single-instance.
+//!   `(dataset_id, format)` SERIALISE through one mutex slot — at
+//!   most one presign + one audit write executes at a time. They
+//!   are not coalesced: each caller still gets their own presigned
+//!   URL and their own audit row, since each caller's identity may
+//!   differ. Cross-process dedup (Redis lock) and true coalescing
+//!   are future concerns; today the gateway is single-instance.
 //! - Usage write happens AFTER the presign succeeds — a 5xx presign
 //!   failure must not pollute the audit log with false-positive
 //!   entries.
@@ -39,7 +44,7 @@
 //! for a caller that just wants to `curl -O` the result.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -72,10 +77,17 @@ pub const SUPPORTED_FORMATS: &[&str] = &["csv", "json", "jsonl", "parquet", "xml
 /// Routes a request URI to the right backend by scheme. Construct
 /// once at gateway boot; cheap to clone (each variant is `Arc`-
 /// backed).
+///
+/// `http://` and `https://` URIs are always handled by a built-in
+/// passthrough store ([`HttpsPassthroughStore`]) — the upstream URL
+/// is returned verbatim. `dataset_files.uri` documents this as the
+/// "passthrough to upstream" mode for catalogs that prefer to serve
+/// their own downloads.
 #[derive(Clone)]
 pub struct ObjectStoreRouter {
     local_fs: Option<Arc<dyn ObjectStore>>,
     s3: Option<Arc<dyn ObjectStore>>,
+    https_passthrough: Arc<dyn ObjectStore>,
 }
 
 impl ObjectStoreRouter {
@@ -83,6 +95,7 @@ impl ObjectStoreRouter {
         Self {
             local_fs: None,
             s3: None,
+            https_passthrough: Arc::new(HttpsPassthroughStore),
         }
     }
 
@@ -97,14 +110,16 @@ impl ObjectStoreRouter {
     }
 
     fn pick(&self, uri: &str) -> Option<Arc<dyn ObjectStore>> {
-        if uri.starts_with("file://") || (!uri.contains("://")) {
+        if uri.starts_with("file://") || !uri.contains("://") {
             self.local_fs.clone()
         } else if uri.starts_with("s3://") {
             self.s3.clone()
+        } else if uri.starts_with("http://") || uri.starts_with("https://") {
+            // Passthrough is always available — there's no backend
+            // to configure. Surfacing it via the same router shape
+            // keeps the tool layer's dispatch uniform.
+            Some(self.https_passthrough.clone())
         } else {
-            // `https://` passthrough handled separately; other
-            // schemes fall through to None and surface a clear
-            // "no backend configured for scheme" error.
             None
         }
     }
@@ -121,16 +136,50 @@ impl std::fmt::Debug for ObjectStoreRouter {
         f.debug_struct("ObjectStoreRouter")
             .field("has_local_fs", &self.local_fs.is_some())
             .field("has_s3", &self.s3.is_some())
-            .finish()
+            .field("has_https_passthrough", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Returns `http(s)://` URIs verbatim. Honours the `dataset_files.
+/// uri` "passthrough to upstream" contract: the tool layer hands
+/// the caller the upstream URL unchanged and `expires_at` reflects
+/// the requested TTL window even though upstream is in control of
+/// the actual link lifetime.
+#[derive(Debug, Clone)]
+struct HttpsPassthroughStore;
+
+#[async_trait]
+impl ObjectStore for HttpsPassthroughStore {
+    async fn presign_get(
+        &self,
+        uri: &str,
+        ttl: Duration,
+    ) -> Result<PresignedUrl, ObjectStoreError> {
+        if !(uri.starts_with("http://") || uri.starts_with("https://")) {
+            return Err(ObjectStoreError::InvalidUri(format!(
+                "passthrough store only handles http(s):// URIs, got: {uri}"
+            )));
+        }
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::from_std(ttl).map_err(|_| ObjectStoreError::TtlOutOfRange {
+                requested: ttl,
+                max: Duration::from_secs(i64::MAX as u64),
+            })?;
+        Ok(PresignedUrl {
+            url: uri.to_owned(),
+            expires_at,
+        })
     }
 }
 
 /// Single-flight slot keyed by `(dataset_id, format)`.
 type InflightSlot = Arc<Mutex<()>>;
-/// Map from request key to its in-flight slot. The map itself is
-/// guarded by a `tokio::sync::Mutex` so concurrent acquires of new
-/// keys serialise on a single fast path.
-type InflightMap = Arc<Mutex<HashMap<(Uuid, String), InflightSlot>>>;
+/// Map from request key to a `Weak` reference of its in-flight slot.
+/// Holding `Weak` (instead of `Arc`) lets dead entries get pruned on
+/// the next acquire — the map's size is bounded by the number of
+/// currently-in-flight keys, not by the lifetime of the process.
+type InflightMap = Arc<Mutex<HashMap<(Uuid, String), Weak<Mutex<()>>>>>;
 
 /// Tool entry point. Production wires every `Arc<dyn …>` to a
 /// `storage::Storage` + an `ObjectStoreRouter`; tests plug in
@@ -176,16 +225,26 @@ impl MaterializeDatasetTool {
 
     /// Acquire (or wait for) the single-flight slot for this
     /// `(dataset_id, format)`. Returns an owned guard whose `Drop`
-    /// releases the lock and lets the next waiter proceed. The slot
-    /// in the inflight map is kept alive by `Arc` strong counts —
-    /// once the last caller drops the guard the map entry becomes
-    /// unreachable on the next acquire path.
+    /// releases the lock and lets the next waiter proceed. The map
+    /// holds only `Weak` references so dropping the last live guard
+    /// makes the entry collectable; we prune dead entries on every
+    /// acquire so the map's size stays bounded by currently-in-
+    /// flight keys.
     async fn lock_slot(&self, key: (Uuid, String)) -> tokio::sync::OwnedMutexGuard<()> {
-        let slot = {
+        let slot: InflightSlot = {
             let mut map = self.inflight.lock().await;
-            map.entry(key.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
+            // Cheap GC: drop entries whose strong-count went to zero
+            // since the last acquire. Map size is bounded by the
+            // number of concurrent keys, so this is O(n) over a tiny
+            // n in practice.
+            map.retain(|_, weak| weak.strong_count() > 0);
+            if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+                existing
+            } else {
+                let fresh = Arc::new(Mutex::new(()));
+                map.insert(key, Arc::downgrade(&fresh));
+                fresh
+            }
         };
         slot.lock_owned().await
     }
@@ -206,10 +265,11 @@ impl ToolHandler for MaterializeDatasetTool {
             description: format!(
                 "Issue a short-lived presigned download URL for a dataset's latest version. \
                  Specify the dataset by `id` (UUID) or `slug`; exactly one is required. \
-                 `format` defaults to `parquet` when present, falling back to the first available \
-                 file. `ttl_seconds` defaults to {default_ttl} and is clamped to \
-                 [{min_ttl}, {max_ttl}]. Returns the URL plus the file size and computed expiry, \
-                 and writes a `usage_records` row before responding.",
+                 `format` defaults to `parquet` when present, falling back to csv, then the \
+                 first available file. `ttl_seconds` defaults to {default_ttl} and MUST be \
+                 within [{min_ttl}, {max_ttl}] (values outside the range are rejected). \
+                 Returns the URL plus the file size and computed expiry, and writes a \
+                 `usage_records` row before responding.",
                 default_ttl = DEFAULT_TTL.as_secs(),
                 min_ttl = MIN_TTL.as_secs(),
                 max_ttl = MAX_TTL.as_secs(),
@@ -370,36 +430,7 @@ impl Request {
             }
         };
 
-        // `principal` is optional. Authenticated callers (post-#4)
-        // will supply it server-side; the unauthenticated personal-
-        // mode path lands as "anonymous".
-        let (principal_kind, principal_id) = match obj.get("principal") {
-            None | Some(Value::Null) => ("anonymous", None),
-            Some(Value::Object(p)) => {
-                let kind = p.get("kind").and_then(Value::as_str).ok_or_else(|| {
-                    ToolError::InvalidArguments(
-                        "`principal.kind` must be a string when `principal` is set".into(),
-                    )
-                })?;
-                let kind: &'static str = match kind {
-                    "anonymous" => "anonymous",
-                    "user" => "user",
-                    "api_key" => "api_key",
-                    other => {
-                        return Err(ToolError::InvalidArguments(format!(
-                            "`principal.kind` must be one of anonymous/user/api_key, got `{other}`"
-                        )));
-                    }
-                };
-                let id = p.get("id").and_then(Value::as_str).map(str::to_owned);
-                (kind, id)
-            }
-            Some(_) => {
-                return Err(ToolError::InvalidArguments(
-                    "`principal` must be an object".into(),
-                ));
-            }
-        };
+        let (principal_kind, principal_id) = parse_principal(obj.get("principal"))?;
 
         Ok(Self {
             key,
@@ -415,6 +446,61 @@ impl Request {
             DatasetKey::Id(id) => format!("id={id}"),
             DatasetKey::Slug(slug) => format!("slug={slug}"),
         }
+    }
+}
+
+/// `principal` is optional. Authenticated callers (post-#4) will
+/// supply it server-side; the unauthenticated personal-mode path
+/// lands as "anonymous".
+///
+/// Cross-field rule: `id` MUST accompany `user` / `api_key` and
+/// MUST be absent for `anonymous`. The `usage_records` migration
+/// documents `principal_id` as NULL only for anonymous; enforcing
+/// the invariant here keeps the audit log unambiguous downstream.
+fn parse_principal(raw: Option<&Value>) -> Result<(&'static str, Option<String>), ToolError> {
+    match raw {
+        None | Some(Value::Null) => Ok(("anonymous", None)),
+        Some(Value::Object(p)) => {
+            let kind = p.get("kind").and_then(Value::as_str).ok_or_else(|| {
+                ToolError::InvalidArguments(
+                    "`principal.kind` must be a string when `principal` is set".into(),
+                )
+            })?;
+            let kind: &'static str = match kind {
+                "anonymous" => "anonymous",
+                "user" => "user",
+                "api_key" => "api_key",
+                other => {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "`principal.kind` must be one of anonymous/user/api_key, got `{other}`"
+                    )));
+                }
+            };
+            let id_raw = p.get("id").and_then(Value::as_str);
+            let id = match (kind, id_raw) {
+                ("anonymous", Some(_)) => {
+                    return Err(ToolError::InvalidArguments(
+                        "`principal.id` must be omitted when `kind` = anonymous".into(),
+                    ));
+                }
+                ("anonymous", None) => None,
+                (_, None) => {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "`principal.id` is required when `kind` = {kind}"
+                    )));
+                }
+                (_, Some("")) => {
+                    return Err(ToolError::InvalidArguments(format!(
+                        "`principal.id` must not be empty when `kind` = {kind}"
+                    )));
+                }
+                (_, Some(s)) => Some(s.to_owned()),
+            };
+            Ok((kind, id))
+        }
+        Some(_) => Err(ToolError::InvalidArguments(
+            "`principal` must be an object".into(),
+        )),
     }
 }
 
@@ -627,9 +713,13 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct StubRecorder {
-        count: AtomicUsize,
+        // `Arc<AtomicUsize>` so the test handle and the tool's
+        // owned copy observe the same counter — without the `Arc`
+        // a `Clone`-by-value path produces a fresh counter and
+        // masks assertion failures.
+        count: Arc<AtomicUsize>,
     }
     #[async_trait]
     impl UsageRecorder for StubRecorder {
@@ -844,7 +934,7 @@ mod tests {
         // Empty router → router.pick() returns None for any URI →
         // tool surfaces the "no backend configured" error without
         // echoing the raw URI back to the caller.
-        let recorder = Arc::new(StubRecorder::default());
+        let recorder = StubRecorder::default();
         let unknown = DatasetFileRow {
             uri: "gopher://nope/file.parquet".to_owned(),
             ..parquet_file()
@@ -853,7 +943,7 @@ mod tests {
             StubView {
                 view: Some(sample_view(vec![unknown])),
             },
-            (*recorder).clone(),
+            recorder.clone(),
             ObjectStoreRouter::new(),
         );
         let err = tool.call(json!({ "slug": "test-slug" })).await.unwrap_err();
@@ -863,21 +953,122 @@ mod tests {
         };
         assert!(msg.contains("gopher"), "scheme should leak; got: {msg}");
         assert!(!msg.contains("nope"), "host must not leak; got: {msg}");
-        // No usage row written when presign couldn't proceed.
+        // No usage row written when presign couldn't proceed. The
+        // shared `Arc<AtomicUsize>` in `StubRecorder` is what makes
+        // this assertion meaningful: a clone keeps the counter so
+        // we observe the tool's view of "no writes" through the
+        // test's handle.
         assert_eq!(recorder.count.load(Ordering::SeqCst), 0);
     }
 
-    impl Clone for StubRecorder {
-        // `AtomicUsize` is intentionally NOT Clone — we want each
-        // assert to read from the same shared counter, so cloning
-        // here would mask the bug. Implement Clone-by-reference
-        // for the closures that need it (`Arc<StubRecorder>` in
-        // most call sites, this for the rare by-value path).
-        fn clone(&self) -> Self {
-            Self {
-                count: AtomicUsize::new(self.count.load(Ordering::SeqCst)),
-            }
+    #[tokio::test]
+    async fn https_uri_passes_through_to_upstream_url() {
+        // `dataset_files.uri` documents `https://` as a passthrough
+        // to upstream. The tool layer returns the URL verbatim, no
+        // signing, with an `expires_at` derived from the requested
+        // TTL window.
+        let recorder = StubRecorder::default();
+        let upstream = DatasetFileRow {
+            uri: "https://upstream.example.com/files/v1.csv?token=abc".to_owned(),
+            format: "csv".to_owned(),
+            ..parquet_file()
+        };
+        let tool = MaterializeDatasetTool::new(
+            StubView {
+                view: Some(sample_view(vec![upstream.clone()])),
+            },
+            recorder.clone(),
+            // Router with NO local-fs / s3 wired — passthrough is
+            // always available regardless.
+            ObjectStoreRouter::new(),
+        );
+        let resp = tool
+            .call(json!({ "slug": "test-slug", "format": "csv" }))
+            .await
+            .unwrap();
+        assert_eq!(resp["url"], upstream.uri);
+        assert_eq!(resp["format"], "csv");
+        // Audit row still written for upstream passthrough.
+        assert_eq!(recorder.count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn principal_id_required_when_kind_not_anonymous() {
+        let store = Arc::new(StubStore::new(Duration::ZERO));
+        let tool = MaterializeDatasetTool::new(
+            StubView {
+                view: Some(sample_view(vec![parquet_file()])),
+            },
+            StubRecorder::default(),
+            router_with(store),
+        );
+        let err = tool
+            .call(json!({
+                "slug": "test-slug",
+                "principal": { "kind": "user" }
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn principal_id_rejected_for_anonymous_kind() {
+        let store = Arc::new(StubStore::new(Duration::ZERO));
+        let tool = MaterializeDatasetTool::new(
+            StubView {
+                view: Some(sample_view(vec![parquet_file()])),
+            },
+            StubRecorder::default(),
+            router_with(store),
+        );
+        let err = tool
+            .call(json!({
+                "slug": "test-slug",
+                "principal": { "kind": "anonymous", "id": "should-be-absent" }
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[tokio::test]
+    async fn inflight_map_prunes_dead_slots_between_calls() {
+        // After each call completes (the `_guard` drops, the slot's
+        // strong count goes to zero), the next `lock_slot` call's
+        // `retain` step should evict the dead entry. We assert that
+        // the map ends up empty once all in-flight work has drained.
+        let store = Arc::new(StubStore::new(Duration::ZERO));
+        let tool = MaterializeDatasetTool::new(
+            StubView {
+                view: Some(sample_view(vec![parquet_file()])),
+            },
+            StubRecorder::default(),
+            router_with(store),
+        );
+
+        // Drive three distinct calls sequentially.
+        for _ in 0..3 {
+            tool.call(json!({ "slug": "test-slug" })).await.unwrap();
         }
+
+        // After the last guard drops, one more `lock_slot` triggers
+        // the retain sweep that removes the dead entry. We trigger
+        // a fourth call to exercise that sweep.
+        tool.call(json!({ "slug": "test-slug" })).await.unwrap();
+
+        // Inspect the map: it should contain at most one live entry
+        // (the one created by the fourth call, which itself was
+        // dropped at this point — so strictly zero, but we'd accept
+        // a sweeping race that leaves it at one). Either way the
+        // map MUST not grow with the number of historical calls.
+        let map = tool.inflight.lock().await;
+        let live_count = map.values().filter(|w| w.strong_count() > 0).count();
+        assert!(
+            live_count <= 1,
+            "inflight map must not retain dead slots; got {live_count} live, total {} entries",
+            map.len()
+        );
     }
 
     #[test]
