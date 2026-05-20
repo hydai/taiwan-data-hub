@@ -24,7 +24,12 @@
 	export type SchemaType = 'WebSite' | 'CollectionPage' | 'Dataset';
 
 	type Props = {
-		/** Used for <title>, og:title, twitter:title. */
+		/**
+		 * Page-level title. Used verbatim for og:title and twitter:title
+		 * (social cards already render the site domain alongside, so the
+		 * shorter form looks cleaner). The browser <title> appends the
+		 * site name via `fullTitle` below so tabs get site context.
+		 */
 		title: string;
 		/** Used for meta description, og:description, twitter:description. */
 		description: string;
@@ -43,7 +48,13 @@
 	// `page.url` is reactive; deriving these keeps canonical + og:url
 	// correct as the user navigates (Svelte's $derived re-evaluates on
 	// each route change).
-	const canonical = $derived(page.url.href);
+	//
+	// Canonical strips query string and fragment by design: UTM tags,
+	// tracking params, and #anchors would otherwise spawn dozens of
+	// canonical variants per route and dilute SEO ranking signal.
+	// Paginated list pages (where `?page=2` IS a distinct indexable
+	// URL) can extend this component later with an explicit prop.
+	const canonical = $derived(`${page.url.origin}${page.url.pathname}`);
 	const fullTitle = $derived(title === SITE_NAME ? title : `${title} · ${SITE_NAME}`);
 
 	// Escape `<` to its JSON unicode form so the stringified payload

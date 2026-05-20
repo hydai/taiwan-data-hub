@@ -4,12 +4,16 @@ import type { RequestHandler } from './$types';
  * AI/search crawler user-agents we explicitly welcome. Listed in their
  * own blocks so the policy is easy to audit and tighten later.
  *
- * NOTE: omitting a UA does not block it — the wildcard `User-agent: *`
- * block below already governs anything not named. The point of these
- * explicit allow blocks is documentation: a contributor reading the
- * file sees who we expect to crawl us. The `Disallow:` lines under
- * `*` (which apply to these UAs too) deliberately cover admin /
- * dashboard / account so even welcomed bots stay out of those.
+ * Per the robots.txt RFC and Google's parser spec, each crawler picks
+ * the SINGLE most specific matching group and ignores everything else
+ * — the `User-agent: *` rules do NOT inherit into named UA blocks.
+ * That's why every named block below re-states the same Disallow
+ * list: without the repetition, named bots would only see `Allow: /`
+ * and be free to crawl /admin etc.
+ *
+ * Omitting a UA does not block it — the wildcard block governs it
+ * via the default. The point of the named blocks is to make the
+ * policy auditable and obvious to contributors.
  */
 const WELCOMED_AI_BOTS = ['ClaudeBot', 'GPTBot', 'Google-Extended', 'PerplexityBot'];
 const WELCOMED_SEARCH_BOTS = ['Googlebot', 'Bingbot', 'DuckDuckBot'];
