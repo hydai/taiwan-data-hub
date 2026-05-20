@@ -22,13 +22,16 @@ const VALID_FORMATS: ReadonlySet<Format> = new Set([
 ]);
 
 /**
- * Parse the four filter dimensions from a URL's searchParams. Unknown
- * or malformed values are silently dropped (returns null for that
- * dimension) — defensive design so crawler probes / hand-crafted URLs
- * can't 500 the page. License is free-form so we keep any non-empty
- * string; the page only renders the actually-seen-in-data licenses
- * as clickable pills, so a typed-in unknown license just returns an
- * empty list (intended behaviour).
+ * Parse the three filter dimensions (tier, format, license) from a
+ * URL's searchParams. Unknown or malformed values are silently
+ * dropped (returns null for that dimension) — defensive design so
+ * crawler probes / hand-crafted URLs can't 500 the page. License is
+ * free-form so we keep any non-empty string; the page only renders
+ * actually-seen-in-data licenses as clickable pills, so a typed-in
+ * unknown license just returns an empty list (intended behaviour).
+ *
+ * The pagination `page` param is parsed separately in
+ * `+page.server.ts` and isn't part of `DatasetFilters`.
  */
 export function parseFilters(searchParams: URLSearchParams): DatasetFilters {
 	const rawTier = searchParams.get('tier');
@@ -99,5 +102,10 @@ export function buildFilterUrl(
 	if (next.license) params.set('license', next.license);
 	if (overrides.page && overrides.page > 1) params.set('page', String(overrides.page));
 	const qs = params.toString();
-	return qs.length > 0 ? `?${qs}` : '';
+	// Empty-string href resolves to the current URL *including* its
+	// existing query string in HTML — clicking an active filter to
+	// clear it would silently leave the user on the same filtered
+	// page. Returning `?` produces a same-path navigation with an
+	// empty query, which browsers strip on display.
+	return qs.length > 0 ? `?${qs}` : '?';
 }

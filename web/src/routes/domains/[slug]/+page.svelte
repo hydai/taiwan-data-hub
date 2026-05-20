@@ -29,9 +29,13 @@
 
 	// The list dims while a filter / page link is in flight so the
 	// user gets immediate visual feedback (DoD: "loading skeleton").
-	// SvelteKit's `navigating` is null when idle; non-null during
-	// a route transition.
-	const isLoading = $derived(navigating.to !== null);
+	// `$app/state`'s `navigating` is a reactive singleton with
+	// nullable getters; `Boolean(navigating?.to)` is true only while
+	// a route transition is in flight. The optional chain is
+	// defensive — the singleton is always defined per the API, but
+	// the `?.` survives any future API change that switches to
+	// `Navigating | null`.
+	const isLoading = $derived(Boolean(navigating?.to));
 
 	const hasActiveFilters = $derived(
 		data.filters.tier !== null || data.filters.format !== null || data.filters.license !== null
