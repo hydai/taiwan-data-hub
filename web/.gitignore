@@ -21,3 +21,7 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Lighthouse CI working directory + report dumps
+.lighthouseci
+/lhci-reports
