@@ -16,18 +16,18 @@
 
 <main class="mx-auto max-w-3xl px-6 py-16">
 	<header class="space-y-2">
-		<p class="text-sm font-medium tracking-wide text-brand-700 uppercase">
+		<p class="text-sm font-medium tracking-wide text-primary-700 uppercase">
 			Pre-alpha · design phase
 		</p>
 		<h1 class="text-4xl font-bold tracking-tight">Taiwan Data Hub</h1>
-		<p class="text-lg text-gray-600">
+		<p class="text-lg text-neutral-600">
 			Open-source, self-hostable MCP service hub for Taiwan public data.
 		</p>
 	</header>
 
-	<section class="mt-10 rounded-lg border border-gray-200 bg-brand-50 p-5">
+	<section class="mt-10 rounded-lg border border-neutral-200 bg-primary-50 p-5">
 		<h2 class="text-base font-semibold">This is a scaffold.</h2>
-		<p class="mt-1 text-sm text-gray-700">
+		<p class="mt-1 text-sm text-neutral-700">
 			Real marketplace UI lands in
 			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/milestone/3">M2</a>. Until
 			then, see
@@ -40,18 +40,18 @@
 
 	<section class="mt-10">
 		<h2 class="text-xl font-semibold">Roadmap</h2>
-		<ul class="mt-4 divide-y divide-gray-200 rounded-md border border-gray-200">
+		<ul class="mt-4 divide-y divide-neutral-200 rounded-md border border-neutral-200">
 			{#each milestones as m (m.id)}
 				<li class="flex items-center justify-between px-4 py-3">
-					<span class="font-mono text-sm font-semibold text-brand-700">{m.id}</span>
+					<span class="font-mono text-sm font-semibold text-primary-700">{m.id}</span>
 					<span class="flex-1 px-4 text-sm">{m.name}</span>
-					<span class="text-xs text-gray-500">{m.status}</span>
+					<span class="text-xs text-neutral-500">{m.status}</span>
 				</li>
 			{/each}
 		</ul>
 	</section>
 
-	<footer class="mt-12 text-xs text-gray-400">
+	<footer class="mt-12 text-xs text-neutral-400">
 		Apache-2.0 ·
 		<a class="underline" href="https://github.com/hydai/taiwan-data-hub">GitHub</a>
 	</footer>

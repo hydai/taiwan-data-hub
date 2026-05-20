@@ -1,0 +1,106 @@
+@import 'tailwindcss';
+
+/* =============================================================================
+ * Taiwan Data Hub — design tokens (Tailwind 4, CSS-first config)
+ *
+ * No tailwind.config.js exists; Tailwind 4 derives utilities from the CSS
+ * custom properties declared inside `@theme`. Adding a single token, e.g.
+ * `--color-primary-500`, automatically generates every matching utility:
+ * `bg-primary-500`, `text-primary-500`, `border-primary-500`,
+ * `ring-primary-500`, `from-primary-500`, and so on.
+ *
+ * Naming follows the M2 #2.1 DoD: primary / neutral / semantic colors,
+ * typography, plus a small spacing/radius layer. Full reference and
+ * contribution rules live in `docs/design-tokens.md`.
+ *
+ * All colors use OKLCH so steps along a single hue are perceptually
+ * uniform. Hue stays fixed inside a family; only L (lightness) and C
+ * (chroma) vary across the 50→950 ramp.
+ * ========================================================================== */
+
+@theme {
+	/* ---- Primary — Taiwan-data blue, hue 250° -----------------------------
+	 * The 500 step is the brand anchor and matches the original M0 scaffold
+	 * so links/buttons that already use it stay identical at upgrade time. */
+	--color-primary-50: oklch(0.97 0.02 250);
+	--color-primary-100: oklch(0.94 0.04 250);
+	--color-primary-200: oklch(0.88 0.08 250);
+	--color-primary-300: oklch(0.79 0.12 250);
+	--color-primary-400: oklch(0.7 0.16 250);
+	--color-primary-500: oklch(0.62 0.18 250);
+	--color-primary-600: oklch(0.55 0.19 250);
+	--color-primary-700: oklch(0.47 0.18 250);
+	--color-primary-800: oklch(0.38 0.15 250);
+	--color-primary-900: oklch(0.28 0.1 250);
+	--color-primary-950: oklch(0.18 0.06 250);
+
+	/* ---- Neutral — overrides Tailwind's default `neutral` --------------------
+	 * `components.json` sets shadcn-svelte's `baseColor: "neutral"`, so any
+	 * components added later resolve their gray ramps through these tokens.
+	 * Hue 250° + very low chroma keeps backgrounds harmonious with primary
+	 * without looking outright blue. */
+	--color-neutral-50: oklch(0.985 0.001 250);
+	--color-neutral-100: oklch(0.97 0.002 250);
+	--color-neutral-200: oklch(0.925 0.005 250);
+	--color-neutral-300: oklch(0.87 0.007 250);
+	--color-neutral-400: oklch(0.715 0.01 250);
+	--color-neutral-500: oklch(0.555 0.012 250);
+	--color-neutral-600: oklch(0.44 0.013 250);
+	--color-neutral-700: oklch(0.37 0.012 250);
+	--color-neutral-800: oklch(0.27 0.01 250);
+	--color-neutral-900: oklch(0.2 0.008 250);
+	--color-neutral-950: oklch(0.13 0.006 250);
+
+	/* ---- Semantic colors ----------------------------------------------------
+	 * Only three stops per family — 50 (subtle backgrounds), 500 (foreground
+	 * accents / icons), 700 (high-contrast text on light backgrounds).
+	 * Extend with 100/600/900 only when a concrete UI need appears. */
+	--color-success-50: oklch(0.96 0.04 150);
+	--color-success-500: oklch(0.62 0.16 150);
+	--color-success-700: oklch(0.45 0.14 150);
+
+	--color-warning-50: oklch(0.97 0.04 85);
+	--color-warning-500: oklch(0.73 0.18 70);
+	--color-warning-700: oklch(0.55 0.18 60);
+
+	--color-danger-50: oklch(0.96 0.04 25);
+	--color-danger-500: oklch(0.62 0.22 25);
+	--color-danger-700: oklch(0.5 0.2 25);
+
+	--color-info-50: oklch(0.96 0.04 215);
+	--color-info-500: oklch(0.68 0.14 215);
+	--color-info-700: oklch(0.5 0.14 215);
+
+	/* ---- Typography ---------------------------------------------------------
+	 * Bilingual stack. Order matters for Latin: Inter is tried first so
+	 * Latin glyphs render in Inter's UI-tuned shapes. CJK characters have no
+	 * matching glyph in Inter so the browser falls through to Noto Sans TC.
+	 * Result: zh-TW and en text on the same line each get their best font. */
+	--font-sans:
+		'Inter', 'Noto Sans TC', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+		'PingFang TC', 'Microsoft JhengHei', sans-serif;
+	--font-mono:
+		'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+		monospace;
+
+	/* ---- Spacing & radius --------------------------------------------------
+	 * Tailwind 4 already ships a sensible 0.25rem-step scale, so we don't
+	 * override it. The single named token below mirrors a common shadcn-svelte
+	 * idiom: cards/inputs all use --radius. */
+	--radius: 0.5rem;
+}
+
+/* Root surface colors — applied via CSS vars so the same token drives both
+ * `bg-neutral-50` utilities (via Tailwind 4) and direct element styling. */
+html,
+body {
+	font-family: var(--font-sans);
+	background-color: var(--color-neutral-50);
+	color: var(--color-neutral-900);
+	font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Dark mode is not implemented in #2.1. When introduced, prefer the
+ * `@media (prefers-color-scheme: dark)` + token override pattern instead of
+ * a separate stylesheet so utility classes keep working unchanged. See
+ * `docs/design-tokens.md` for the migration plan. */

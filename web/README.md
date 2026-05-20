@@ -30,6 +30,7 @@ pnpm build                # adapter-node production build → web/build/
 ```
 web/
 ├── src/
+│   ├── app.css                 # Tailwind @import + @theme design tokens
 │   ├── app.d.ts                # SvelteKit ambient types
 │   ├── app.html                # HTML shell
 │   ├── lib/
@@ -37,9 +38,8 @@ web/
 │   │   ├── index.ts            # public lib exports
 │   │   └── utils.ts            # cn(), WithElementRef, WithoutChild*
 │   └── routes/
-│       ├── +layout.svelte      # global layout
-│       ├── +page.svelte        # placeholder home (replaced in M2)
-│       └── layout.css          # Tailwind @import + @theme tokens
+│       ├── +layout.svelte      # global layout (imports ../app.css)
+│       └── +page.svelte        # placeholder home (replaced in M2)
 ├── static/                     # served at site root: favicon.svg, robots.txt
 ├── components.json             # shadcn-svelte config
 ├── svelte.config.js            # adapter-node, Runes mode
@@ -63,7 +63,9 @@ import the `cn` / `WithElementRef` helpers from `$lib/utils.ts` (see
 
 - Use Svelte 5 **Runes** (`$state` / `$derived` / `$effect` / `$props`).
   `$:` reactive statements and `export let` props are not used.
-- Tailwind 4 uses **CSS-first config** via `@theme` in `src/routes/layout.css`.
-  Do not add a `tailwind.config.js`.
+- Tailwind 4 uses **CSS-first config** via `@theme` in `src/app.css`.
+  Do not add a `tailwind.config.js`. The full token reference, OKLCH
+  rationale, and contribution rules live in
+  [`docs/design-tokens.md`](../docs/design-tokens.md).
 - We ship via `@sveltejs/adapter-node`, not `adapter-auto`. The build
   honors standard `PORT` / `HOST` / `ORIGIN` env vars.
