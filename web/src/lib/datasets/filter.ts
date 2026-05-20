@@ -1,4 +1,12 @@
-import type { Dataset, Format, Tier } from './types';
+import {
+	FORMATS,
+	FORMAT_SET,
+	TIERS,
+	TIER_SET,
+	type Dataset,
+	type Format,
+	type Tier
+} from './types';
 
 /**
  * URL-driven filter shape for /domains/[slug]. The single source of
@@ -10,16 +18,6 @@ export interface DatasetFilters {
 	format: Format | null;
 	license: string | null;
 }
-
-const VALID_TIERS: ReadonlySet<Tier> = new Set(['gold', 'silver', 'bronze']);
-const VALID_FORMATS: ReadonlySet<Format> = new Set([
-	'csv',
-	'json',
-	'geojson',
-	'xlsx',
-	'parquet',
-	'xml'
-]);
 
 /**
  * Parse the three filter dimensions (tier, format, license) from a
@@ -39,8 +37,8 @@ export function parseFilters(searchParams: URLSearchParams): DatasetFilters {
 	const rawLicense = searchParams.get('license');
 
 	return {
-		tier: rawTier && VALID_TIERS.has(rawTier as Tier) ? (rawTier as Tier) : null,
-		format: rawFormat && VALID_FORMATS.has(rawFormat as Format) ? (rawFormat as Format) : null,
+		tier: rawTier && TIER_SET.has(rawTier as Tier) ? (rawTier as Tier) : null,
+		format: rawFormat && FORMAT_SET.has(rawFormat as Format) ? (rawFormat as Format) : null,
 		license: rawLicense && rawLicense.length > 0 ? rawLicense : null
 	};
 }
@@ -71,13 +69,13 @@ export function deriveFacets(datasets: readonly Dataset[]): FilterFacets {
 		formats.add(d.format);
 		licenses.add(d.license);
 	}
-	// Stable display order: tier follows quality order, format follows
-	// the type definition's enum order, license sorted alphabetically.
-	const TIER_ORDER: readonly Tier[] = ['gold', 'silver', 'bronze'];
-	const FORMAT_ORDER: readonly Format[] = ['csv', 'json', 'geojson', 'xlsx', 'parquet', 'xml'];
+	// Stable display order: tier follows quality order (TIERS),
+	// format follows the type-union enum order (FORMATS), license
+	// sorted alphabetically. Both arrays are the single source of
+	// truth in types.ts.
 	return {
-		tiers: TIER_ORDER.filter((t) => tiers.has(t)),
-		formats: FORMAT_ORDER.filter((f) => formats.has(f)),
+		tiers: TIERS.filter((t) => tiers.has(t)),
+		formats: FORMATS.filter((f) => formats.has(f)),
 		licenses: [...licenses].sort()
 	};
 }

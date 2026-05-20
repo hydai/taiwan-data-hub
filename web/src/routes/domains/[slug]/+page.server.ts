@@ -35,7 +35,10 @@ export const load: PageServerLoad = ({ params, url, setHeaders }) => {
 
 	const rawPage = Number(url.searchParams.get('page'));
 	const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-	const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.min(rawPage, totalPages) : 1;
+	// `Number.isInteger` rejects fractional values, NaN, Infinity, and
+	// strings — so `?page=1.5` falls back to 1 rather than producing
+	// weird slice indices and "Page 1.5 of N" UI.
+	const page = Number.isInteger(rawPage) && rawPage >= 1 ? Math.min(rawPage, totalPages) : 1;
 	const pageDatasets = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
 	// Facets come from the domain's *unfiltered* list so a user can

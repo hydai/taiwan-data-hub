@@ -2,34 +2,20 @@ import { parse as parseYaml } from 'yaml';
 import datasetsYaml from '../../../../config/datasets.yaml?raw';
 import { loadCollections } from '$lib/collections/load';
 import { loadDomainGroups } from '$lib/domains/load';
-import type {
-	Dataset,
-	DatasetResource,
-	Format,
-	ResourceKind,
-	Tier,
-	UpdateFrequency
+import {
+	FORMAT_SET,
+	RESOURCE_KIND_SET,
+	TIER_SET,
+	UPDATE_FREQUENCY_SET,
+	type Dataset,
+	type DatasetResource,
+	type Format,
+	type ResourceKind,
+	type Tier,
+	type UpdateFrequency
 } from './types';
 
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-
-const VALID_TIERS: ReadonlySet<Tier> = new Set(['gold', 'silver', 'bronze']);
-const VALID_FORMATS: ReadonlySet<Format> = new Set([
-	'csv',
-	'json',
-	'geojson',
-	'xlsx',
-	'parquet',
-	'xml'
-]);
-const VALID_UPDATE_FREQS: ReadonlySet<UpdateFrequency> = new Set([
-	'daily',
-	'weekly',
-	'monthly',
-	'quarterly',
-	'yearly'
-]);
-const VALID_RESOURCE_KINDS: ReadonlySet<ResourceKind> = new Set(['download', 'api']);
 
 function asNonEmptyString(value: unknown): string | null {
 	return typeof value === 'string' && value.length > 0 ? value : null;
@@ -60,7 +46,7 @@ function assertValidResource(
 		throw new Error(`config/datasets.yaml (${tag}): resources[${idx}] must be an object`);
 	}
 	const r = resource as Record<string, unknown>;
-	if (typeof r.kind !== 'string' || !VALID_RESOURCE_KINDS.has(r.kind as ResourceKind)) {
+	if (typeof r.kind !== 'string' || !RESOURCE_KIND_SET.has(r.kind as ResourceKind)) {
 		throw new Error(
 			`config/datasets.yaml (${tag}): resources[${idx}].kind must be one of download|api`
 		);
@@ -126,10 +112,10 @@ function assertValidDatasets(value: unknown): asserts value is Dataset[] {
 				`config/datasets.yaml (${tag}): description.en must be a non-empty string when present`
 			);
 		}
-		if (typeof r.tier !== 'string' || !VALID_TIERS.has(r.tier as Tier)) {
+		if (typeof r.tier !== 'string' || !TIER_SET.has(r.tier as Tier)) {
 			throw new Error(`config/datasets.yaml (${tag}): tier must be one of gold|silver|bronze`);
 		}
-		if (typeof r.format !== 'string' || !VALID_FORMATS.has(r.format as Format)) {
+		if (typeof r.format !== 'string' || !FORMAT_SET.has(r.format as Format)) {
 			throw new Error(
 				`config/datasets.yaml (${tag}): format must be one of csv|json|geojson|xlsx|parquet|xml`
 			);
@@ -144,7 +130,7 @@ function assertValidDatasets(value: unknown): asserts value is Dataset[] {
 		if (!asNonEmptyString(source.url) || !isSafeHttpUrl(source.url as string)) {
 			throw new Error(`config/datasets.yaml (${tag}): source.url must be a non-empty http(s) URL`);
 		}
-		if (typeof r.updated !== 'string' || !VALID_UPDATE_FREQS.has(r.updated as UpdateFrequency)) {
+		if (typeof r.updated !== 'string' || !UPDATE_FREQUENCY_SET.has(r.updated as UpdateFrequency)) {
 			throw new Error(
 				`config/datasets.yaml (${tag}): updated must be one of daily|weekly|monthly|quarterly|yearly`
 			);
