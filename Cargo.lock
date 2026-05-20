@@ -4608,9 +4608,7 @@ dependencies = [
  "mcp-core",
  "serde",
  "serde_json",
- "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]

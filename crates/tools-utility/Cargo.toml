@@ -13,12 +13,15 @@ description = "53 Taiwan-specific utility tools (ID validation, ROC year, addres
 workspace = true
 
 [dependencies]
+# Lean deps: only what the current implementation actually compiles
+# against. The next utility tool (#3.7 address, #3.8 ROC year, etc.)
+# can add `thiserror`/`tracing`/etc. when it first needs them — keeping
+# the dep list minimal makes future supply-chain audits cheap and
+# avoids unused-dep noise in clippy.
 async-trait = { workspace = true }
 mcp-core = { path = "../mcp-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

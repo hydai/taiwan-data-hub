@@ -29,8 +29,10 @@ pub const TOOL_NAME: &str = "tw_validate_id";
 /// the modern unified resident-permit format (covered by
 /// `national_id` since 2021). It's kept as a separate input value so
 /// callers asking "is this an ARC?" can express that intent
-/// explicitly; we still route it through `national_id::validate` and
-/// surface the result narrowed to `kind == "resident"`.
+/// explicitly; we route it through `national_id::validate` and echo
+/// the *requested* kind (`arc` or `legacy_resident`) in the output —
+/// not the underlying narrowed kind like `resident`. See
+/// [`dispatch_arc`] for the full echo-vs-narrow rules.
 const ACCEPTED_KINDS: &[&str] = &["auto", "national_id", "tax_id", "arc", "passport"];
 
 #[derive(Debug, Default, Clone)]
@@ -119,11 +121,27 @@ fn kind_of(v: &Value) -> &'static str {
 /// Try each validator in length+shape order. Returns the first match.
 /// When no shape recognizes the input, returns
 /// `{valid: false, kind: "unknown", parsed: {}}`.
+///
+/// For length-10 inputs we route through [`national_id::validate`]'s
+/// own envelope check rather than length alone — a 10-digit string
+/// (e.g. `0123456789`) has the right length but doesn't satisfy the
+/// `national_id` shape (first char must be A-Z), so auto-dispatch
+/// should report `unknown` instead of `national_id` with an empty
+/// parse. Explicit `kind="national_id"` still surfaces the `kind`
+/// echo for direct callers.
 fn dispatch_auto(value: &str) -> Value {
     let trimmed = value.trim();
-    // Branch by length+shape signature.
     if trimmed.len() == 10 {
-        return dispatch_national_id(value);
+        let (valid, parsed) = national_id::validate(value);
+        if let Some(p) = parsed {
+            return json!({
+                "valid": valid,
+                "kind": p.kind.as_str(),
+                "parsed": p,
+            });
+        }
+        // Length matches but envelope doesn't — fall through to
+        // unknown rather than emit a misleading national_id kind.
     }
     if trimmed.len() == 9 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
         return dispatch_passport(value);
@@ -271,11 +289,17 @@ fn output_schema() -> Map<String, Value> {
                     "national_id",
                     "unknown",
                 ],
-                "description": "Detected (or requested) ID family. The values \
-                                 `citizen`, `resident`, and `legacy_resident` \
-                                 appear only when auto-detection picked the \
-                                 national_id validator and could narrow further; \
-                                 explicit-kind requests echo the caller's value."
+                "description": "Detected (or requested) ID family. `citizen`, \
+                                 `resident`, and `legacy_resident` appear when \
+                                 the national_id validator could narrow further \
+                                 — including for explicit `kind=national_id` \
+                                 requests, which still surface the most specific \
+                                 family on a successful parse. Explicit \
+                                 `kind=arc` echoes back as `arc` (or \
+                                 `legacy_resident` for the 2-letter shape); \
+                                 `tax_id` and `passport` always echo as-is. \
+                                 `unknown` is reserved for auto-detection when \
+                                 no shape matches."
             },
             "parsed": {
                 "type": "object",
@@ -364,6 +388,18 @@ mod tests {
     #[test]
     fn auto_unknown_for_garbled_input() {
         let out = invoke(json!({"value": "hello"}));
+        assert_eq!(out["valid"], false);
+        assert_eq!(out["kind"], "unknown");
+        assert_eq!(out["parsed"], json!({}));
+    }
+
+    #[test]
+    fn auto_length_10_without_letter_prefix_is_unknown_not_national_id() {
+        // A 10-digit string has the right *length* for national_id
+        // but not the right *envelope* (first char must be A-Z).
+        // Auto-dispatch must fall through to unknown rather than
+        // emit a misleading `kind: "national_id"` echo.
+        let out = invoke(json!({"value": "0123456789"}));
         assert_eq!(out["valid"], false);
         assert_eq!(out["kind"], "unknown");
         assert_eq!(out["parsed"], json!({}));
