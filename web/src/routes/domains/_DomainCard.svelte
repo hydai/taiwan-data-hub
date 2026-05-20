@@ -7,9 +7,13 @@
 	Card anatomy:
 	  - kind indicator dot (color from #2.1 design tokens)
 	  - zh-TW name (primary heading) + en sub-name (small, neutral)
-	  - zh-TW description (one-line truncated on small viewports)
+	  - zh-TW description clamped to two lines
 	  - dataset count footer
 	  - whole card is a link to /domains/[slug] (filled in by #2.5)
+
+	The link's accessible name comes from its visible text content
+	(name + description + count) — no aria-label override, which
+	would otherwise replace the descendant text for screen readers.
 
 	Hover / focus reveal a thin primary-500 ring + lift via shadow.
 -->
@@ -32,7 +36,6 @@
 <a
 	href={resolve('/domains/[slug]', { slug: domain.slug })}
 	class="group flex flex-col gap-3 rounded-lg border border-neutral-200 bg-white p-5 transition-shadow hover:shadow-md focus:ring-2 focus:ring-primary-500 focus:outline-none"
-	aria-label={`${domain.name['zh-TW']} (${domain.name.en ?? domain.kind})`}
 >
 	<div class="flex items-center gap-3">
 		<span class={`h-2.5 w-2.5 shrink-0 rounded-full ${KIND_DOT[domain.kind]}`} aria-hidden="true"
@@ -56,7 +59,7 @@
 	<div class="mt-auto flex items-center justify-between border-t border-neutral-100 pt-3">
 		<span class="text-xs text-neutral-500">
 			{domain.count}
-			<span class="text-neutral-400">datasets</span>
+			<span class="text-neutral-400">{domain.count === 1 ? 'dataset' : 'datasets'}</span>
 		</span>
 		<span
 			class="text-xs text-primary-700 opacity-0 transition-opacity group-hover:opacity-100 group-focus:opacity-100"

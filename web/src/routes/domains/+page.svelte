@@ -28,7 +28,7 @@
 	<header class="mb-10 max-w-3xl">
 		<h1 class="text-4xl font-bold tracking-tight text-neutral-900">Domains</h1>
 		<p class="mt-3 text-lg text-neutral-600">
-			Taiwan public data sliced into 20 browseable domains. Pick a domain to see its datasets, tier,
+			Taiwan public data sliced into 20 browsable domains. Pick a domain to see its datasets, tier,
 			and MCP wiring instructions.
 		</p>
 	</header>

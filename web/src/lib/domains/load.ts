@@ -5,12 +5,53 @@ import { parse as parseYaml } from 'yaml';
 import domainsYaml from '../../../../config/domains.yaml?raw';
 import type { Domain, DomainCardData, DomainGroup, DomainKind } from './types';
 
+const VALID_KINDS: ReadonlySet<DomainKind> = new Set(['topical', 'meta', 'horizontal']);
+
+/**
+ * Narrows `parseYaml`'s `unknown` into `Domain[]` with field-level
+ * checks. Throws an error pointing at `config/domains.yaml` on the
+ * first malformed entry so a bad commit fails fast at module load
+ * rather than at first request with a cryptic "cannot read property
+ * 'zh-TW' of undefined".
+ */
+function assertValidDomains(value: unknown): asserts value is Domain[] {
+	if (!Array.isArray(value)) {
+		throw new Error('config/domains.yaml: top-level value must be an array');
+	}
+	for (let i = 0; i < value.length; i += 1) {
+		const raw = value[i];
+		if (!raw || typeof raw !== 'object') {
+			throw new Error(`config/domains.yaml[${i}]: entry must be an object`);
+		}
+		const r = raw as Record<string, unknown>;
+		const tag = typeof r.slug === 'string' ? r.slug : `index ${i}`;
+		if (typeof r.slug !== 'string' || r.slug.length === 0) {
+			throw new Error(`config/domains.yaml[${i}]: slug must be a non-empty string`);
+		}
+		if (typeof r.kind !== 'string' || !VALID_KINDS.has(r.kind as DomainKind)) {
+			throw new Error(`config/domains.yaml (${tag}): kind must be one of topical|meta|horizontal`);
+		}
+		if (typeof r.sort_order !== 'number') {
+			throw new Error(`config/domains.yaml (${tag}): sort_order must be a number`);
+		}
+		const name = r.name as Record<string, unknown> | undefined;
+		if (!name || typeof name['zh-TW'] !== 'string' || name['zh-TW'].length === 0) {
+			throw new Error(`config/domains.yaml (${tag}): name['zh-TW'] is required`);
+		}
+	}
+}
+
 /**
  * Parsed once at module load — `config/domains.yaml` is static and
  * shipped with the build via `?raw`. Subsequent requests just read
  * from this cached object; no per-request file I/O or YAML parsing.
+ *
+ * Validation happens here so deploys fail at startup if the YAML
+ * drifts from the schema, rather than at first request.
  */
-const RAW_DOMAINS: Domain[] = parseYaml(domainsYaml);
+const PARSED: unknown = parseYaml(domainsYaml);
+assertValidDomains(PARSED);
+const RAW_DOMAINS: Domain[] = PARSED;
 
 /** Section ordering on the marketplace index. */
 const GROUP_ORDER: readonly DomainKind[] = ['topical', 'meta', 'horizontal'] as const;
