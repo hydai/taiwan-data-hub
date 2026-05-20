@@ -24,6 +24,16 @@ impl DatasetReader for Storage {
     }
 }
 
+/// Per-source HTTP cache state for #1.4d.2 conditional fetch.
+/// One row per upstream source in the `source_http_state` table.
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct SourceHttpState {
+    pub source: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
 /// Object-safe lookup for the `query_rows` MCP tool (#1.7). Returns
 /// just enough to find the cached Parquet for a dataset (or tell the
 /// caller to materialise it first).
@@ -77,6 +87,20 @@ pub trait DatasetWriter: Send + Sync + 'static {
         version: &str,
         checksum: &str,
     ) -> Result<Option<Uuid>, StorageError>;
+
+    /// See [`Storage::get_source_state`].
+    async fn get_source_state(
+        &self,
+        source: SourceId,
+    ) -> Result<Option<SourceHttpState>, StorageError>;
+
+    /// See [`Storage::put_source_state`].
+    async fn put_source_state(
+        &self,
+        source: SourceId,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), StorageError>;
 }
 
 #[async_trait]
@@ -101,6 +125,22 @@ impl DatasetWriter for Storage {
         checksum: &str,
     ) -> Result<Option<Uuid>, StorageError> {
         Storage::record_version_if_changed(self, dataset_id, version, checksum).await
+    }
+
+    async fn get_source_state(
+        &self,
+        source: SourceId,
+    ) -> Result<Option<SourceHttpState>, StorageError> {
+        Storage::get_source_state(self, source).await
+    }
+
+    async fn put_source_state(
+        &self,
+        source: SourceId,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Storage::put_source_state(self, source, etag, last_modified).await
     }
 }
 
@@ -377,6 +417,52 @@ impl Storage {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.0))
+    }
+
+    /// Load the persisted HTTP cache state (`ETag` + `Last-Modified`)
+    /// for a source so the ETL driver can send conditional headers
+    /// on the next crawl. Returns `None` when this source hasn't
+    /// been crawled yet — the driver should fall back to
+    /// unconditional fetch in that case.
+    pub async fn get_source_state(
+        &self,
+        source: SourceId,
+    ) -> Result<Option<SourceHttpState>, StorageError> {
+        sqlx::query_as(
+            "SELECT source, etag, last_modified, last_seen_at \
+             FROM source_http_state WHERE source = $1",
+        )
+        .bind(source.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StorageError::from)
+    }
+
+    /// Persist the HTTP cache cues observed on a successful crawl.
+    /// `etag` / `last_modified` are nullable because the server may
+    /// have emitted only one (or neither). `last_seen_at` is always
+    /// refreshed to `now()` — operators read it to answer "when did
+    /// the ETL last successfully talk to source X?".
+    pub async fn put_source_state(
+        &self,
+        source: SourceId,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO source_http_state (source, etag, last_modified, last_seen_at) \
+             VALUES ($1, $2, $3, now()) \
+             ON CONFLICT (source) DO UPDATE SET \
+                 etag = EXCLUDED.etag, \
+                 last_modified = EXCLUDED.last_modified, \
+                 last_seen_at = EXCLUDED.last_seen_at",
+        )
+        .bind(source.as_str())
+        .bind(etag)
+        .bind(last_modified)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Insert a new `dataset_versions` row iff `(dataset_id, version)`
@@ -873,6 +959,70 @@ mod tests {
             Some("地政司"),
             "publisher must reflect the update"
         );
+    }
+
+    /// `source_http_state` upsert semantics (#1.4d.2): first put
+    /// inserts a row; second put on the same `source` updates the
+    /// cues. `last_seen_at` always advances. Operators read this
+    /// table to answer "when did the ETL last talk to source X?".
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn source_http_state_upserts_on_repeat_put() {
+        let (storage, _container) = fresh_storage().await;
+
+        // Initial put → row exists with the cues we set.
+        storage
+            .put_source_state(
+                SourceId::DataGovTw,
+                Some("\"v1-etag\""),
+                Some("Wed, 14 Apr 2026 03:30:00 GMT"),
+            )
+            .await
+            .expect("first put");
+        let first = storage
+            .get_source_state(SourceId::DataGovTw)
+            .await
+            .expect("get ok")
+            .expect("row present");
+        assert_eq!(first.etag.as_deref(), Some("\"v1-etag\""));
+        assert_eq!(
+            first.last_modified.as_deref(),
+            Some("Wed, 14 Apr 2026 03:30:00 GMT"),
+        );
+
+        // Second put with different cues → updates in place; row
+        // count stays at 1 (the PRIMARY KEY on `source` enforces it).
+        storage
+            .put_source_state(
+                SourceId::DataGovTw,
+                Some("\"v2-etag\""),
+                Some("Thu, 15 Apr 2026 03:30:00 GMT"),
+            )
+            .await
+            .expect("second put");
+        let second = storage
+            .get_source_state(SourceId::DataGovTw)
+            .await
+            .expect("get ok")
+            .expect("row present");
+        assert_eq!(second.etag.as_deref(), Some("\"v2-etag\""));
+        assert!(
+            second.last_seen_at >= first.last_seen_at,
+            "last_seen_at advances or stays the same on update",
+        );
+
+        let count: (i64,) = sqlx::query_as("SELECT count(*) FROM source_http_state")
+            .fetch_one(storage.pool())
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1, "exactly one row per source (PK enforces it)");
+
+        // Missing source → None, not an error.
+        let twse = storage
+            .get_source_state(SourceId::Twse)
+            .await
+            .expect("get ok");
+        assert!(twse.is_none());
     }
 
     /// Pin the natural-key dedup semantic: returning to a

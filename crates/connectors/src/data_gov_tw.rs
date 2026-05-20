@@ -132,7 +132,11 @@ impl SourceConnector for DataGovTwConnector {
         SourceId::DataGovTw
     }
 
-    async fn list_datasets(&self, cursor: Option<Cursor>) -> Result<Page, crate::ConnectorError> {
+    async fn list_datasets(
+        &self,
+        cursor: Option<Cursor>,
+        cues: &crate::ConditionalCues,
+    ) -> Result<crate::ListResponse, crate::ConnectorError> {
         // `limit` is taken from the cursor when present so a resumed walk
         // keeps its original page size even if the connector is rebuilt
         // with a different `page_size`. On a fresh walk we fall back to
@@ -142,10 +146,41 @@ impl SourceConnector for DataGovTwConnector {
             .build_request_url(offset, limit)
             .map_err(|e| crate::ConnectorError::Config(e.to_string()))?;
 
-        tracing::debug!(%url, offset, limit, "GET data.gov.tw catalog");
+        // Conditional headers (#1.4d.2) only apply on the FIRST page
+        // of a walk — subsequent paginated requests return different
+        // bytes by definition, so sending `If-None-Match` on them
+        // would just guarantee unnecessary 200s. Mid-walk pages
+        // ignore the cues entirely.
+        let is_first_page = cursor.is_none();
+        let mut req = self.http.get(url.clone());
+        if is_first_page {
+            if let Some(etag) = cues.if_none_match.as_deref() {
+                req = req.header(reqwest::header::IF_NONE_MATCH, etag);
+            }
+            if let Some(ims) = cues.if_modified_since.as_deref() {
+                req = req.header(reqwest::header::IF_MODIFIED_SINCE, ims);
+            }
+        }
 
-        let resp = self.http.get(url).send().await?;
+        tracing::debug!(%url, offset, limit, conditional = is_first_page, "GET data.gov.tw catalog");
+
+        let resp = req.send().await?;
         let status = resp.status();
+
+        // 304 Not Modified is only emitted in response to conditional
+        // headers, and only meaningful on the first page (where we
+        // actually sent them). On mid-walk pages a 304 would indicate
+        // server bug; treat as BadStatus rather than success.
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            if !is_first_page {
+                return Err(crate::ConnectorError::BadStatus {
+                    status: 304,
+                    body: "unexpected 304 on a mid-walk page".to_owned(),
+                });
+            }
+            return Ok(crate::ListResponse::NotModified);
+        }
+
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(crate::ConnectorError::BadStatus {
@@ -153,6 +188,17 @@ impl SourceConnector for DataGovTwConnector {
                 body,
             });
         }
+
+        // Extract fresh cues from the response headers BEFORE we
+        // consume the body via `.json()`. `header_str` returns the
+        // value bytes verbatim when they're valid UTF-8; non-UTF-8
+        // bytes are extremely rare on these headers (RFC 7231 §3.2.4
+        // restricts header field values to visible ASCII + SP/HT)
+        // and we treat them as "no cue".
+        let fresh_cues = crate::ConditionalCues {
+            if_none_match: header_string(&resp, reqwest::header::ETAG),
+            if_modified_since: header_string(&resp, reqwest::header::LAST_MODIFIED),
+        };
 
         let envelope: CkanEnvelope = resp
             .json()
@@ -193,10 +239,13 @@ impl SourceConnector for DataGovTwConnector {
                     );
                 }
             }
-            return Ok(Page {
-                items,
-                next: None,
-                total,
+            return Ok(crate::ListResponse::Modified {
+                page: Page {
+                    items,
+                    next: None,
+                    total,
+                },
+                fresh_cues,
             });
         }
         let next = match total {
@@ -205,8 +254,22 @@ impl SourceConnector for DataGovTwConnector {
             _ => None,
         };
 
-        Ok(Page { items, next, total })
+        Ok(crate::ListResponse::Modified {
+            page: Page { items, next, total },
+            fresh_cues,
+        })
     }
+}
+
+/// Pull a header value as a `String`, returning `None` for missing
+/// headers OR header values that don't decode as valid UTF-8.
+/// Per RFC 7231 §3.2.4 header field values are visible ASCII, so
+/// the lossy decode here only matters for upstream bugs.
+fn header_string(resp: &reqwest::Response, name: reqwest::header::HeaderName) -> Option<String> {
+    resp.headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
 }
 
 /// Decode a cursor into `(offset, limit)`. A `None` cursor yields the
@@ -393,9 +456,25 @@ struct CkanGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ListResponse;
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Drive `list_datasets` with empty conditional cues (the common
+    /// pre-#1.4d.2 behaviour) and unwrap the [`ListResponse::Modified`]
+    /// payload so existing test bodies that read `page.items` etc.
+    /// don't need to keep matching on the enum.
+    async fn fetch_page(c: &DataGovTwConnector, cursor: Option<Cursor>) -> Page {
+        match c
+            .list_datasets(cursor, &crate::ConditionalCues::default())
+            .await
+            .expect("ok")
+        {
+            ListResponse::Modified { page, .. } => page,
+            ListResponse::NotModified => panic!("unexpected 304"),
+        }
+    }
 
     fn sample_envelope(count: u64, datasets: &[serde_json::Value]) -> serde_json::Value {
         json!({
@@ -455,7 +534,7 @@ mod tests {
     async fn parses_a_single_page_into_dataset_metadata() {
         let server = mock_server_with_pages(sample_envelope(1, &[sample_dataset()]), None).await;
         let c = connector(&server);
-        let page = c.list_datasets(None).await.expect("ok");
+        let page = fetch_page(&c, None).await;
 
         assert_eq!(page.total, Some(1));
         assert!(
@@ -493,12 +572,12 @@ mod tests {
         let server = mock_server_with_pages(page0, Some(page1)).await;
         let c = connector(&server);
 
-        let p0 = c.list_datasets(None).await.expect("p0");
+        let p0 = fetch_page(&c, None).await;
         assert_eq!(p0.items.len(), 2);
         let next = p0.next.clone().expect("page-0 must hand back a cursor");
         assert_eq!(next.as_str(), "2:2");
 
-        let p1 = c.list_datasets(Some(next)).await.expect("p1");
+        let p1 = fetch_page(&c, Some(next)).await;
         assert_eq!(p1.items.len(), 1);
         assert!(p1.next.is_none(), "final page must terminate the walk");
     }
@@ -521,10 +600,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let page = connector(&server)
-            .list_datasets(Some(Cursor::new("50:2")))
-            .await
-            .expect("ok");
+        let page = fetch_page(&connector(&server), Some(Cursor::new("50:2"))).await;
         assert!(page.items.is_empty());
         assert!(
             page.next.is_none(),
@@ -540,7 +616,7 @@ mod tests {
         });
         let server = mock_server_with_pages(envelope, None).await;
         let c = connector(&server);
-        let page = c.list_datasets(None).await.expect("ok");
+        let page = fetch_page(&c, None).await;
         assert!(page.items.is_empty());
         assert!(page.next.is_none(), "empty page must signal end-of-stream");
     }
@@ -553,7 +629,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream is down"))
             .mount(&server)
             .await;
-        let err = connector(&server).list_datasets(None).await.unwrap_err();
+        let err = connector(&server)
+            .list_datasets(None, &crate::ConditionalCues::default())
+            .await
+            .unwrap_err();
         match err {
             crate::ConnectorError::BadStatus { status, body } => {
                 assert_eq!(status, 503);
@@ -574,7 +653,10 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let err = connector(&server).list_datasets(None).await.unwrap_err();
+        let err = connector(&server)
+            .list_datasets(None, &crate::ConditionalCues::default())
+            .await
+            .unwrap_err();
         assert!(matches!(err, crate::ConnectorError::Decode(_)));
     }
 
@@ -590,12 +672,7 @@ mod tests {
             })],
         );
         let server = mock_server_with_pages(envelope, None).await;
-        let d = connector(&server)
-            .list_datasets(None)
-            .await
-            .unwrap()
-            .items
-            .remove(0);
+        let d = fetch_page(&connector(&server), None).await.items.remove(0);
         assert_eq!(d.source_id, "9001");
         assert_eq!(d.license, "unspecified");
         assert!(d.publisher.is_none());
@@ -608,7 +685,10 @@ mod tests {
     async fn malformed_cursor_yields_invalid_cursor_error() {
         let server = MockServer::start().await;
         let err = connector(&server)
-            .list_datasets(Some(Cursor::new("not-a-cursor")))
+            .list_datasets(
+                Some(Cursor::new("not-a-cursor")),
+                &crate::ConditionalCues::default(),
+            )
             .await
             .unwrap_err();
         assert!(matches!(err, crate::ConnectorError::InvalidCursor { .. }));
@@ -628,17 +708,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let _ = connector(&server)
-            .list_datasets(Some(Cursor::new("100:7")))
-            .await
-            .expect("matching mock");
+        let _ = fetch_page(&connector(&server), Some(Cursor::new("100:7"))).await;
     }
 
     #[tokio::test]
     async fn zero_limit_in_cursor_is_invalid() {
         let server = MockServer::start().await;
         let err = connector(&server)
-            .list_datasets(Some(Cursor::new("0:0")))
+            .list_datasets(Some(Cursor::new("0:0")), &crate::ConditionalCues::default())
             .await
             .unwrap_err();
         match err {
@@ -662,10 +739,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let page = connector(&server)
-            .list_datasets(Some(Cursor::new(format!("{huge}:2"))))
-            .await
-            .expect("ok");
+        let page = fetch_page(&connector(&server), Some(Cursor::new(format!("{huge}:2")))).await;
         assert!(page.items.is_empty());
     }
 
@@ -698,12 +772,7 @@ mod tests {
         });
         let envelope = sample_envelope(1, &[dataset]);
         let server = mock_server_with_pages(envelope, None).await;
-        let d = connector(&server)
-            .list_datasets(None)
-            .await
-            .unwrap()
-            .items
-            .remove(0);
+        let d = fetch_page(&connector(&server), None).await.items.remove(0);
 
         // license: empty title → fall through to license_id.
         assert_eq!(d.license, "CC-BY-4.0");
@@ -734,5 +803,110 @@ mod tests {
         assert_eq!(with_z, without_z);
         assert_eq!(fractional.date_naive(), with_z.date_naive());
         assert!(parse_ckan_timestamp("not a date").is_none());
+    }
+
+    // ─── #1.4d.2 conditional-fetch tests ─────────────────────────────
+
+    /// When the server emits `ETag` + `Last-Modified` on a 200, the
+    /// connector extracts both and returns them as `fresh_cues` so
+    /// the driver can persist them for next time.
+    #[tokio::test]
+    async fn fresh_cues_extracted_from_response_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"abc123\"")
+                    .insert_header("Last-Modified", "Wed, 15 Apr 2026 03:30:00 GMT")
+                    .set_body_json(sample_envelope(1, &[sample_dataset()])),
+            )
+            .mount(&server)
+            .await;
+
+        let resp = connector(&server)
+            .list_datasets(None, &crate::ConditionalCues::default())
+            .await
+            .expect("ok");
+        match resp {
+            ListResponse::Modified { page, fresh_cues } => {
+                assert_eq!(page.items.len(), 1);
+                assert_eq!(fresh_cues.if_none_match.as_deref(), Some("\"abc123\""));
+                assert_eq!(
+                    fresh_cues.if_modified_since.as_deref(),
+                    Some("Wed, 15 Apr 2026 03:30:00 GMT"),
+                );
+            }
+            ListResponse::NotModified => panic!("expected Modified for fresh fetch"),
+        }
+    }
+
+    /// When the server replies 304 to our conditional headers, the
+    /// connector returns `NotModified` — no page, no `fresh_cues`
+    /// (caller keeps the cues it already has). Drives the skip-the-
+    /// whole-crawl path in the ETL driver.
+    #[tokio::test]
+    async fn conditional_request_handles_304_not_modified() {
+        let server = MockServer::start().await;
+        // Match incoming conditional header so we know the connector
+        // actually sent it; otherwise the test would pass for the
+        // wrong reason.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(wiremock::matchers::header(
+                "If-None-Match",
+                "\"prior-etag\"",
+            ))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+
+        let cues = crate::ConditionalCues {
+            if_none_match: Some("\"prior-etag\"".to_owned()),
+            if_modified_since: None,
+        };
+        let resp = connector(&server)
+            .list_datasets(None, &cues)
+            .await
+            .expect("ok");
+        assert!(matches!(resp, ListResponse::NotModified));
+    }
+
+    /// Mid-walk pages (cursor=Some) must NOT send conditional
+    /// headers — they'd produce 304s for pages we genuinely need.
+    /// The mock here only matches requests WITHOUT the conditional
+    /// header, so the test fails if the connector sent it.
+    #[tokio::test]
+    async fn mid_walk_page_does_not_send_conditional_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(query_param("offset", "10"))
+            .and(wiremock::matchers::header_exists("If-None-Match"))
+            // If the connector DID send If-None-Match, this branch
+            // matches and returns 304 — the test then panics in
+            // fetch_page on the unexpected 304.
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+        // Catch-all for the no-conditional-header case: real data.
+        Mock::given(method("GET"))
+            .and(path("/api/v2/rest/dataset"))
+            .and(query_param("offset", "10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(sample_envelope(10, &[])))
+            .mount(&server)
+            .await;
+
+        let cues = crate::ConditionalCues {
+            if_none_match: Some("\"unused-on-midwalk\"".to_owned()),
+            if_modified_since: None,
+        };
+        // Passing cues into a mid-walk call (cursor=Some) — the
+        // connector must ignore them.
+        let resp = connector(&server)
+            .list_datasets(Some(Cursor::new("10:5")), &cues)
+            .await
+            .expect("ok");
+        assert!(matches!(resp, ListResponse::Modified { .. }));
     }
 }
