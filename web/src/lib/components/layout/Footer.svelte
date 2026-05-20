@@ -5,6 +5,18 @@
 
 	Uses design tokens from #2.1; no raw color literals.
 -->
+<script lang="ts">
+	// Project's first publication year. The displayed range auto-extends
+	// to the current year so the copyright stays accurate without manual
+	// updates. Same year on both endpoints collapses to a single year.
+	const COPYRIGHT_START_YEAR = 2026;
+	const currentYear = new Date().getFullYear();
+	const copyrightYears =
+		currentYear === COPYRIGHT_START_YEAR
+			? `${COPYRIGHT_START_YEAR}`
+			: `${COPYRIGHT_START_YEAR}–${currentYear}`;
+</script>
+
 <footer class="border-t border-neutral-200 bg-neutral-50">
 	<div class="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
 		<div class="grid grid-cols-1 gap-8 md:grid-cols-3">
@@ -41,7 +53,7 @@
 			</section>
 		</div>
 		<div class="mt-10 border-t border-neutral-200 pt-6 text-xs text-neutral-500">
-			© 2026 Taiwan Data Hub contributors — fully open source, self-hostable, no client-side
+			© {copyrightYears} Taiwan Data Hub contributors — fully open source, self-hostable, no client-side
 			tracking.
 		</div>
 	</div>
