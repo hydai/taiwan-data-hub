@@ -40,16 +40,18 @@
 	<nav class="mb-6 text-sm text-neutral-500" aria-label="Breadcrumb">
 		<ol class="flex flex-wrap items-center gap-1.5">
 			<li>
-				<a class="hover:text-primary-700 hover:underline" href={resolve('/')}>Home</a>
+				<a class="underline underline-offset-2 hover:text-primary-700" href={resolve('/')}>Home</a>
 			</li>
 			<li aria-hidden="true">/</li>
 			<li>
-				<a class="hover:text-primary-700 hover:underline" href={resolve('/domains')}>Domains</a>
+				<a class="underline underline-offset-2 hover:text-primary-700" href={resolve('/domains')}
+					>Domains</a
+				>
 			</li>
 			<li aria-hidden="true">/</li>
 			<li>
 				<a
-					class="hover:text-primary-700 hover:underline"
+					class="underline underline-offset-2 hover:text-primary-700"
 					href={resolve('/domains/[slug]', { slug: dataset.domain_slug })}
 				>
 					{dataset.domain_slug}
@@ -106,7 +108,7 @@
 			<dd class="mt-1 text-sm text-neutral-900">{dataset.source.publisher}</dd>
 			<dd class="mt-1">
 				<a
-					class="text-sm break-all text-primary-700 hover:underline"
+					class="text-sm break-all text-primary-700 underline underline-offset-2 hover:text-primary-800"
 					href={dataset.source.url}
 					target="_blank"
 					rel="noopener noreferrer"
@@ -145,7 +147,7 @@
 						{resource.kind}
 					</span>
 					<a
-						class="flex-1 text-sm text-primary-700 hover:underline"
+						class="flex-1 text-sm text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href={resource.url}
 						target="_blank"
 						rel="noopener noreferrer"

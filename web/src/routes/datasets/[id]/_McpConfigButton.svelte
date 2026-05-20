@@ -92,7 +92,9 @@
 	</div>
 
 	<p class="mt-2 text-xs text-neutral-500">
-		Paste into <code class="rounded bg-neutral-100 px-1 font-mono">claude_desktop_config.json</code>
+		Paste into <code class="rounded bg-neutral-100 px-1 font-mono text-neutral-800"
+			>claude_desktop_config.json</code
+		>
 		(or your MCP client's equivalent) to expose this dataset to AI agents.
 	</p>
 
