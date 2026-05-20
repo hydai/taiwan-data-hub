@@ -59,6 +59,34 @@ function assertValidDomains(value: unknown): asserts value is Domain[] {
 		if (!name || typeof name['zh-TW'] !== 'string' || name['zh-TW'].length === 0) {
 			throw new Error(`config/domains.yaml (${tag}): name['zh-TW'] is required`);
 		}
+		// typical_questions is optional. If present must be a non-empty
+		// array of i18n-shaped objects with required zh-TW strings.
+		if (r.typical_questions !== undefined) {
+			if (!Array.isArray(r.typical_questions) || r.typical_questions.length === 0) {
+				throw new Error(
+					`config/domains.yaml (${tag}): typical_questions must be a non-empty array when present`
+				);
+			}
+			for (let k = 0; k < r.typical_questions.length; k += 1) {
+				const q = r.typical_questions[k];
+				if (!q || typeof q !== 'object') {
+					throw new Error(
+						`config/domains.yaml (${tag}): typical_questions[${k}] must be an object`
+					);
+				}
+				const qr = q as Record<string, unknown>;
+				if (typeof qr['zh-TW'] !== 'string' || qr['zh-TW'].length === 0) {
+					throw new Error(
+						`config/domains.yaml (${tag}): typical_questions[${k}]['zh-TW'] is required`
+					);
+				}
+				if (qr.en !== undefined && (typeof qr.en !== 'string' || qr.en.length === 0)) {
+					throw new Error(
+						`config/domains.yaml (${tag}): typical_questions[${k}].en must be a non-empty string when present`
+					);
+				}
+			}
+		}
 	}
 }
 
@@ -82,6 +110,11 @@ const GROUP_HEADINGS: Record<DomainKind, { heading: string; subheading: string }
 	meta: { heading: '後設資料', subheading: 'Meta' },
 	horizontal: { heading: '橫向資料', subheading: 'Horizontal' }
 };
+
+/** Find a single domain by slug, or `null` if not found. */
+export function findDomainBySlug(slug: string): Domain | null {
+	return RAW_DOMAINS.find((d) => d.slug === slug) ?? null;
+}
 
 /**
  * Load + group the 20 marketplace domains. Counts are zeroed for now —

@@ -7,11 +7,28 @@
  * When M3 wires the real Postgres-backed dataset table, the storage
  * crate will own its own canonical row type; this client type only
  * exposes what the marketplace UI renders.
+ *
+ * Single-source-of-truth pattern: the readonly tuple of valid values
+ * doubles as the derived type union and as the runtime list for
+ * validation + display ordering. Adding a new enum value means
+ * editing one array; the type union, the validator Set, and every
+ * consumer (load.ts, filter.ts, components) update transparently.
  */
-export type Tier = 'gold' | 'silver' | 'bronze';
-export type Format = 'csv' | 'json' | 'geojson' | 'xlsx' | 'parquet' | 'xml';
-export type UpdateFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly';
-export type ResourceKind = 'download' | 'api';
+export const TIERS = ['gold', 'silver', 'bronze'] as const;
+export type Tier = (typeof TIERS)[number];
+export const TIER_SET: ReadonlySet<Tier> = new Set(TIERS);
+
+export const FORMATS = ['csv', 'json', 'geojson', 'xlsx', 'parquet', 'xml'] as const;
+export type Format = (typeof FORMATS)[number];
+export const FORMAT_SET: ReadonlySet<Format> = new Set(FORMATS);
+
+export const UPDATE_FREQUENCIES = ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'] as const;
+export type UpdateFrequency = (typeof UPDATE_FREQUENCIES)[number];
+export const UPDATE_FREQUENCY_SET: ReadonlySet<UpdateFrequency> = new Set(UPDATE_FREQUENCIES);
+
+export const RESOURCE_KINDS = ['download', 'api'] as const;
+export type ResourceKind = (typeof RESOURCE_KINDS)[number];
+export const RESOURCE_KIND_SET: ReadonlySet<ResourceKind> = new Set(RESOURCE_KINDS);
 
 export interface DatasetI18n {
 	'zh-TW': string;

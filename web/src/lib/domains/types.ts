@@ -18,6 +18,12 @@ export interface Domain {
 	sort_order: number;
 	name: DomainI18n;
 	description?: DomainI18n;
+	/**
+	 * Editorial list of representative agent-friendly questions this
+	 * domain answers (rendered on /domains/[slug]). Optional —
+	 * domains without populated entries don't render the section.
+	 */
+	typical_questions?: readonly DomainI18n[];
 }
 
 /** A domain enriched with the per-domain dataset count for the marketplace UI. */
