@@ -13,3 +13,12 @@ description = "53 Taiwan-specific utility tools (ID validation, ROC year, addres
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+mcp-core = { path = "../mcp-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

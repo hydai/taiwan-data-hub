@@ -172,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
     // same `tools_data::register_data_tools` helper, so tools register in
     // one place and reach every transport.
     let mut builder: DispatcherBuilder = tools_data::register_data_tools(Dispatcher::builder());
+    builder = tools_utility::register_utility_tools(builder);
     builder = wire_db_tools_if_available(builder).await;
     let dispatcher = builder.build();
     let tool_count = dispatcher.len();

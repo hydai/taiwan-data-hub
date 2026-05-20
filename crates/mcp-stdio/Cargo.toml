@@ -18,6 +18,7 @@ workspace = true
 mcp-core = { path = "../mcp-core" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
+tools-utility = { path = "../tools-utility" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
