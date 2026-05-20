@@ -114,7 +114,15 @@ impl Harness {
             .expect("version")
             .expect("inserted");
         let parquet_path = write_fixture_parquet(cache_dir.path()).await;
-        let cache_uri = format!("file://{}", parquet_path.display());
+        // Store the bare filesystem path rather than `format!(
+        // "file://{path}")`. The `file://` concatenation produces
+        // `file:////tmp/...` on Unix (path already starts with `/`),
+        // which is technically a valid URI but non-canonical and
+        // platform-quirky. Both `query_rows` (strips `file://` then
+        // falls through to `PathBuf::from`) and `LocalFsObjectStore`
+        // (same) accept bare paths, so the simpler form is also the
+        // correct one.
+        let cache_uri = parquet_path.display().to_string();
         sqlx::query("UPDATE datasets SET cached = true, cache_path = $1 WHERE id = $2")
             .bind(&cache_uri)
             .bind(cached_dataset_id)
@@ -149,7 +157,9 @@ impl Harness {
             .expect("version")
             .expect("inserted");
         let mfile = write_fixture_parquet_named(cache_dir.path(), "materialise.parquet").await;
-        let muri = format!("file://{}", mfile.display());
+        // Bare filesystem path — see the `cache_uri` comment above
+        // for why we don't pre-format with `file://`.
+        let muri = mfile.display().to_string();
         sqlx::query(
             "INSERT INTO dataset_files (dataset_version_id, format, uri, byte_size, checksum) \
              VALUES ($1, 'parquet', $2, $3, 'sha256:mat-1')",
@@ -296,7 +306,16 @@ mcp_integration_test!(list_domains_happy_returns_20_seeded_domains, |h| {
             .await
             .expect("list_domains happy");
         let domains = res["domains"].as_array().expect("domains array");
-        assert_eq!(domains.len(), 20, "20 domains seeded in migration 0002");
+        // 20 domains come from `tools-data/config/domains.yaml`
+        // (embedded at compile time). The DB migration 0002 also
+        // seeds a `domains` table but `list_domains` reads from
+        // the embedded YAML for fast in-memory lookup — that's
+        // the canonical source for this tool.
+        assert_eq!(
+            domains.len(),
+            20,
+            "20 domains in embedded config/domains.yaml"
+        );
         // `list_domains` resolves i18n server-side — each domain
         // surfaces a plain locale-rendered `name`, not the raw
         // i18n object. zh-TW is the default; assert that path.

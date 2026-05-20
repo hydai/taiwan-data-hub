@@ -106,7 +106,11 @@ jobs:
           node-version: 22
 
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --no-default-features --features rustls,postgres --locked
+        # Pin to the same sqlx major/minor the workspace uses so an
+        # upstream sqlx-cli release can't break this weekly cron run
+        # while no project code changed. Bump alongside the workspace
+        # sqlx version in `Cargo.toml`.
+        run: cargo install sqlx-cli --version ^0.8 --no-default-features --features rustls,postgres --locked
 
       - name: Apply migrations
         run: sqlx migrate run --source migrations
