@@ -265,13 +265,13 @@ impl ToolHandler for MaterializeDatasetTool {
             description: format!(
                 "Issue a short-lived presigned download URL for a dataset's latest version. \
                  Specify the dataset by `id` (UUID) or `slug`; exactly one is required. \
-                 `format` defaults to `parquet` when present, falling back to csv, then the \
-                 first available file. `ttl_seconds` defaults to {default_ttl} and MUST be \
-                 within [{min_ttl}, {max_ttl}] (values outside the range are rejected). \
-                 Returns the URL plus the file size and computed expiry. \
-                 Best-effort writes a `usage_records` audit row after the URL is signed; \
-                 audit failures are logged server-side but do not fail the response because \
-                 the URL is already valid in the caller's hands at that point.",
+                 When `format` is omitted, the tool picks parquet if available, otherwise csv, \
+                 otherwise the first file the latest version carries. `ttl_seconds` defaults \
+                 to {default_ttl} and MUST be within [{min_ttl}, {max_ttl}] (values outside \
+                 the range are rejected). Returns the URL plus the file size and computed \
+                 expiry. Best-effort writes a `usage_records` audit row after the URL is \
+                 signed; audit failures are logged server-side but do not fail the response \
+                 because the URL is already valid in the caller's hands at that point.",
                 default_ttl = DEFAULT_TTL.as_secs(),
                 min_ttl = MIN_TTL.as_secs(),
                 max_ttl = MAX_TTL.as_secs(),
@@ -566,9 +566,12 @@ fn map_object_store_err(err: &ObjectStoreError) -> ToolError {
 
 /// Build a sanitised, caller-facing error when no backend handles
 /// the stored URI's scheme. The server-side log carries the URI;
-/// the caller only sees the scheme.
+/// the caller only sees the scheme. Bare paths (no `://`) are
+/// reported as `file` because that's how the router dispatches
+/// them — saying `<no scheme>` would be technically accurate but
+/// would mislead operators into looking for the wrong env vars.
 fn presign_backend_missing(uri: &str) -> ToolError {
-    let scheme = uri.split_once("://").map_or("<no scheme>", |(s, _)| s);
+    let scheme = uri.split_once("://").map_or("file", |(s, _)| s);
     tracing::warn!(
         scheme,
         "materialize_dataset has no backend configured for stored URI scheme"

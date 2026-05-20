@@ -243,9 +243,9 @@ async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBui
 fn build_object_store_router() -> ObjectStoreRouter {
     let mut router = ObjectStoreRouter::new();
 
-    if let (Ok(base), Ok(secret)) = (
-        std::env::var("OBJECT_STORE_BASE_URL"),
-        std::env::var("OBJECT_STORE_SIGNING_SECRET"),
+    if let (Some(base), Some(secret)) = (
+        non_empty_env("OBJECT_STORE_BASE_URL"),
+        non_empty_env("OBJECT_STORE_SIGNING_SECRET"),
     ) {
         match Url::parse(&base) {
             Ok(base_url) => match LocalFsObjectStore::new(base_url, secret.into_bytes()) {
@@ -263,18 +263,18 @@ fn build_object_store_router() -> ObjectStoreRouter {
         }
     }
 
-    if let (Ok(endpoint), Ok(region), Ok(key), Ok(secret)) = (
-        std::env::var("S3_ENDPOINT"),
-        std::env::var("S3_REGION"),
-        std::env::var("S3_ACCESS_KEY_ID"),
-        std::env::var("S3_SECRET_ACCESS_KEY"),
+    if let (Some(endpoint), Some(region), Some(key), Some(secret)) = (
+        non_empty_env("S3_ENDPOINT"),
+        non_empty_env("S3_REGION"),
+        non_empty_env("S3_ACCESS_KEY_ID"),
+        non_empty_env("S3_SECRET_ACCESS_KEY"),
     ) {
         match Url::parse(&endpoint) {
             Ok(endpoint_url) => {
                 let creds = S3Credentials {
                     access_key_id: key,
                     secret_access_key: secret,
-                    session_token: std::env::var("S3_SESSION_TOKEN").ok(),
+                    session_token: non_empty_env("S3_SESSION_TOKEN"),
                 };
                 let store = S3ObjectStore::new(endpoint_url, region, creds);
                 tracing::info!("s3 object store wired (s3:// URIs)");
@@ -287,6 +287,23 @@ fn build_object_store_router() -> ObjectStoreRouter {
     }
 
     router
+}
+
+/// Read an env var, trim whitespace, and return `Some(value)` only
+/// when the result is non-empty. An empty string from
+/// `std::env::var` (set but blank) would otherwise be wired into the
+/// store as if it were a real credential — producing unusable
+/// signatures and a misleading "wired" log line at boot. We treat
+/// "set but blank" the same as "unset".
+fn non_empty_env(key: &str) -> Option<String> {
+    let raw = std::env::var(key).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(env = key, "environment variable is set but blank; ignoring");
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 /// Returns when the process receives SIGINT or SIGTERM. Cancels the shared
