@@ -33,7 +33,17 @@ CREATE TABLE usage_records (
                         )),
     principal_id        TEXT,
     byte_size           BIGINT CHECK (byte_size IS NULL OR byte_size >= 0),
-    requested_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    requested_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- principal_kind ↔ principal_id invariant: NULL only for
+    -- anonymous; non-empty TEXT otherwise. Defense in depth — the
+    -- tool layer also validates this on input, but the CHECK keeps
+    -- future writers honest even if they bypass the tool path.
+    CONSTRAINT usage_records_principal_id_consistency CHECK (
+        (principal_kind = 'anonymous' AND principal_id IS NULL)
+        OR (principal_kind <> 'anonymous'
+            AND principal_id IS NOT NULL
+            AND principal_id <> '')
+    )
 );
 
 CREATE INDEX usage_records_dataset_requested_idx

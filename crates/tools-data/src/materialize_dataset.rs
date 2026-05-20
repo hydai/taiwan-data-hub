@@ -268,8 +268,10 @@ impl ToolHandler for MaterializeDatasetTool {
                  `format` defaults to `parquet` when present, falling back to csv, then the \
                  first available file. `ttl_seconds` defaults to {default_ttl} and MUST be \
                  within [{min_ttl}, {max_ttl}] (values outside the range are rejected). \
-                 Returns the URL plus the file size and computed expiry, and writes a \
-                 `usage_records` row before responding.",
+                 Returns the URL plus the file size and computed expiry. \
+                 Best-effort writes a `usage_records` audit row after the URL is signed; \
+                 audit failures are logged server-side but do not fail the response because \
+                 the URL is already valid in the caller's hands at that point.",
                 default_ttl = DEFAULT_TTL.as_secs(),
                 min_ttl = MIN_TTL.as_secs(),
                 max_ttl = MAX_TTL.as_secs(),

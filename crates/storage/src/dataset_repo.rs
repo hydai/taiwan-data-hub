@@ -824,11 +824,21 @@ impl Storage {
     }
 
     /// Insert one `usage_records` row. Returns the new row's UUID.
-    /// CHECK constraints on `tool`, `format`, `principal_kind` are
-    /// enforced by Postgres — a violation surfaces as
-    /// [`StorageError::Sqlx`] with constraint-name detail, which is
-    /// loud enough to flag a Rust-side enum/string drift in CI.
+    ///
+    /// Two layers of validation:
+    /// 1. **Storage-side** (this method): the `principal_kind` ↔
+    ///    `principal_id` invariant is checked before the SQL round-
+    ///    trip. NULL `principal_id` is only valid for `anonymous`;
+    ///    non-anonymous kinds require a non-empty id. Violations
+    ///    surface as [`StorageError::InvalidArgument`] (mappable to
+    ///    a 4xx) instead of the opaque CHECK-constraint error.
+    /// 2. **SQL-side**: CHECK constraints on `tool`, `format`,
+    ///    `principal_kind`, and the same `principal_id` consistency
+    ///    rule live in `migrations/0006_usage_records.sql`. They
+    ///    keep future callers honest even if they bypass this
+    ///    method.
     pub async fn record_usage(&self, record: &NewUsageRecord<'_>) -> Result<Uuid, StorageError> {
+        validate_principal_pair(record.principal_kind, record.principal_id)?;
         let row: (Uuid,) = sqlx::query_as(
             "INSERT INTO usage_records \
                  (dataset_id, dataset_version_id, tool, format, \
@@ -847,6 +857,28 @@ impl Storage {
         .await
         .map_err(StorageError::from)?;
         Ok(row.0)
+    }
+}
+
+/// Enforce the `principal_kind` ↔ `principal_id` invariant the
+/// migration documents and the SQL CHECK constraint protects.
+/// Kept private to the storage layer because the rule is intrinsic
+/// to the `usage_records` shape — callers express it implicitly by
+/// supplying or omitting `principal_id` and the validator either
+/// accepts or returns an `InvalidArgument`.
+fn validate_principal_pair(kind: &str, id: Option<&str>) -> Result<(), StorageError> {
+    match (kind, id) {
+        ("anonymous", Some(_)) => Err(StorageError::InvalidArgument(
+            "principal_id must be NULL when principal_kind = anonymous".into(),
+        )),
+        ("anonymous", None) => Ok(()),
+        (_, None) => Err(StorageError::InvalidArgument(format!(
+            "principal_id is required when principal_kind = {kind}"
+        ))),
+        (_, Some("")) => Err(StorageError::InvalidArgument(format!(
+            "principal_id must not be empty when principal_kind = {kind}"
+        ))),
+        (_, Some(_)) => Ok(()),
     }
 }
 
@@ -938,6 +970,12 @@ pub enum StorageError {
     MissingZhTw,
     #[error("JSON encoding error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Caller-supplied data violates a cross-field invariant the
+    /// storage layer enforces before the SQL round-trip. Distinct
+    /// from [`Self::Database`] (which surfaces backend errors) so
+    /// callers can map invariant failures to a 4xx instead of a 5xx.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
 }
 
 // Read-side SQL — column lists are explicit (rather than `SELECT *`)
@@ -1947,5 +1985,112 @@ mod tests {
             })
             .await;
         assert!(bad.is_err(), "CHECK constraint must reject unknown tool");
+    }
+
+    /// Pin the storage-side `principal_kind` ↔ `principal_id`
+    /// validation. Each forbidden combination must surface as
+    /// `InvalidArgument` (not as a SQL-level CHECK violation) so
+    /// callers can map to 4xx without inspecting Postgres error
+    /// codes. The CHECK constraint in `0006_usage_records.sql` is
+    /// belt-and-braces — see `record_usage_db_check_blocks_ambiguous_pair`.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_usage_validates_principal_pair_invariant() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+
+        // anonymous + non-null id → InvalidArgument
+        let err = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: None,
+                tool: "materialize_dataset",
+                format: Some("parquet"),
+                principal_kind: "anonymous",
+                principal_id: Some("smuggled"),
+                byte_size: None,
+            })
+            .await
+            .expect_err("must reject anonymous+id");
+        assert!(matches!(err, StorageError::InvalidArgument(_)));
+
+        // user + None → InvalidArgument
+        let err = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: None,
+                tool: "materialize_dataset",
+                format: Some("parquet"),
+                principal_kind: "user",
+                principal_id: None,
+                byte_size: None,
+            })
+            .await
+            .expect_err("must reject user without id");
+        assert!(matches!(err, StorageError::InvalidArgument(_)));
+
+        // api_key + "" → InvalidArgument
+        let err = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: None,
+                tool: "materialize_dataset",
+                format: Some("parquet"),
+                principal_kind: "api_key",
+                principal_id: Some(""),
+                byte_size: None,
+            })
+            .await
+            .expect_err("must reject api_key with empty id");
+        assert!(matches!(err, StorageError::InvalidArgument(_)));
+
+        // Happy path: user + non-empty id → insert succeeds.
+        let ok = storage
+            .record_usage(&NewUsageRecord {
+                dataset_id,
+                dataset_version_id: None,
+                tool: "materialize_dataset",
+                format: Some("parquet"),
+                principal_kind: "user",
+                principal_id: Some("550e8400-e29b-41d4-a716-446655440000"),
+                byte_size: None,
+            })
+            .await
+            .expect("happy path insert");
+        assert_ne!(ok, Uuid::nil());
+    }
+
+    /// Belt: bypass the storage-side validation and confirm the SQL
+    /// CHECK constraint also blocks the ambiguous combination. Uses
+    /// a raw `sqlx::query` so we exercise the DB-level enforcement
+    /// directly, not the Rust-side validator.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn record_usage_db_check_blocks_ambiguous_pair() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let dataset_id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+
+        let raw_insert: Result<(Uuid,), _> = sqlx::query_as(
+            "INSERT INTO usage_records \
+                 (dataset_id, dataset_version_id, tool, format, \
+                  principal_kind, principal_id, byte_size) \
+             VALUES ($1, NULL, 'materialize_dataset', NULL, 'anonymous', 'should-be-null', NULL) \
+             RETURNING id",
+        )
+        .bind(dataset_id)
+        .fetch_one(storage.pool())
+        .await;
+        assert!(
+            raw_insert.is_err(),
+            "SQL CHECK must reject anonymous + non-null principal_id"
+        );
     }
 }
