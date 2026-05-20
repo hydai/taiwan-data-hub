@@ -24,6 +24,8 @@ on:
     paths:
       - 'web/**'
       - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
       - '.github/workflows/lighthouse.yml'
   workflow_dispatch:
   schedule:
