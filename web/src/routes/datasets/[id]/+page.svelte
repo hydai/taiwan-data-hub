@@ -97,8 +97,7 @@
 		{/if}
 	</header>
 
-	<section class="mb-8" aria-labelledby="mcp-heading">
-		<h2 id="mcp-heading" class="sr-only">MCP wiring</h2>
+	<section class="mb-8" aria-label="MCP wiring">
 		<McpConfigButton datasetSlug={dataset.slug} />
 	</section>
 
@@ -134,7 +133,7 @@
 			role="list"
 			class="divide-y divide-neutral-200 rounded-lg border border-neutral-200 bg-white"
 		>
-			{#each dataset.resources as resource, idx (idx)}
+			{#each dataset.resources as resource (resource.url)}
 				<li class="flex items-center gap-3 px-5 py-3">
 					<span
 						class={cn(

@@ -165,7 +165,7 @@ function assertCrossReferences(datasets: readonly Dataset[]): void {
 		for (const anchor of collection.anchor_datasets) {
 			if (!datasetSlugs.has(anchor)) {
 				throw new Error(
-					`config/collections.yaml (${collection.slug}): anchor_dataset "${anchor}" not found in config/datasets.yaml`
+					`config/collections.yaml (${collection.slug}): anchor_datasets entry "${anchor}" not found in config/datasets.yaml`
 				);
 			}
 		}

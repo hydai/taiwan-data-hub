@@ -57,7 +57,6 @@
 			type="button"
 			onclick={copyToClipboard}
 			class="inline-flex items-center gap-1.5 rounded-md bg-primary-700 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-primary-800 focus:ring-2 focus:ring-primary-500 focus:outline-none"
-			aria-live="polite"
 		>
 			{#if copied}
 				<svg
@@ -90,6 +89,17 @@
 			{/if}
 		</button>
 	</div>
+
+	<!--
+		Dedicated polite live region for the copy confirmation.
+		Putting aria-live on the <button> itself is non-standard and
+		some screen readers don't announce content swaps on interactive
+		elements reliably. A separate role="status" span is the
+		canonical pattern.
+	-->
+	<span role="status" aria-live="polite" class="sr-only">
+		{copied ? 'MCP config copied to clipboard' : ''}
+	</span>
 
 	<p class="mt-2 text-xs text-neutral-500">
 		Paste into <code class="rounded bg-neutral-100 px-1 font-mono text-neutral-800"
