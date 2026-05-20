@@ -17,8 +17,9 @@
 //!
 //! ## Security
 //!
-//! - Credentials are stored as bytes; the secret never lands in any
-//!   `Debug` / `Display` impl.
+//! - The `secret_access_key` is held inside [`S3Credentials`] and
+//!   redacted in its `Debug` impl — the secret never lands in any
+//!   `Debug` / `Display` output or panic message.
 //! - The whole signing pipeline takes the supplied `now()` as a
 //!   parameter (via the [`S3ObjectStore`] hook) so test fixtures
 //!   produce byte-stable signatures without racing the wall clock.

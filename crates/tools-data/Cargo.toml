@@ -26,7 +26,13 @@ serde_json = { workspace = true }
 serde_yml = { workspace = true }
 sqlparser = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+# Enumerate every Tokio module tools-data uses in non-test code so the
+# crate compiles even when the workspace default feature set drifts:
+#   - `sync`  — `tokio::sync::Mutex` / `OwnedMutexGuard` (materialize_dataset)
+#   - `time`  — `tokio::time::timeout`               (query_rows)
+#   - `rt`    — `tokio::task::spawn_blocking`        (query_rows)
+# Tests pull in extra features (`macros`, `rt-multi-thread`) via dev-deps.
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
