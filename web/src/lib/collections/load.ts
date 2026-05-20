@@ -59,6 +59,10 @@ function assertValidCollections(value: unknown): asserts value is Collection[] {
 				`config/collections.yaml (${tag}): anchor_datasets must have exactly ${REQUIRED_ANCHOR_COUNT} entries`
 			);
 		}
+		// Anchors are keyed in the UI by their slug value (Svelte
+		// {#each ... (slug)}). A duplicate inside one collection would
+		// silently corrupt keyed-each rendering, so fail loudly here.
+		const seenAnchors = new Set<string>();
 		for (let j = 0; j < anchors.length; j += 1) {
 			const a = anchors[j];
 			if (typeof a !== 'string' || !SLUG_RE.test(a)) {
@@ -66,6 +70,10 @@ function assertValidCollections(value: unknown): asserts value is Collection[] {
 					`config/collections.yaml (${tag}): anchor_datasets[${j}] must be a kebab-case dataset slug`
 				);
 			}
+			if (seenAnchors.has(a)) {
+				throw new Error(`config/collections.yaml (${tag}): duplicate anchor dataset slug "${a}"`);
+			}
+			seenAnchors.add(a);
 		}
 	}
 }

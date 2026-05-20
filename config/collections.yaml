@@ -3,7 +3,10 @@
 # curator's editorial framing.
 #
 # Schema (validated by web/src/lib/collections/load.ts):
-#   slug:            stable kebab-case identifier; matches /collections/<slug>
+#   slug:            stable kebab-case identifier. No /collections/<slug>
+#                    route exists yet (/collections is index-only in
+#                    M2 #2.7); reserve this for a future per-collection
+#                    detail page if curated packs grow long-form notes.
 #   sort_order:      display order (lower first)
 #   name:            i18n map; zh-TW required, en recommended
 #   curator_note:    i18n map; zh-TW required, en recommended — one-paragraph
