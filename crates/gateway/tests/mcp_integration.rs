@@ -305,7 +305,7 @@ mcp_integration_test!(list_domains_happy_returns_20_seeded_domains, |h| {
             .await
             .expect("list_domains happy");
         let domains = res["domains"].as_array().expect("domains array");
-        // 20 domains come from `tools-data/config/domains.yaml`
+        // 20 domains come from `config/domains.yaml` at the repo root
         // (embedded at compile time). The DB migration 0002 also
         // seeds a `domains` table but `list_domains` reads from
         // the embedded YAML for fast in-memory lookup — that's
