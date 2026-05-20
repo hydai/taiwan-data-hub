@@ -1,0 +1,92 @@
+name: Lighthouse CI
+
+# Runs Lighthouse against / and /datasets/[id] of the built SvelteKit
+# adapter-node bundle and asserts the M2 #2.10 budgets:
+#   performance >= 0.85, accessibility >= 0.95,
+#   best-practices >= 0.90, seo >= 0.90.
+#
+# Triggers:
+#   - pull_request: only when frontend code that could affect any of
+#     those scores changes, so unrelated PRs aren't taxed.
+#   - workflow_dispatch: manual re-run from the Actions UI.
+#   - schedule: weekly cron so Chromium / lighthouse updates that
+#     change scoring don't silently rot the budget thresholds.
+#
+# Security note: every step that runs a command only consumes values
+# we control (github.workflow, github.event.pull_request.number,
+# github.sha, github.event_name). No untrusted PR title / body /
+# branch / commit message is read into a `run:` body, so a malicious
+# fork PR cannot smuggle shell into this workflow.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'web/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'package.json'
+      - '.github/workflows/lighthouse.yml'
+  workflow_dispatch:
+  schedule:
+    # 07:00 UTC every Monday - staggered an hour after mcp-inspector
+    # so the two heavyweight weekly jobs don't compete for runners.
+    - cron: '0 7 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lighthouse-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lhci:
+    name: Lighthouse budgets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm picks up version from package.json's packageManager field
+      # (pnpm@10.13.1). Same setup as the `web` job in ci.yml so the
+      # two stay in lockstep.
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web (adapter-node)
+        run: pnpm --filter web build
+
+      # `lhci autorun` reads web/lighthouserc.json:
+      #   - starts `node build/index.js` (the adapter-node bundle)
+      #   - waits for "Listening on" in stdout
+      #   - runs Lighthouse 3x per URL on `/` and /datasets/sample-dataset
+      #   - asserts the budgets above; non-zero exit on any failure
+      #   - dumps HTML + JSON reports to web/lhci-reports/
+      #
+      # Known transitive: `@lhci/cli@0.15.1` pulls `chrome-launcher@0.13.4`
+      # which depends on `rimraf@3 -> glob@7` (deprecated). Tracked in
+      # https://github.com/hydai/taiwan-data-hub/issues/110 — accept for
+      # now because the package is dev-only, runs only inside this CI
+      # job, and never sees attacker-controlled input. Bump when
+      # upstream ships a release using glob@10+.
+      - name: Run Lighthouse CI (collect + assert)
+        run: pnpm --filter web exec lhci autorun
+
+      # On failure, upload reports so a maintainer can open the HTML
+      # report in a browser and see exactly which audit regressed.
+      - name: Upload Lighthouse reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-reports
+          path: web/lhci-reports/
+          retention-days: 14
