@@ -1,4 +1,6 @@
 <script lang="ts">
+	import MetaTags from '$lib/seo/MetaTags.svelte';
+
 	// Svelte 5 Runes — pre-alpha placeholder home.
 	// Replaced by the real marketplace shell in M2 #2.2/#2.4.
 	const milestones = [
@@ -13,6 +15,12 @@
 		{ id: 'M7', name: 'Discovery + REST + i18n', status: 'planned' }
 	];
 </script>
+
+<MetaTags
+	title="Taiwan Data Hub"
+	description="Open-source, self-hostable MCP service hub for Taiwan public data. Aggregates 20 domains for AI agents like Claude Desktop, Cursor, and Cline."
+	schemaType="WebSite"
+/>
 
 <div class="mx-auto max-w-3xl px-6 py-16">
 	<header class="space-y-2">

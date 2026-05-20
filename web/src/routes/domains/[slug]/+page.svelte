@@ -4,7 +4,14 @@
 -->
 <script lang="ts">
 	import { page } from '$app/state';
+	import MetaTags from '$lib/seo/MetaTags.svelte';
 </script>
+
+<MetaTags
+	title={`Domain · ${page.params.slug}`}
+	description={`Datasets in the ${page.params.slug} domain on Taiwan Data Hub. Tier / format / license filters land in #2.5.`}
+	schemaType="CollectionPage"
+/>
 
 <div class="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
 	<h1 class="text-3xl font-bold tracking-tight text-neutral-900">

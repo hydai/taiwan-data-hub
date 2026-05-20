@@ -11,18 +11,17 @@
 	doesn't need to change when real counts arrive.
 -->
 <script lang="ts">
+	import MetaTags from '$lib/seo/MetaTags.svelte';
 	import DomainCard from './_DomainCard.svelte';
 
 	let { data } = $props();
 </script>
 
-<svelte:head>
-	<title>Domains · Taiwan Data Hub</title>
-	<meta
-		name="description"
-		content="Browse 20 domains of Taiwan public data — topical, meta, and horizontal slices for AI agents and analysts."
-	/>
-</svelte:head>
+<MetaTags
+	title="Domains"
+	description="Browse 20 domains of Taiwan public data — topical, meta, and horizontal slices for AI agents and analysts."
+	schemaType="CollectionPage"
+/>
 
 <div class="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
 	<header class="mb-10 max-w-3xl">
