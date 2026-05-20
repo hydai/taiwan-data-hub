@@ -16,14 +16,18 @@ use mcp_core::rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
+use object_store::{LocalFsObjectStore, ObjectStore, S3Credentials, S3ObjectStore};
 use serde::Serialize;
+use std::sync::Arc;
 use storage::Storage;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tools_data::ObjectStoreRouter;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use url::Url;
 
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_SHA: &str = env!("GATEWAY_GIT_SHA");
@@ -212,12 +216,99 @@ async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBui
     match Storage::connect(&url).await {
         Ok(storage) => {
             tracing::info!("DATABASE_URL connected; registering DB-backed tools");
-            tools_data::register_db_tools(builder, storage)
+            let router = build_object_store_router();
+            tools_data::register_db_tools(builder, storage, router)
         }
         Err(e) => {
             tracing::warn!(error = %e, "DATABASE_URL set but Storage::connect failed; DB tools disabled");
             builder
         }
+    }
+}
+
+/// Assemble the `ObjectStoreRouter` from environment variables.
+///
+/// Both backends are independently optional — the gateway can run
+/// without either (the tool will then surface a "no backend
+/// configured" error) and personal-mode installs without S3 set up
+/// only the local-FS backend.
+///
+/// Env knobs:
+///
+/// - `OBJECT_STORE_BASE_URL` + `OBJECT_STORE_SIGNING_SECRET` →
+///   `LocalFsObjectStore` for `file://` URIs.
+/// - `S3_ENDPOINT` + `S3_REGION` + `S3_ACCESS_KEY_ID` +
+///   `S3_SECRET_ACCESS_KEY` (+ optional `S3_SESSION_TOKEN`) →
+///   `S3ObjectStore` for `s3://` URIs.
+fn build_object_store_router() -> ObjectStoreRouter {
+    let mut router = ObjectStoreRouter::new();
+
+    if let (Some(base), Some(secret)) = (
+        non_empty_env("OBJECT_STORE_BASE_URL"),
+        non_empty_env("OBJECT_STORE_SIGNING_SECRET"),
+    ) {
+        match Url::parse(&base) {
+            Ok(base_url) => match LocalFsObjectStore::new(base_url, secret.into_bytes()) {
+                Ok(store) => {
+                    tracing::info!("local-fs object store wired (file:// URIs)");
+                    router = router.with_local_fs(Arc::new(store) as Arc<dyn ObjectStore>);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "OBJECT_STORE_* set but LocalFs init failed");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "OBJECT_STORE_BASE_URL is not a valid URL");
+            }
+        }
+    }
+
+    if let (Some(endpoint), Some(region), Some(key), Some(secret)) = (
+        non_empty_env("S3_ENDPOINT"),
+        non_empty_env("S3_REGION"),
+        non_empty_env("S3_ACCESS_KEY_ID"),
+        non_empty_env("S3_SECRET_ACCESS_KEY"),
+    ) {
+        match Url::parse(&endpoint) {
+            Ok(endpoint_url) => {
+                let creds = S3Credentials {
+                    access_key_id: key,
+                    secret_access_key: secret,
+                    session_token: non_empty_env("S3_SESSION_TOKEN"),
+                };
+                match S3ObjectStore::new(endpoint_url, region, creds) {
+                    Ok(store) => {
+                        tracing::info!("s3 object store wired (s3:// URIs)");
+                        router = router.with_s3(Arc::new(store) as Arc<dyn ObjectStore>);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "S3_* set but S3ObjectStore init failed");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "S3_ENDPOINT is not a valid URL");
+            }
+        }
+    }
+
+    router
+}
+
+/// Read an env var, trim whitespace, and return `Some(value)` only
+/// when the result is non-empty. An empty string from
+/// `std::env::var` (set but blank) would otherwise be wired into the
+/// store as if it were a real credential — producing unusable
+/// signatures and a misleading "wired" log line at boot. We treat
+/// "set but blank" the same as "unset".
+fn non_empty_env(key: &str) -> Option<String> {
+    let raw = std::env::var(key).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        tracing::warn!(env = key, "environment variable is set but blank; ignoring");
+        None
+    } else {
+        Some(trimmed.to_owned())
     }
 }
 

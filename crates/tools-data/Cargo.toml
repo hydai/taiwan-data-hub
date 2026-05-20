@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 mcp-core = { path = "../mcp-core" }
+object-store = { path = "../object-store" }
 storage = { path = "../storage" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -25,10 +26,16 @@ serde_json = { workspace = true }
 serde_yml = { workspace = true }
 sqlparser = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+# Enumerate every Tokio module tools-data uses in non-test code so the
+# crate compiles even when the workspace default feature set drifts:
+#   - `sync`  — `tokio::sync::Mutex` / `OwnedMutexGuard` (materialize_dataset)
+#   - `time`  — `tokio::time::timeout`               (query_rows)
+#   - `rt`    — `tokio::task::spawn_blocking`        (query_rows)
+# Tests pull in extra features (`macros`, `rt-multi-thread`) via dev-deps.
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time"] }

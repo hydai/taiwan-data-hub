@@ -60,7 +60,16 @@ async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBui
     match Storage::connect(&url).await {
         Ok(storage) => {
             tracing::info!("DATABASE_URL connected; registering DB-backed tools");
-            tools_data::register_db_tools(builder, storage)
+            // stdio shim has no HTTP serving path, so LocalFs signed
+            // URLs aren't useful here. An empty router lets
+            // materialize_dataset register; first call will surface
+            // a clear "no backend configured" error rather than
+            // panicking. S3-backed deployments would set
+            // S3_ENDPOINT/etc the same way the gateway does — left
+            // as a follow-up if anyone actually runs stdio against
+            // a real cluster.
+            let router = tools_data::ObjectStoreRouter::new();
+            tools_data::register_db_tools(builder, storage, router)
         }
         Err(e) => {
             tracing::warn!(error = %e, "DATABASE_URL set but Storage::connect failed; DB tools disabled");

@@ -5,6 +5,7 @@ members = [
     "crates/mcp-stdio",
     "crates/etl-worker",
     "crates/mcp-core",
+    "crates/object-store",
     "crates/tools-utility",
     "crates/tools-data",
     "crates/connectors",
@@ -66,6 +67,13 @@ sqlparser = { version = "0.60.0", features = ["visitor"] }
 # binary builds; `sha2` 0.10 is small, well-audited, and already
 # pulled in transitively via reqwest's TLS chain.
 sha2 = "0.10"
+# Used by `object-store` for:
+#  - LocalFsObjectStore: HMAC-SHA256 download token signing
+#  - S3ObjectStore:      SigV4 GetObject presigning (HMAC chain)
+# `hex` renders the resulting tags in lowercase fixed-width form, the
+# encoding both LocalFs tokens and SigV4 signatures expect.
+hmac = "0.12"
+hex = "0.4"
 tempfile = "3.13"
 
 [workspace.lints.rust]
