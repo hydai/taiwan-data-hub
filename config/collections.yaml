@@ -1,0 +1,69 @@
+# Source of truth for the curated dataset "packs" surfaced on
+# /collections. Each entry groups 6 anchor datasets under a
+# curator's editorial framing.
+#
+# Schema (validated by web/src/lib/collections/load.ts):
+#   slug:            stable kebab-case identifier. No /collections/<slug>
+#                    route exists yet (/collections is index-only in
+#                    M2 #2.7); reserve this for a future per-collection
+#                    detail page if curated packs grow long-form notes.
+#   sort_order:      display order (lower first)
+#   name:            i18n map; zh-TW required, en recommended
+#   curator_note:    i18n map; zh-TW required, en recommended — one-paragraph
+#                    editorial framing shown on the card
+#   anchor_datasets: exactly 6 dataset slugs (validation rejects ≠ 6).
+#                    Slugs reference future dataset records that land in M3;
+#                    until then they're shown as monospace placeholders in
+#                    the UI and will resolve to real dataset cards once
+#                    /datasets/[id] is populated.
+#
+# Adding a new collection: append a block here; no code changes needed.
+# Removing one: just delete the block.
+
+- slug: education
+  sort_order: 10
+  name:
+    zh-TW: 教育精選
+    en: Education essentials
+  curator_note:
+    zh-TW: 從中小學名錄、大學統計、獎助學金到公共圖書館清單,涵蓋全臺教育核心資料的入門組合。
+    en: From school directories and university stats to scholarships and public libraries — a starter pack covering Taiwan's core education data.
+  anchor_datasets:
+    - school-directory
+    - university-statistics
+    - scholarship-grants
+    - student-loan-records
+    - public-library-list
+    - education-budget-breakdown
+
+- slug: healthcare
+  sort_order: 20
+  name:
+    zh-TW: 醫療健康
+    en: Healthcare & public health
+  curator_note:
+    zh-TW: 醫療院所、疫苗接種、食品安全召回、藥品價格與健檢資源 ── 公共衛生監測與消費者選擇的關鍵資料。
+    en: Hospitals, vaccinations, food-safety recalls, drug pricing, and check-up resources — the data behind public-health monitoring and informed consumer choice.
+  anchor_datasets:
+    - hospital-directory
+    - vaccination-coverage
+    - food-safety-recalls
+    - drug-price-list
+    - health-checkup-uptake
+    - clinic-locations
+
+- slug: tourism
+  sort_order: 30
+  name:
+    zh-TW: 觀光旅遊
+    en: Tourism & travel
+  curator_note:
+    zh-TW: 觀光景點、旅宿、大眾運輸時刻、即時氣象、節慶活動、夜市清單 ── 規劃在地行程或開發旅遊應用的起手包。
+    en: Tourist sites, lodging, public-transport schedules, real-time weather, festivals, and night-market listings — the starter pack for planning local trips or building travel apps.
+  anchor_datasets:
+    - tourist-attractions
+    - hotel-and-lodging
+    - transport-timetables
+    - realtime-weather
+    - festival-calendar
+    - night-market-list
