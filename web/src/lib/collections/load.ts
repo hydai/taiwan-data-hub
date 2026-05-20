@@ -3,9 +3,12 @@ import collectionsYaml from '../../../../config/collections.yaml?raw';
 import type { Collection } from './types';
 
 /**
- * Slug regex — same shape as the domains validator + the Python
- * regen script. Kept in lockstep so a slug that round-trips through
- * one validator passes the other.
+ * Slug regex — same kebab-case convention as `config/domains.yaml`
+ * (enforced there by both this TypeScript validator and
+ * `scripts/regen-domain-seed.py`). Collections don't ship a Python
+ * regen script of their own because the YAML doesn't seed a database
+ * table yet, but using the identical shape keeps both surfaces
+ * consistent and easy to audit.
  */
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -42,16 +45,30 @@ function assertValidCollections(value: unknown): asserts value is Collection[] {
 			throw new Error(`config/collections.yaml: duplicate slug "${r.slug}"`);
 		}
 		seenSlugs.add(r.slug);
-		if (typeof r.sort_order !== 'number') {
-			throw new Error(`config/collections.yaml (${tag}): sort_order must be a number`);
+		// `typeof === 'number'` admits NaN and Infinity (YAML can parse
+		// .nan / .inf), both of which make the downstream sort
+		// (a.sort_order - b.sort_order) return NaN and produce undefined
+		// ordering. Number.isFinite excludes both.
+		if (typeof r.sort_order !== 'number' || !Number.isFinite(r.sort_order)) {
+			throw new Error(`config/collections.yaml (${tag}): sort_order must be a finite number`);
 		}
 		const name = r.name as Record<string, unknown> | undefined;
 		if (!name || typeof name['zh-TW'] !== 'string' || name['zh-TW'].length === 0) {
 			throw new Error(`config/collections.yaml (${tag}): name['zh-TW'] is required`);
 		}
+		if (name.en !== undefined && (typeof name.en !== 'string' || name.en.length === 0)) {
+			throw new Error(
+				`config/collections.yaml (${tag}): name.en must be a non-empty string when present`
+			);
+		}
 		const note = r.curator_note as Record<string, unknown> | undefined;
 		if (!note || typeof note['zh-TW'] !== 'string' || note['zh-TW'].length === 0) {
 			throw new Error(`config/collections.yaml (${tag}): curator_note['zh-TW'] is required`);
+		}
+		if (note.en !== undefined && (typeof note.en !== 'string' || note.en.length === 0)) {
+			throw new Error(
+				`config/collections.yaml (${tag}): curator_note.en must be a non-empty string when present`
+			);
 		}
 		const anchors = r.anchor_datasets;
 		if (!Array.isArray(anchors) || anchors.length !== REQUIRED_ANCHOR_COUNT) {
