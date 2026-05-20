@@ -90,7 +90,7 @@
 			onclick={onToggleMenu}
 			aria-label={isMenuOpen ? 'Close menu' : 'Open menu'}
 			aria-expanded={isMenuOpen}
-			aria-controls="mobile-menu"
+			aria-haspopup="dialog"
 			class="inline-flex h-10 w-10 items-center justify-center rounded-md text-neutral-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none md:hidden"
 		>
 			{#if isMenuOpen}
