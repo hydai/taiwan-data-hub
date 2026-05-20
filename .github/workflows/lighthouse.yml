@@ -68,7 +68,8 @@ jobs:
       # `lhci autorun` reads web/lighthouserc.json:
       #   - starts `node build/index.js` (the adapter-node bundle)
       #   - waits for "Listening on" in stdout
-      #   - runs Lighthouse 3x per URL on `/` and /datasets/sample-dataset
+      #   - runs Lighthouse 3x per URL on `/` and a real dataset
+      #     detail page from config/datasets.yaml
       #   - asserts the budgets above; non-zero exit on any failure
       #   - dumps HTML + JSON reports to web/lhci-reports/
       #

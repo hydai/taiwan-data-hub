@@ -1,0 +1,567 @@
+# Source of truth for the dataset records surfaced on /datasets/[id]
+# and /domains/[slug] until the storage / ETL layer (M3) populates the
+# real Postgres tables. The marketplace UI reads from this YAML via
+# `web/src/lib/datasets/load.ts`.
+#
+# Schema (validated at module load by load.ts):
+#   slug:           stable kebab-case identifier, also the URL segment
+#   domain_slug:    FK into config/domains.yaml — must exist there
+#   sort_order:     finite number, lower first within a domain
+#   name:           i18n map; zh-TW required, en recommended
+#   description:    i18n map; zh-TW required, en recommended
+#   tier:           one of gold | silver | bronze (popularity x authority)
+#   format:         one of csv | json | geojson | xlsx | parquet | xml
+#   license:        free-form; conventional values include
+#                   "CC-BY 4.0", "CC0", "OGL Taiwan 1.0", "Public Domain"
+#   source:
+#     publisher:    issuing agency, zh-TW
+#     url:          canonical landing page on the publisher's site
+#   updated:        one of daily | weekly | monthly | quarterly | yearly
+#   resources:      list of { kind, label, url }
+#                   kind ∈ { download | api }; label is i18n-free for now
+#
+# Adding a dataset: append a block here. The cross-reference checks in
+# load.ts enforce that (a) domain_slug exists in config/domains.yaml
+# and (b) every anchor slug in config/collections.yaml exists here, so
+# this seed cannot silently drift from the other two YAMLs.
+
+# ── education-research (anchored by #2.7 education collection) ────────
+- slug: school-directory
+  domain_slug: education-research
+  sort_order: 10
+  name:
+    zh-TW: 全國中小學名錄
+    en: National K-12 school directory
+  description:
+    zh-TW: 全臺公私立中小學基本資料 ── 校名、地址、學區、聯絡方式。
+    en: Basic info for all Taiwan K-12 public and private schools — name, address, district, contact.
+  tier: gold
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 教育部統計處
+    url: https://data.gov.tw/dataset/6201
+  updated: monthly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/6201/resource/csv
+
+- slug: university-statistics
+  domain_slug: education-research
+  sort_order: 20
+  name:
+    zh-TW: 大學校院統計
+    en: Higher-education institution statistics
+  description:
+    zh-TW: 全臺大學校院學生數、教師數、科系與學位授予統計。
+    en: Student / faculty counts, programs, and degrees granted across all Taiwan universities.
+  tier: gold
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 教育部統計處
+    url: https://stats.moe.gov.tw/
+  updated: yearly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://stats.moe.gov.tw/files/main_statistics/universities.csv
+
+- slug: scholarship-grants
+  domain_slug: education-research
+  sort_order: 30
+  name:
+    zh-TW: 獎助學金核定資料
+    en: Scholarship awards
+  description:
+    zh-TW: 教育部及各校獎助學金核定名單與金額。
+    en: MoE and university scholarship grants — recipients and award amounts.
+  tier: silver
+  format: csv
+  license: CC-BY 4.0
+  source:
+    publisher: 教育部高教司
+    url: https://data.gov.tw/dataset/scholarship
+  updated: quarterly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/scholarship/resource/csv
+
+- slug: student-loan-records
+  domain_slug: education-research
+  sort_order: 40
+  name:
+    zh-TW: 就學貸款核貸統計
+    en: Student loan disbursements
+  description:
+    zh-TW: 就學貸款核貸件數、金額及戶數統計,按學年度與學制分。
+    en: Student loan counts, amounts, and households by academic year and level.
+  tier: silver
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 教育部學生事務及特殊教育司
+    url: https://data.gov.tw/dataset/loan
+  updated: yearly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/loan/resource/csv
+
+- slug: public-library-list
+  domain_slug: education-research
+  sort_order: 50
+  name:
+    zh-TW: 公共圖書館名錄
+    en: Public library directory
+  description:
+    zh-TW: 全臺公共圖書館位置、開放時間、藏書量、聯絡資訊。
+    en: All Taiwan public libraries — location, hours, collection size, contact.
+  tier: silver
+  format: geojson
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 教育部終身教育司
+    url: https://data.gov.tw/dataset/library
+  updated: quarterly
+  resources:
+    - kind: download
+      label: GeoJSON
+      url: https://data.gov.tw/dataset/library/resource/geojson
+
+- slug: education-budget-breakdown
+  domain_slug: education-research
+  sort_order: 60
+  name:
+    zh-TW: 教育預算與決算
+    en: Education budget breakdown
+  description:
+    zh-TW: 各級政府教育預算與決算分項統計,含人事、設備、補助。
+    en: Education budget and final accounts by government level and category.
+  tier: bronze
+  format: xlsx
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 行政院主計總處
+    url: https://data.gov.tw/dataset/edu-budget
+  updated: yearly
+  resources:
+    - kind: download
+      label: Excel (.xlsx)
+      url: https://data.gov.tw/dataset/edu-budget/resource/xlsx
+
+# ── health-food (anchored by #2.7 healthcare collection) ─────────────
+- slug: hospital-directory
+  domain_slug: health-food
+  sort_order: 10
+  name:
+    zh-TW: 醫療院所名錄
+    en: Medical institution directory
+  description:
+    zh-TW: 全臺醫療院所名錄,含醫院、診所、藥局,標示分級與科別。
+    en: Directory of Taiwan medical institutions — hospitals, clinics, pharmacies, with tier and specialty.
+  tier: gold
+  format: geojson
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部
+    url: https://data.gov.tw/dataset/hospital
+  updated: monthly
+  resources:
+    - kind: download
+      label: GeoJSON
+      url: https://data.gov.tw/dataset/hospital/resource/geojson
+    - kind: api
+      label: REST API
+      url: https://api.nhi.gov.tw/hospitals
+
+- slug: vaccination-coverage
+  domain_slug: health-food
+  sort_order: 20
+  name:
+    zh-TW: 疫苗接種覆蓋率
+    en: Vaccination coverage
+  description:
+    zh-TW: 各疫苗接種覆蓋率,按縣市、年齡層、疫苗別分。
+    en: Vaccination coverage by city, age group, and vaccine type.
+  tier: gold
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部疾病管制署
+    url: https://data.gov.tw/dataset/vaccine
+  updated: weekly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/vaccine/resource/csv
+
+- slug: food-safety-recalls
+  domain_slug: health-food
+  sort_order: 30
+  name:
+    zh-TW: 食品安全召回紀錄
+    en: Food safety recalls
+  description:
+    zh-TW: 食品安全召回案件,含產品、業者、原因、處置。
+    en: Food safety recall events — product, vendor, reason, action.
+  tier: silver
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部食品藥物管理署
+    url: https://data.gov.tw/dataset/recall
+  updated: daily
+  resources:
+    - kind: download
+      label: JSON
+      url: https://data.gov.tw/dataset/recall/resource/json
+    - kind: api
+      label: REST API
+      url: https://api.fda.gov.tw/recalls
+
+- slug: drug-price-list
+  domain_slug: health-food
+  sort_order: 40
+  name:
+    zh-TW: 健保藥品價格
+    en: NHI drug pricing
+  description:
+    zh-TW: 全民健康保險藥品給付價格清單,按 ATC 分類。
+    en: National Health Insurance drug reimbursement prices, ATC classification.
+  tier: silver
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部中央健康保險署
+    url: https://data.gov.tw/dataset/drug-price
+  updated: monthly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/drug-price/resource/csv
+
+- slug: health-checkup-uptake
+  domain_slug: health-food
+  sort_order: 50
+  name:
+    zh-TW: 成人健康檢查覆蓋率
+    en: Adult health checkup uptake
+  description:
+    zh-TW: 成人健康檢查接受率,按縣市、年齡、性別分。
+    en: Adult health checkup participation rates by city, age, and gender.
+  tier: bronze
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部國民健康署
+    url: https://data.gov.tw/dataset/checkup
+  updated: quarterly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/checkup/resource/csv
+
+- slug: clinic-locations
+  domain_slug: health-food
+  sort_order: 60
+  name:
+    zh-TW: 特約診所空間分布
+    en: Contracted clinic locations
+  description:
+    zh-TW: 健保特約診所地理分布,可疊加人口密度檢視醫療資源配置。
+    en: Geographic distribution of NHI-contracted clinics; overlay-able with population density for resource allocation.
+  tier: silver
+  format: geojson
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 衛生福利部中央健康保險署
+    url: https://data.gov.tw/dataset/clinic-map
+  updated: monthly
+  resources:
+    - kind: download
+      label: GeoJSON
+      url: https://data.gov.tw/dataset/clinic-map/resource/geojson
+
+# ── culture-tourism-sport (anchored by #2.7 tourism collection) ──────
+- slug: tourist-attractions
+  domain_slug: culture-tourism-sport
+  sort_order: 10
+  name:
+    zh-TW: 觀光景點清單
+    en: Tourist attractions
+  description:
+    zh-TW: 全臺觀光景點地理資料、開放時間、票價、簡介。
+    en: Taiwan tourist sites — location, hours, ticket prices, descriptions.
+  tier: gold
+  format: geojson
+  license: CC-BY 4.0
+  source:
+    publisher: 交通部觀光署
+    url: https://data.gov.tw/dataset/attractions
+  updated: monthly
+  resources:
+    - kind: download
+      label: GeoJSON
+      url: https://data.gov.tw/dataset/attractions/resource/geojson
+    - kind: api
+      label: REST API
+      url: https://api.taiwan.net.tw/attractions
+
+- slug: hotel-and-lodging
+  domain_slug: culture-tourism-sport
+  sort_order: 20
+  name:
+    zh-TW: 旅宿業名錄
+    en: Hotel and lodging directory
+  description:
+    zh-TW: 合法旅館、民宿、青年旅館清單,含等級與容量。
+    en: Licensed hotels, B&Bs, and hostels — class and capacity.
+  tier: silver
+  format: csv
+  license: CC-BY 4.0
+  source:
+    publisher: 交通部觀光署
+    url: https://data.gov.tw/dataset/hotels
+  updated: quarterly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/hotels/resource/csv
+
+- slug: transport-timetables
+  domain_slug: transport
+  sort_order: 10
+  name:
+    zh-TW: 大眾運輸時刻表
+    en: Public-transport timetables
+  description:
+    zh-TW: 臺鐵、高鐵、捷運、客運時刻表,GTFS 格式。
+    en: TRA, HSR, metro, and intercity bus schedules in GTFS format.
+  tier: gold
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 交通部公共運輸及採購司
+    url: https://tdx.transportdata.tw/
+  updated: daily
+  resources:
+    - kind: api
+      label: TDX REST API
+      url: https://tdx.transportdata.tw/api/basic/v2/Rail
+
+- slug: realtime-weather
+  domain_slug: environment
+  sort_order: 10
+  name:
+    zh-TW: 即時氣象觀測
+    en: Real-time weather observations
+  description:
+    zh-TW: 全臺氣象站即時觀測 ── 溫度、降水、風速、能見度。
+    en: Live observations from all Taiwan weather stations — temperature, precipitation, wind, visibility.
+  tier: gold
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 交通部中央氣象署
+    url: https://opendata.cwa.gov.tw/
+  updated: daily
+  resources:
+    - kind: api
+      label: CWA Open Data REST API
+      url: https://opendata.cwa.gov.tw/api/v1/rest
+
+- slug: festival-calendar
+  domain_slug: culture-tourism-sport
+  sort_order: 30
+  name:
+    zh-TW: 全臺節慶活動行事曆
+    en: Festival event calendar
+  description:
+    zh-TW: 中央與地方政府節慶活動行事曆,含地點、日期、簡介。
+    en: National and local government festival schedule — location, date, description.
+  tier: bronze
+  format: json
+  license: CC-BY 4.0
+  source:
+    publisher: 文化部
+    url: https://data.gov.tw/dataset/festivals
+  updated: monthly
+  resources:
+    - kind: download
+      label: JSON
+      url: https://data.gov.tw/dataset/festivals/resource/json
+
+- slug: night-market-list
+  domain_slug: culture-tourism-sport
+  sort_order: 40
+  name:
+    zh-TW: 全臺夜市清單
+    en: Night market directory
+  description:
+    zh-TW: 全臺夜市位置、營業時間、特色小吃。
+    en: All Taiwan night markets — location, hours, signature foods.
+  tier: bronze
+  format: csv
+  license: CC-BY 4.0
+  source:
+    publisher: 交通部觀光署
+    url: https://data.gov.tw/dataset/night-markets
+  updated: yearly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/night-markets/resource/csv
+
+# ── extras across other domains for filter variety ───────────────────
+- slug: realestate-transactions
+  domain_slug: realestate-land
+  sort_order: 10
+  name:
+    zh-TW: 實價登錄不動產交易
+    en: Real-estate transaction prices
+  description:
+    zh-TW: 全臺不動產買賣、預售屋、租賃實價登錄案件。
+    en: Reported sale, presale, and rental real-estate transactions across Taiwan.
+  tier: gold
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 內政部地政司
+    url: https://lvr.land.moi.gov.tw/
+  updated: weekly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://lvr.land.moi.gov.tw/N11/realdata.csv
+
+- slug: land-value-notice
+  domain_slug: realestate-land
+  sort_order: 20
+  name:
+    zh-TW: 公告土地現值
+    en: Public-notice land values
+  description:
+    zh-TW: 各縣市公告土地現值,按地段、年度。
+    en: Official land valuations by district and year.
+  tier: silver
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 內政部地政司
+    url: https://data.gov.tw/dataset/land-value
+  updated: yearly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/land-value/resource/csv
+
+- slug: procurement-awards
+  domain_slug: procurement-subsidy
+  sort_order: 10
+  name:
+    zh-TW: 政府採購得標公告
+    en: Awarded government procurement contracts
+  description:
+    zh-TW: 公部門採購案得標廠商、金額、機關。
+    en: Government procurement awards — winning vendor, amount, contracting agency.
+  tier: gold
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 行政院公共工程委員會
+    url: https://web.pcc.gov.tw/prkms/
+  updated: daily
+  resources:
+    - kind: api
+      label: REST API
+      url: https://web.pcc.gov.tw/prkms/api/awards
+
+- slug: legislative-bills
+  domain_slug: legislature
+  sort_order: 10
+  name:
+    zh-TW: 立法院議案資料
+    en: Legislative Yuan bills
+  description:
+    zh-TW: 立法院提案、審議、表決紀錄。
+    en: Bill proposals, committee review, and floor votes from the Legislative Yuan.
+  tier: silver
+  format: json
+  license: Public Domain
+  source:
+    publisher: 立法院議事及法制局
+    url: https://data.ly.gov.tw/
+  updated: daily
+  resources:
+    - kind: api
+      label: REST API
+      url: https://data.ly.gov.tw/odw/ID9.json
+
+- slug: government-budget
+  domain_slug: public-finance
+  sort_order: 10
+  name:
+    zh-TW: 中央政府總預算
+    en: Central government budget
+  description:
+    zh-TW: 中央政府年度總預算 ── 歲入歲出、機關別、政事別。
+    en: Annual central-government budget — revenue, expenditure, by agency and function.
+  tier: gold
+  format: xlsx
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 行政院主計總處
+    url: https://www.dgbas.gov.tw/
+  updated: yearly
+  resources:
+    - kind: download
+      label: Excel (.xlsx)
+      url: https://www.dgbas.gov.tw/public/budget.xlsx
+
+- slug: visa-statistics
+  domain_slug: foreign-affairs
+  sort_order: 10
+  name:
+    zh-TW: 簽證核發統計
+    en: Visa issuance statistics
+  description:
+    zh-TW: 各駐外館處簽證核發件數,按國籍、簽證類別與年月分。
+    en: Visa issuances by Taiwan's overseas offices — by nationality, visa class, year/month.
+  tier: silver
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 外交部領事事務局
+    url: https://data.gov.tw/dataset/visa
+  updated: monthly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/visa/resource/csv
+
+- slug: crop-prices
+  domain_slug: agriculture-fisheries
+  sort_order: 10
+  name:
+    zh-TW: 農產品批發市場交易行情
+    en: Wholesale crop prices
+  description:
+    zh-TW: 全臺農產品批發市場每日交易量與價格,可用於物價監測與供需分析。
+    en: Daily wholesale volumes and prices for agricultural products across Taiwan — useful for price monitoring and supply/demand analysis.
+  tier: gold
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 農業部農糧署
+    url: https://data.gov.tw/dataset/agri-price
+  updated: daily
+  resources:
+    - kind: api
+      label: REST API
+      url: https://data.gov.tw/api/v2/agri-prices
+    - kind: download
+      label: JSON
+      url: https://data.gov.tw/dataset/agri-price/resource/json

@@ -25,7 +25,7 @@
 				<p class="mt-2 text-sm text-neutral-600">
 					Open source under
 					<a
-						class="text-primary-700 hover:underline"
+						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/blob/main/LICENSE">Apache-2.0</a
 					>.
 				</p>
@@ -35,7 +35,7 @@
 				<h2 id="footer-source" class="text-sm font-semibold text-neutral-900">Source</h2>
 				<p class="mt-2 text-sm text-neutral-600">
 					<a
-						class="text-primary-700 hover:underline"
+						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub">github.com/hydai/taiwan-data-hub</a
 					>
 				</p>
@@ -46,7 +46,7 @@
 				<p class="mt-2 text-sm text-neutral-600">
 					Bug reports and feature requests via
 					<a
-						class="text-primary-700 hover:underline"
+						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/issues">GitHub Issues</a
 					>.
 				</p>
