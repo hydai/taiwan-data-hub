@@ -35,6 +35,22 @@ function asNonEmptyString(value: unknown): string | null {
 	return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+/**
+ * URLs in the YAML end up rendered into `<a href={...} target="_blank">`.
+ * Restricting the protocol to http/https blocks `javascript:` and
+ * `data:` URL injection vectors — both of which would execute in the
+ * page context if a contributor accidentally (or maliciously) embedded
+ * one in a seed entry.
+ */
+function isSafeHttpUrl(value: string): boolean {
+	try {
+		const u = new URL(value);
+		return u.protocol === 'http:' || u.protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
 function assertValidResource(
 	resource: unknown,
 	tag: string,
@@ -54,9 +70,9 @@ function assertValidResource(
 			`config/datasets.yaml (${tag}): resources[${idx}].label must be a non-empty string`
 		);
 	}
-	if (!asNonEmptyString(r.url)) {
+	if (!asNonEmptyString(r.url) || !isSafeHttpUrl(r.url as string)) {
 		throw new Error(
-			`config/datasets.yaml (${tag}): resources[${idx}].url must be a non-empty string`
+			`config/datasets.yaml (${tag}): resources[${idx}].url must be a non-empty http(s) URL`
 		);
 	}
 }
@@ -122,10 +138,11 @@ function assertValidDatasets(value: unknown): asserts value is Dataset[] {
 			throw new Error(`config/datasets.yaml (${tag}): license must be a non-empty string`);
 		}
 		const source = r.source as Record<string, unknown> | undefined;
-		if (!source || !asNonEmptyString(source.publisher) || !asNonEmptyString(source.url)) {
-			throw new Error(
-				`config/datasets.yaml (${tag}): source.publisher and source.url are required`
-			);
+		if (!source || !asNonEmptyString(source.publisher)) {
+			throw new Error(`config/datasets.yaml (${tag}): source.publisher is required`);
+		}
+		if (!asNonEmptyString(source.url) || !isSafeHttpUrl(source.url as string)) {
+			throw new Error(`config/datasets.yaml (${tag}): source.url must be a non-empty http(s) URL`);
 		}
 		if (typeof r.updated !== 'string' || !VALID_UPDATE_FREQS.has(r.updated as UpdateFrequency)) {
 			throw new Error(
@@ -135,8 +152,17 @@ function assertValidDatasets(value: unknown): asserts value is Dataset[] {
 		if (!Array.isArray(r.resources) || r.resources.length === 0) {
 			throw new Error(`config/datasets.yaml (${tag}): resources must be a non-empty array`);
 		}
+		// The detail page keys `{#each resources as r (r.url)}` so a
+		// duplicate URL within one dataset would cause keyed-each
+		// collisions and subtle DOM-reuse bugs.
+		const seenResourceUrls = new Set<string>();
 		for (let j = 0; j < r.resources.length; j += 1) {
 			assertValidResource(r.resources[j], tag, j);
+			const url = (r.resources[j] as DatasetResource).url;
+			if (seenResourceUrls.has(url)) {
+				throw new Error(`config/datasets.yaml (${tag}): duplicate resources[].url "${url}"`);
+			}
+			seenResourceUrls.add(url);
 		}
 	}
 }

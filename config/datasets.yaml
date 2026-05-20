@@ -520,3 +520,48 @@
     - kind: download
       label: Excel (.xlsx)
       url: https://www.dgbas.gov.tw/public/budget.xlsx
+
+- slug: visa-statistics
+  domain_slug: foreign-affairs
+  sort_order: 10
+  name:
+    zh-TW: 簽證核發統計
+    en: Visa issuance statistics
+  description:
+    zh-TW: 各駐外館處簽證核發件數,按國籍、簽證類別與年月分。
+    en: Visa issuances by Taiwan's overseas offices — by nationality, visa class, year/month.
+  tier: silver
+  format: csv
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 外交部領事事務局
+    url: https://data.gov.tw/dataset/visa
+  updated: monthly
+  resources:
+    - kind: download
+      label: CSV (UTF-8)
+      url: https://data.gov.tw/dataset/visa/resource/csv
+
+- slug: crop-prices
+  domain_slug: agriculture-fisheries
+  sort_order: 10
+  name:
+    zh-TW: 農產品批發市場交易行情
+    en: Wholesale crop prices
+  description:
+    zh-TW: 全臺農產品批發市場每日交易量與價格,可用於物價監測與供需分析。
+    en: Daily wholesale volumes and prices for agricultural products across Taiwan — useful for price monitoring and supply/demand analysis.
+  tier: gold
+  format: json
+  license: OGL Taiwan 1.0
+  source:
+    publisher: 農業部農糧署
+    url: https://data.gov.tw/dataset/agri-price
+  updated: daily
+  resources:
+    - kind: api
+      label: REST API
+      url: https://data.gov.tw/api/v2/agri-prices
+    - kind: download
+      label: JSON
+      url: https://data.gov.tw/dataset/agri-price/resource/json

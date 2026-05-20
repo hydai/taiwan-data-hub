@@ -48,6 +48,18 @@
 			copied = false;
 		}
 	}
+
+	// Clear the pending "Copied" timer on unmount so navigation away
+	// within the 2-second window doesn't leave a phantom closure
+	// alive holding refs into the unmounted component.
+	$effect(() => {
+		return () => {
+			if (copyTimer) {
+				clearTimeout(copyTimer);
+				copyTimer = null;
+			}
+		};
+	});
 </script>
 
 <div class="rounded-lg border border-neutral-200 bg-neutral-50 p-5">
