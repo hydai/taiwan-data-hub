@@ -17,6 +17,25 @@
 	// raw mutation in #7.x.
 	let locale = $state<Locale>('zh-TW');
 	const setLocale = (next: Locale) => (locale = next);
+
+	// If the user opens the burger menu on mobile and then resizes /
+	// rotates to ≥md, MobileMenu hides itself via `md:hidden` but its
+	// `$effect` (body-scroll lock + ESC/Tab trap) stays armed because
+	// isMenuOpen is still true. Close the menu when crossing into the
+	// desktop breakpoint so scroll lock is released and the burger
+	// returns to a clean state on rotate-back-to-mobile.
+	//
+	// The effect reads no $state (closeMenu only writes), so Svelte
+	// tracks zero deps and the listener mounts/unmounts once. 768px is
+	// the Tailwind 4 `md` default; keep these in lockstep.
+	$effect(() => {
+		const mql = window.matchMedia('(min-width: 768px)');
+		const handler = (e: MediaQueryListEvent) => {
+			if (e.matches) closeMenu();
+		};
+		mql.addEventListener('change', handler);
+		return () => mql.removeEventListener('change', handler);
+	});
 </script>
 
 <svelte:head><link rel="icon" href="/favicon.svg" /></svelte:head>
