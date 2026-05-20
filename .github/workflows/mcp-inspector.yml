@@ -1,0 +1,172 @@
+name: MCP Inspector
+
+# Validates the gateway's `/mcp` endpoint against
+# `@modelcontextprotocol/inspector` (#1.9). This is the deeper
+# protocol-level check that complements the dispatcher integration
+# tests in `crates/gateway/tests/mcp_integration.rs`: those go
+# through the dispatcher directly and bypass the JSON-RPC framing,
+# initialize handshake, and SSE upgrade paths that this workflow
+# exercises end-to-end.
+#
+# Triggers:
+#   - schedule: weekly cron catches Inspector / rmcp upgrades that
+#     break the contract even when no project code changed.
+#   - workflow_dispatch: manual re-run from the Actions UI.
+#   - pull_request: only when the MCP-shaped surface changes, so
+#     unrelated PRs aren't taxed by the slow E2E path.
+#
+# Security note: every step that consumes external input goes
+# through `env:` rather than `${{ ... }}` interpolation in `run:`
+# bodies, so an attacker who controls a PR title / branch name /
+# commit message can't smuggle shell into the workflow. The
+# workflow reads no untrusted github.event.* values into commands.
+
+on:
+  schedule:
+    # 06:00 UTC every Monday — picked to land before the workweek
+    # so a regression is visible when the team starts.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'crates/mcp-core/**'
+      - 'crates/gateway/**'
+      - 'crates/tools-data/**'
+      - 'crates/tools-utility/**'
+      - 'crates/storage/**'
+      - 'crates/object-store/**'
+      - 'crates/connectors/**'
+      - 'migrations/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/mcp-inspector.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-inspector-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  inspect:
+    name: Inspector against /mcp
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # Postgres 18 with the same image the testcontainers fixtures
+      # use. `health-cmd` lets the action wait for readiness before
+      # the build job consumes it.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # Bind to a high port so the workflow doesn't collide with
+      # anything the runner image might be serving.
+      GATEWAY_ADDR: 127.0.0.1:18080
+      MCP_ENDPOINT: http://127.0.0.1:18080/mcp
+      # The gateway's `/readyz` probe currently 503s whenever
+      # `DATABASE_URL` is set because the sqlx pool ping is still
+      # a TODO (see `dependency_ready` in gateway/src/main.rs).
+      # For the inspector workflow we just need "the HTTP server is
+      # listening"; `/healthz` answers that without depending on the
+      # readiness wiring. Swap back to `/readyz` once the real DB
+      # ping lands.
+      READY_ENDPOINT: http://127.0.0.1:18080/healthz
+      # Empty router is fine for the inspector smoke test: the
+      # tools register and the protocol surface is exercised; a
+      # real materialize_dataset call would surface "no backend
+      # configured", which Inspector treats as a tool-level error
+      # rather than a protocol-level failure.
+      RUST_LOG: warn,gateway=info
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-release
+          save-if: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install sqlx-cli
+        # Pin to the same sqlx major/minor the workspace uses so an
+        # upstream sqlx-cli release can't break this weekly cron run
+        # while no project code changed. Bump alongside the workspace
+        # sqlx version in `Cargo.toml`.
+        run: cargo install sqlx-cli --version ^0.8 --no-default-features --features rustls,postgres --locked
+
+      - name: Apply migrations
+        run: sqlx migrate run --source migrations
+
+      - name: Build gateway
+        run: cargo build --release --locked -p gateway
+
+      - name: Start gateway in background
+        run: |
+          # `&` backgrounds the gateway; we capture the PID to
+          # terminate it on cleanup. stdout/stderr are tee'd to a
+          # log so failures surface in the workflow summary.
+          ./target/release/gateway > gateway.log 2>&1 &
+          echo "GATEWAY_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for gateway to listen
+        run: |
+          # `/healthz` returns 200 once the axum router is bound;
+          # this is a process-up probe, not a deep readiness check.
+          # See the `READY_ENDPOINT` env comment for why we don't
+          # use `/readyz` here.
+          for i in $(seq 1 30); do
+            if curl --silent --fail "$READY_ENDPOINT"; then
+              echo "gateway listening after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not become reachable"; cat gateway.log; exit 1
+
+      - name: Run MCP Inspector CLI
+        # The Inspector CLI returns a non-zero exit code if the
+        # initialize / tools/list calls don't satisfy the MCP spec.
+        # `--cli` runs it in non-interactive mode (no browser);
+        # `--method tools/list` makes the run idempotent and fast.
+        #
+        # CLI shape mirrors what README.md documents for local
+        # verification: the server URL is a positional argument
+        # (not `--server-url`), and `--transport http` selects the
+        # streamable HTTP transport. Keeping the invocation aligned
+        # with the README means contributors can copy the workflow
+        # step to debug locally and vice-versa.
+        run: |
+          npx -y @modelcontextprotocol/inspector --cli \
+            "$MCP_ENDPOINT" --transport http \
+            --method tools/list
+
+      - name: Capture gateway log on failure
+        if: failure()
+        run: |
+          echo "=== gateway.log ==="
+          cat gateway.log || true
+
+      - name: Stop gateway
+        if: always()
+        run: |
+          if [ -n "${GATEWAY_PID:-}" ]; then
+            kill "$GATEWAY_PID" || true
+            wait "$GATEWAY_PID" 2>/dev/null || true
+          fi
