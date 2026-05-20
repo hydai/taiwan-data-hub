@@ -71,6 +71,13 @@ jobs:
       #   - runs Lighthouse 3x per URL on `/` and /datasets/sample-dataset
       #   - asserts the budgets above; non-zero exit on any failure
       #   - dumps HTML + JSON reports to web/lhci-reports/
+      #
+      # Known transitive: `@lhci/cli@0.15.1` pulls `chrome-launcher@0.13.4`
+      # which depends on `rimraf@3 -> glob@7` (deprecated). Tracked in
+      # https://github.com/hydai/taiwan-data-hub/issues/110 — accept for
+      # now because the package is dev-only, runs only inside this CI
+      # job, and never sees attacker-controlled input. Bump when
+      # upstream ships a release using glob@10+.
       - name: Run Lighthouse CI (collect + assert)
         run: pnpm --filter web exec lhci autorun
 
