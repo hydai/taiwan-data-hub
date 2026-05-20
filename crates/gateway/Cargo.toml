@@ -30,3 +30,17 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 anyhow = { workspace = true }
+
+# `tests/mcp_integration.rs` drives all 5 base MCP tools end-to-end
+# through the dispatcher against a real testcontainers-backed
+# Postgres. Brings in the same crates the binary wires at runtime
+# plus polars (for fixture Parquet) and connectors (for SourceId).
+[dev-dependencies]
+connectors = { path = "../connectors" }
+chrono = { workspace = true }
+polars = { workspace = true }
+sqlx = { workspace = true }
+tempfile = { workspace = true }
+testcontainers-modules = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+uuid = { workspace = true }
