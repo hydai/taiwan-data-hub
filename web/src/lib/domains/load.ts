@@ -8,16 +8,30 @@ import type { Domain, DomainCardData, DomainGroup, DomainKind } from './types';
 const VALID_KINDS: ReadonlySet<DomainKind> = new Set(['topical', 'meta', 'horizontal']);
 
 /**
+ * Kebab-case slug regex. Mirrors `SLUG_RE` in
+ * `scripts/regen-domain-seed.py` so this runtime guard catches the
+ * same shape of bad slug the Python regen script refuses.
+ */
+const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+
+/**
  * Narrows `parseYaml`'s `unknown` into `Domain[]` with field-level
  * checks. Throws an error pointing at `config/domains.yaml` on the
  * first malformed entry so a bad commit fails fast at module load
  * rather than at first request with a cryptic "cannot read property
  * 'zh-TW' of undefined".
+ *
+ * Slug validation is strict because slugs serve two invariants
+ * simultaneously: (a) URL routing via `resolve('/domains/[slug]')`
+ * and (b) Svelte's `{#each ... (key)}` keying. Duplicates would
+ * silently corrupt list reactivity; non-kebab slugs would break
+ * URLs.
  */
 function assertValidDomains(value: unknown): asserts value is Domain[] {
 	if (!Array.isArray(value)) {
 		throw new Error('config/domains.yaml: top-level value must be an array');
 	}
+	const seenSlugs = new Set<string>();
 	for (let i = 0; i < value.length; i += 1) {
 		const raw = value[i];
 		if (!raw || typeof raw !== 'object') {
@@ -28,6 +42,13 @@ function assertValidDomains(value: unknown): asserts value is Domain[] {
 		if (typeof r.slug !== 'string' || r.slug.length === 0) {
 			throw new Error(`config/domains.yaml[${i}]: slug must be a non-empty string`);
 		}
+		if (!SLUG_RE.test(r.slug)) {
+			throw new Error(`config/domains.yaml (${tag}): slug must be kebab-case (matches ${SLUG_RE})`);
+		}
+		if (seenSlugs.has(r.slug)) {
+			throw new Error(`config/domains.yaml: duplicate slug "${r.slug}"`);
+		}
+		seenSlugs.add(r.slug);
 		if (typeof r.kind !== 'string' || !VALID_KINDS.has(r.kind as DomainKind)) {
 			throw new Error(`config/domains.yaml (${tag}): kind must be one of topical|meta|horizontal`);
 		}

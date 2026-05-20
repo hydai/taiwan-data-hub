@@ -46,11 +46,16 @@
 				</span>
 			</div>
 
-			<ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+			<!--
+				role="list" preserves the list semantics that Tailwind's
+				preflight `list-style: none` strips on Safari. The <li>
+				stays a real layout box so AT correctly announces
+				"list, N items" — `display: contents` would drop that
+				announcement on WebKit.
+			-->
+			<ul role="list" class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
 				{#each group.domains as domain (domain.slug)}
-					<li class="contents">
-						<DomainCard {domain} />
-					</li>
+					<li><DomainCard {domain} /></li>
 				{/each}
 			</ul>
 		</section>

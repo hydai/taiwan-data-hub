@@ -35,7 +35,7 @@
 
 <a
 	href={resolve('/domains/[slug]', { slug: domain.slug })}
-	class="group flex flex-col gap-3 rounded-lg border border-neutral-200 bg-white p-5 transition-shadow hover:shadow-md focus:ring-2 focus:ring-primary-500 focus:outline-none"
+	class="group flex h-full flex-col gap-3 rounded-lg border border-neutral-200 bg-white p-5 transition-shadow hover:shadow-md focus:ring-2 focus:ring-primary-500 focus:outline-none"
 >
 	<div class="flex items-center gap-3">
 		<span class={`h-2.5 w-2.5 shrink-0 rounded-full ${KIND_DOT[domain.kind]}`} aria-hidden="true"
