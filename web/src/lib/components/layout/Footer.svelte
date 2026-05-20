@@ -41,7 +41,8 @@
 			</section>
 		</div>
 		<div class="mt-10 border-t border-neutral-200 pt-6 text-xs text-neutral-500">
-			© 2026 Taiwan Data Hub contributors — fully open source, self-hostable, no telemetry.
+			© 2026 Taiwan Data Hub contributors — fully open source, self-hostable, no client-side
+			tracking.
 		</div>
 	</div>
 </footer>
