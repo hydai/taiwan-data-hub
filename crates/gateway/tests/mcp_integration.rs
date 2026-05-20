@@ -173,7 +173,6 @@ impl Harness {
 
         let dispatcher = build_dispatcher(&storage);
 
-        let _ = domain_id; // already consumed by the upserts above
         Self {
             _container: container,
             _cache_dir: cache_dir,
