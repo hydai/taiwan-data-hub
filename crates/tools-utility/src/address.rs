@@ -11,8 +11,10 @@
 //!  - `alley` (`弄`) — numeric portion only
 //!  - `number` (`號`) — numeric portion only; handles `123`,
 //!    `123-1`, `123之5`
-//!  - `floor` (`樓` / `F` / `B1F`) — best-effort, last token; raw
-//!    digits or `B<n>` form without the suffix
+//!  - `floor` (`樓` / `F` / `B1F`) — best-effort; finds the *first*
+//!    floor-like token in the remaining cursor (typically the only
+//!    one, since floors appear after the number suffix). Returns
+//!    raw digits or `B<n>` form, without the suffix character.
 //!
 //! The normalised result is intentionally tolerant: any field the
 //! input doesn't have is `None`. This is a *segmentation*
@@ -120,9 +122,13 @@ pub fn normalize_address(input: &str) -> AddressParts {
         }
     }
 
-    // 3. Road (路/街/道). Greedy up to suffix, *but* only if the
-    // suffix is the first one we hit (we don't want a stray "段"
-    // upstream to steal road characters).
+    // 3. Road (路/街/道). Greedy up to the first road suffix we
+    // find. We don't pre-scan for stray 段/巷/弄/號 in front of the
+    // road suffix — in well-formed Taiwan addresses they appear
+    // *after* the road, so the take-up-to-suffix scan naturally
+    // captures the road body. If a caller threads upstream noise
+    // that looks like a section/lane marker, the road token will
+    // include it; rejecting such inputs is the caller's problem.
     if let Some((road, rest)) = take_until_suffix(cursor, &['路', '街', '道']) {
         out.road = Some(road);
         cursor = rest;
