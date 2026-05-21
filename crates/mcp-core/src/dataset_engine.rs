@@ -491,10 +491,12 @@ mod tests {
     fn nonexistent_file_surfaces_polars_error() {
         // `expect_err` would need `LazyFrame: Debug` (which it
         // doesn't have), so the Ok branch is matched out by hand.
-        // Some scans validate the path eagerly (Parquet hits the
-        // footer), so the error may fire here; others defer until
-        // `collect()`. Try both paths and assert one of them yields
-        // a `Polars` error mentioning the missing file.
+        // Polars `scan_parquet` is fully lazy today (the missing-
+        // file error surfaces at `collect()`), but other formats
+        // can validate eagerly during schema inference at scan
+        // time, and Polars may decide to validate Parquet footers
+        // eagerly in a future release. The match handles either
+        // path so the test stays robust against that variation.
         //
         // Build the path under a fresh `TempDir` rather than a
         // hard-coded `/tmp/...` literal — the literal isn't portable
@@ -518,16 +520,9 @@ mod tests {
         // variant-Display prefix, and an engine op label. **No
         // assertion on Polars' raw message body**: Polars wording
         // isn't a stable API across patch releases (see EngineError
-        // type docs).
-        //
-        // Polars `scan_parquet` is fully lazy — the missing-file
-        // error fires at `collect()`, never at scan — so the op
-        // label we see here is `collect`, even though the engine
-        // is happy to label scan-time failures with `scan parquet`
-        // when they occur eagerly (e.g. on CSV / NDJSON schema
-        // inference). The OR-of-engine-labels keeps the test stable
-        // against Polars deciding to validate eagerly in a future
-        // version.
+        // type docs). The op label is `collect` for the lazy-scan
+        // case described above; the OR with `scan parquet (` covers
+        // the eager-validation alternative.
         assert!(
             matches!(err, EngineError::Polars(_)),
             "expected Polars variant, got: {err}",
