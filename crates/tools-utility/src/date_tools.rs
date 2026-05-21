@@ -13,7 +13,9 @@
 //! [`crate::date::SUPPORTED_YEAR_MAX`]) — out-of-range queries
 //! surface as `ToolError::InvalidArguments` with a clear "extend
 //! the table" message. The two ROC↔Gregorian tools are math-only
-//! and accept any year (ROC ≥ 1).
+//! but enforce an upper-bound year of 9999 in the JSON schema as
+//! a sanity cap (the underlying functions also guard against
+//! `i32::MAX` overflow via `checked_add`).
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
@@ -87,7 +89,7 @@ impl ToolHandler for GregorianToLunarTool {
         ToolDescriptor {
             name: TOOL_GREGORIAN_TO_LUNAR.to_string(),
             description: format!(
-                "Convert a Gregorian date to lunar (農曆). Supports years {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX}; out-of-range queries return an InvalidArguments error indicating the supported range. Result includes leap-month flag."
+                "Convert a Gregorian date to lunar (農曆). Supports Gregorian years {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX}, but note: lunar years are offset — a Gregorian date between Jan 1 and lunar new year falls in the *previous* lunar year. v0.1 does not bake the lunar table for {SUPPORTED_YEAR_MIN}-1, so a small slice of {SUPPORTED_YEAR_MIN} Gregorian dates (before lunar new year of that year) surfaces an InvalidArguments error naming the missing lunar year. Result includes a leap-month flag."
             ),
             input_schema: gregorian_input_schema(),
             output_schema: Some(lunar_output_schema()),
@@ -161,11 +163,16 @@ fn parse_ymd(args: &Value, kind: &str) -> Result<(i32, u32, u32), ToolError> {
     let obj = args
         .as_object()
         .ok_or_else(|| ToolError::InvalidArguments("arguments must be a JSON object".into()))?;
+    // Year is range-checked here too (matching the schema's
+    // upper bound of 9999) so a caller bypassing schema
+    // validation still hits the same contract; the lower bound
+    // varies per tool so we use i32::MIN here and rely on the
+    // function's own InvalidRocYear / PreRocGregorian guards.
     let year = parse_integer_field(
         obj,
         "year",
-        &format!("{kind} year as integer"),
-        i64::MIN..=i64::MAX,
+        &format!("{kind} year as integer (max 9999)"),
+        i64::from(i32::MIN)..=9999,
     )?;
     let month = parse_integer_field(obj, "month", "month (1-12)", 1..=12)?;
     let day = parse_integer_field(obj, "day", "day (1-31)", 1..=31)?;
