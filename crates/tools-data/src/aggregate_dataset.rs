@@ -260,18 +260,37 @@ fn run_aggregate(
     page: u32,
     page_size: u32,
 ) -> Result<AggReport, AggError> {
+    // Build the projection: dedup `group_by ∪ {agg.col}`. Polars
+    // pushes the column subset into the Parquet reader, so wide
+    // datasets only pay I/O for the columns the aggregation
+    // actually touches. Order-preserving dedup via a Vec lookup
+    // because the list is tiny (a handful of columns at most).
+    let mut projection: Vec<String> = Vec::with_capacity(group_by.len() + aggs.len());
+    for name in group_by.iter().chain(aggs.iter().map(|a| &a.col)) {
+        if !projection.iter().any(|existing| existing == name) {
+            projection.push(name.clone());
+        }
+    }
+
     // Probe scan_cap+1 so sampled flag reflects "underlying dataset
     // larger than the scan cap" — same +1 pattern as the other
     // rich tools.
     let scan_probe = scan_cap.saturating_add(1);
+    // Projection-not-found errors fire at the first collect that
+    // touches the projected columns. Route both scan-side and
+    // aggregation-side collects through `classify` so a typo'd
+    // group_by / agg col surfaces as BadArgument no matter which
+    // collect trips first.
     let probed = DatasetEngine::scan(
         DatasetSource::Parquet(path),
         &LoadOptions {
-            projection: None,
+            projection: Some(projection),
             row_limit: Some(scan_probe),
         },
-    )?;
-    let scan_count_frame = DatasetEngine::collect(probed.clone().select([len()]))?;
+    )
+    .map_err(|e| classify(e, group_by, aggs))?;
+    let scan_count_frame = DatasetEngine::collect(probed.clone().select([len()]))
+        .map_err(|e| classify(e, group_by, aggs))?;
     let scan_height = parse_single_count(&scan_count_frame, "scan probe")?;
     let sampled = scan_height > u64::from(scan_cap);
     let scanned_lf = probed.limit(scan_cap);
@@ -964,6 +983,60 @@ mod tests {
         assert_eq!(ok.total_groups, 5);
         // Page 1 of 100 returns all 5 group rows.
         assert_eq!(ok.rows.height(), 5);
+    }
+
+    /// Locks the pagination contract added in R1: `page_size=1`
+    /// walks one group at a time, `total_pages = ceil(total_groups
+    /// / page_size)`, and page out-of-range yields zero rows but
+    /// `total_groups` stays accurate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pagination_walks_groups_one_per_page() {
+        let (_d, path) = write_sales();
+        let tool = AggregateDatasetTool::new(StubLookup::new(Some(cache_ref_for(&path))));
+
+        // 2 groups, page_size=1 → 2 pages of 1 row each.
+        let page_one = tool
+            .call(json!({
+                "slug": "sales",
+                "group_by": ["region"],
+                "agg": [{"col": "amount", "fn": "sum"}],
+                "page_size": 1,
+                "page": 1,
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(page_one["total_groups"], 2);
+        assert_eq!(page_one["total_pages"], 2);
+        assert_eq!(page_one["page"], 1);
+        assert_eq!(page_one["page_size"], 1);
+        assert_eq!(page_one["rows"].as_array().unwrap().len(), 1);
+
+        let page_two = tool
+            .call(json!({
+                "slug": "sales",
+                "group_by": ["region"],
+                "agg": [{"col": "amount", "fn": "sum"}],
+                "page_size": 1,
+                "page": 2,
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(page_two["rows"].as_array().unwrap().len(), 1);
+
+        // Page 99 is well past total_pages=2 → empty rows, but the
+        // total_groups field still reports the actual count.
+        let past_end = tool
+            .call(json!({
+                "slug": "sales",
+                "group_by": ["region"],
+                "agg": [{"col": "amount", "fn": "sum"}],
+                "page_size": 1,
+                "page": 99,
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(past_end["rows"].as_array().unwrap().len(), 0);
+        assert_eq!(past_end["total_groups"], 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
