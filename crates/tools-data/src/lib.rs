@@ -18,6 +18,7 @@
 //!   tests can plug in in-memory stubs per trait without going
 //!   through `Storage`.
 
+pub mod aggregate_dataset;
 pub mod describe_schema;
 pub mod domains;
 pub mod get_dataset;
@@ -29,6 +30,7 @@ pub mod query_rows;
 pub mod search_datasets;
 pub mod sql_guard;
 
+pub use aggregate_dataset::{AggregateDatasetTool, TOOL_NAME as AGGREGATE_DATASET_TOOL_NAME};
 pub use describe_schema::{DescribeSchemaTool, TOOL_NAME as DESCRIBE_SCHEMA_TOOL_NAME};
 pub use get_dataset::{GetDatasetTool, TOOL_NAME as GET_DATASET_TOOL_NAME};
 pub use get_sample::{GetSampleTool, TOOL_NAME as GET_SAMPLE_TOOL_NAME};
@@ -107,7 +109,8 @@ pub fn register_db_tools_with(
         .register(QueryRowsTool::from_arc(cache.clone()))
         .register(DescribeSchemaTool::from_arc(cache.clone()))
         .register(GetSampleTool::from_arc(cache.clone()))
-        .register(JoinDatasetsTool::from_arc(cache))
+        .register(JoinDatasetsTool::from_arc(cache.clone()))
+        .register(AggregateDatasetTool::from_arc(cache))
         .register(MaterializeDatasetTool::from_arcs(
             view,
             recorder,
