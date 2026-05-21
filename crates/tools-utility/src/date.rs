@@ -883,10 +883,18 @@ mod tests {
         // 2025-01-01 is in lunar 2024.
         let out = gregorian_to_lunar(2025, 1, 1).unwrap();
         assert_eq!(out.year, 2024);
-        // 2025-01-28 is 大年三十 (last day of lunar 2024).
+        // 2025-01-28 is 大年廿九 — the last day of lunar 2024.
+        // 2024's 十二月 only has 29 days in our baked table (a
+        // small 354-day lunar year), so the "除夕" is lunar 12/29,
+        // not 12/30. 2025-01-29 is then 大年初一 of lunar 2025.
         let last_day = gregorian_to_lunar(2025, 1, 28).unwrap();
         assert_eq!(last_day.year, 2024);
         assert_eq!(last_day.month, 12);
+        assert_eq!(last_day.day, 29);
+        let next_new_year = gregorian_to_lunar(2025, 1, 29).unwrap();
+        assert_eq!(next_new_year.year, 2025);
+        assert_eq!(next_new_year.month, 1);
+        assert_eq!(next_new_year.day, 1);
     }
 
     #[test]
