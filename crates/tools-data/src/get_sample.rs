@@ -166,6 +166,13 @@ impl ToolHandler for GetSampleTool {
 
         match tokio::time::timeout(SAMPLE_TIMEOUT, work).await {
             Ok(Ok(Ok(report))) => Ok(report.render()),
+            Ok(Ok(Err(SampleError::BadArgument(msg)))) => {
+                // Caller-controlled mistake — surface verbatim so the
+                // agent can correct the request. The BadArgument
+                // variant is constructed only from caller-supplied
+                // column names, so it doesn't leak server paths.
+                Err(ToolError::InvalidArguments(msg))
+            }
             Ok(Ok(Err(e))) => {
                 tracing::warn!(
                     slug = %slug,
@@ -200,10 +207,19 @@ enum SampleError {
     /// engine's stable op-label contract verbatim.
     #[error("{0}")]
     Engine(#[from] EngineError),
-    /// Caller asked for stratification on a column the file doesn't
-    /// have, or a sampling call returned a shape the tool didn't
-    /// expect. Surfaces as `get_sample:` so log/grep patterns don't
-    /// collide with engine-owned op labels.
+    /// Caller-controlled mistake — e.g. asking to stratify on a
+    /// column the dataset doesn't have. Maps to
+    /// `ToolError::InvalidArguments` in the async caller so the
+    /// agent sees an actionable message rather than a generic
+    /// "see server logs". The string carries only column names
+    /// from the caller's own request, never file paths or schema
+    /// internals.
+    #[error("get_sample: {0}")]
+    BadArgument(String),
+    /// Polars / partition / sample call returned a shape the tool
+    /// didn't expect. Treated as a server-side error and logged
+    /// rather than surfaced verbatim so internal drift doesn't
+    /// leak through.
     #[error("get_sample: {0}")]
     Internal(String),
 }
@@ -277,7 +293,12 @@ fn draw_sample(
 /// Stratified sampling: partition by `stratify_col`, take `ceil(n/k)`
 /// per group (where `k` = distinct strata count, but ≤ n so empty
 /// groups don't claim slots), reservoir-sample within each group,
-/// then trim the concatenated frame to `n`.
+/// then trim the concatenated frame to `n`. When the dataset has
+/// more strata than `n`, we sample from only the first `k` groups
+/// (`partition_by` with `maintain_order=true` gives a deterministic
+/// "first" by storage order) — sampling every group would blow up
+/// memory + time without contributing more than `n` rows to the
+/// final result.
 fn stratified_sample(
     scanned: &DataFrame,
     stratify_col: &str,
@@ -286,8 +307,15 @@ fn stratified_sample(
     if n == 0 || scanned.height() == 0 {
         return Ok(scanned.head(Some(0)));
     }
-    // partition_by validates the column existence; surface it as
-    // Internal so the caller doesn't see a raw Polars message.
+    // Pre-check column existence so a caller mistake surfaces as
+    // BadArgument (→ InvalidArguments) rather than a generic
+    // server-side error. partition_by would otherwise bubble up a
+    // Polars message that's not actionable for the agent.
+    if scanned.column(stratify_col).is_err() {
+        return Err(SampleError::BadArgument(format!(
+            "stratify_col `{stratify_col}` is not a column of the dataset",
+        )));
+    }
     let partitions = scanned
         .partition_by([stratify_col], true)
         .map_err(|e| SampleError::Internal(format!("partition_by(`{stratify_col}`): {e}")))?;
@@ -296,12 +324,15 @@ fn stratified_sample(
     }
     // `k = min(distinct_strata, n)` so when there are more groups
     // than `n` rows we don't compute a per-group share of 0 (which
-    // would yield an empty result for non-empty input).
+    // would yield an empty result for non-empty input). Iterate
+    // only the first `k` partitions — sampling every group would
+    // do work proportional to the distinct-value count without
+    // contributing more than `n` rows to the final result.
     let k = partitions.len().min(n);
     let per_group = n.div_ceil(k);
 
-    let mut chunks: Vec<DataFrame> = Vec::with_capacity(partitions.len());
-    for part in partitions {
+    let mut chunks: Vec<DataFrame> = Vec::with_capacity(k);
+    for part in partitions.into_iter().take(k) {
         let cap = per_group.min(part.height());
         if cap == 0 {
             continue;
@@ -591,6 +622,9 @@ fn kind_of(v: &Value) -> &'static str {
 }
 
 fn input_schema() -> Map<String, Value> {
+    let n_description = format!(
+        "Number of rows requested. Capped at {MAX_N}; the response may return fewer when the dataset itself is smaller."
+    );
     json!({
         "type": "object",
         "properties": {
@@ -614,7 +648,7 @@ fn input_schema() -> Map<String, Value> {
                 "minimum": 0,
                 "maximum": MAX_N,
                 "default": DEFAULT_N,
-                "description": "Number of rows requested. Capped at MAX_N; the response may return fewer when the dataset itself is smaller.",
+                "description": n_description,
             },
             "stratify_col": {
                 "type": "string",
@@ -634,6 +668,8 @@ fn input_schema() -> Map<String, Value> {
 }
 
 fn output_schema() -> Map<String, Value> {
+    let scan_cap_description =
+        format!("Row cap the engine applied to the scan — {MAX_SAMPLE_SCAN_ROWS} rows.");
     json!({
         "type": "object",
         "required": ["strategy", "requested_n", "returned", "columns", "rows", "sampled", "scan_cap"],
@@ -644,7 +680,7 @@ fn output_schema() -> Map<String, Value> {
             "columns": { "type": "array", "items": { "type": "string" } },
             "rows": { "type": "array", "items": { "type": "array" } },
             "sampled": { "type": "boolean", "description": "True when the underlying dataset has more rows than `scan_cap`." },
-            "scan_cap": { "type": "integer", "minimum": 1, "description": "Row cap the engine applied to the scan — see the `MAX_SAMPLE_SCAN_ROWS` module const." },
+            "scan_cap": { "type": "integer", "minimum": 1, "description": scan_cap_description },
         },
         "additionalProperties": false,
     })
@@ -852,6 +888,31 @@ mod tests {
             .expect_err("unknown");
         match err {
             ToolError::InvalidArguments(m) => assert!(m.contains("strategy"), "got: {m}"),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    /// Locks R1's `BadArgument` routing: a `stratify_col` that
+    /// doesn't exist on the dataset surfaces as `InvalidArguments`
+    /// (caller-fixable) rather than the generic "see server logs"
+    /// execution error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stratified_unknown_column_returns_invalid_arguments() {
+        let (_g, path) = write_fixture_parquet();
+        let tool = GetSampleTool::new(StubLookup::new(Some(cache_ref_for(&path))));
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "strategy": "stratified",
+                "stratify_col": "nope",
+            }))
+            .await
+            .expect_err("nonexistent col");
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(m.contains("nope"), "got: {m}");
+                assert!(m.contains("stratify_col"), "got: {m}");
+            }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
     }
