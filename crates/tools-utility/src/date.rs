@@ -129,12 +129,30 @@ pub struct HolidayLookup {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DateError {
+    /// Year falls outside the baked static table range — for the
+    /// table-driven tools (solar term, holiday) that don't have a
+    /// prev-year fallback.
     #[error("year {0} is out of the supported range")]
     UnsupportedYear(i32),
+    /// Lunar conversion needs the prev-year table for a Gregorian
+    /// date before that year's lunar new year, and the
+    /// requested lunar year isn't baked. Distinct from
+    /// `UnsupportedYear` so callers can produce an accurate
+    /// "Gregorian X needs lunar Y" message.
+    #[error("lunar conversion needs the lunar table for year {needed_lunar_year}")]
+    UnsupportedLunarYear {
+        input_gregorian_year: i32,
+        needed_lunar_year: i32,
+    },
     #[error("invalid date: year={year} month={month} day={day}")]
     InvalidDate { year: i32, month: u32, day: u32 },
+    /// Input ROC year < 1 (passed to `roc_to_gregorian`).
     #[error("ROC year must be ≥ 1 (year 1 = 1912 CE)")]
     InvalidRocYear,
+    /// Input Gregorian year < 1912 (passed to `gregorian_to_roc`).
+    /// Pre-1912 dates have no ROC equivalent.
+    #[error("Gregorian year must be ≥ 1912 for ROC conversion (year 1912 = ROC year 1)")]
+    PreRocGregorian,
 }
 
 /// Bounds of the static table support. Inclusive on both ends.
@@ -163,11 +181,11 @@ pub fn roc_to_gregorian(roc_year: i32, month: u32, day: u32) -> Result<DateConve
 }
 
 /// Convert a Gregorian date to its ROC form (Gregorian minus
-/// 1911). Pre-1912 dates surface as `InvalidRocYear` so callers
+/// 1911). Pre-1912 dates surface as `PreRocGregorian` so callers
 /// don't get a negative ROC year that no admin form would accept.
 pub fn gregorian_to_roc(year: i32, month: u32, day: u32) -> Result<DateConversion, DateError> {
     if year < 1912 {
-        return Err(DateError::InvalidRocYear);
+        return Err(DateError::PreRocGregorian);
     }
     validate_gregorian(year, month, day)?;
     Ok(DateConversion {
@@ -231,7 +249,10 @@ pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, 
         if (SUPPORTED_YEAR_MIN..=SUPPORTED_YEAR_MAX).contains(&(year - 1)) {
             return gregorian_to_lunar_with_year(year, month, day, year - 1);
         }
-        return Err(DateError::UnsupportedYear(year - 1));
+        return Err(DateError::UnsupportedLunarYear {
+            input_gregorian_year: year,
+            needed_lunar_year: year - 1,
+        });
     }
     // Walk months: each entry is (length, is_leap). Sum lengths
     // until we cross days_since_anchor. The cast back to u32 is
@@ -754,7 +775,7 @@ mod tests {
     fn pre_1912_gregorian_rejected_for_roc() {
         assert_eq!(
             gregorian_to_roc(1911, 12, 31),
-            Err(DateError::InvalidRocYear)
+            Err(DateError::PreRocGregorian)
         );
     }
 

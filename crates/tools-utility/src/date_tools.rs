@@ -223,10 +223,18 @@ fn kind_of(v: &Value) -> &'static str {
 fn map_date_error(err: &DateError) -> ToolError {
     match *err {
         DateError::UnsupportedYear(unsupported) => ToolError::InvalidArguments(format!(
-            "needs the lunar table for year {unsupported}, which is outside the supported \
-             {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX} range. Note: Gregorian dates between \
-             Jan 1 and lunar new year fall in the *previous* lunar year (e.g. 2024-01-15 \
-             needs the lunar 2023 table). Extend the static table in \
+            "year {unsupported} is outside the supported {SUPPORTED_YEAR_MIN}-\
+             {SUPPORTED_YEAR_MAX} range — extend the static table in \
+             tools-utility/src/date.rs to add more years"
+        )),
+        DateError::UnsupportedLunarYear {
+            input_gregorian_year,
+            needed_lunar_year,
+        } => ToolError::InvalidArguments(format!(
+            "Gregorian {input_gregorian_year}-MM-DD needs the lunar table for year \
+             {needed_lunar_year}, which is outside the supported {SUPPORTED_YEAR_MIN}-\
+             {SUPPORTED_YEAR_MAX} range. Gregorian dates between Jan 1 and lunar new year \
+             fall in the *previous* lunar year. Extend the static table in \
              tools-utility/src/date.rs to add the missing year."
         )),
         DateError::InvalidDate { year, month, day } => ToolError::InvalidArguments(format!(
@@ -235,6 +243,9 @@ fn map_date_error(err: &DateError) -> ToolError {
         DateError::InvalidRocYear => {
             ToolError::InvalidArguments("ROC year must be ≥ 1 (year 1 = 1912 CE)".to_string())
         }
+        DateError::PreRocGregorian => ToolError::InvalidArguments(
+            "Gregorian year must be ≥ 1912 for ROC conversion (year 1912 = ROC year 1)".to_string(),
+        ),
     }
 }
 
@@ -445,6 +456,43 @@ mod tests {
         );
         match err {
             ToolError::InvalidArguments(m) => assert!(m.contains("2024-2027"), "msg: {m}"),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    /// R4 fix: pre-1912 Gregorian for ROC conversion has its own
+    /// error message distinct from "ROC year < 1". Splits the
+    /// previously-overloaded `InvalidRocYear` so users know what
+    /// to fix.
+    #[test]
+    fn pre_1912_gregorian_for_roc_has_distinct_error() {
+        let err = invoke_err(
+            &GregorianToRocTool,
+            json!({"year": 1900, "month": 1, "day": 1}),
+        );
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(m.contains("Gregorian"), "expected Gregorian-specific: {m}");
+                assert!(m.contains("1912"), "expected 1912 boundary: {m}");
+            }
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    /// R4 fix: out-of-range year for the non-lunar table-driven
+    /// tools must NOT mention "lunar" — that wording only fits
+    /// the `gregorian_to_lunar` prev-year fallback.
+    #[test]
+    fn solar_term_out_of_range_has_no_lunar_wording() {
+        let err = invoke_err(
+            &SolarTermForDateTool,
+            json!({"year": 2030, "month": 3, "day": 15}),
+        );
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(!m.contains("lunar"), "must not mention lunar: {m}");
+                assert!(m.contains("2030"), "must name 2030: {m}");
+            }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
     }
