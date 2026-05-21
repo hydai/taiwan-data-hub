@@ -32,7 +32,32 @@ use mcp_core::{
 use polars::prelude::*;
 use serde_json::{Map, Value, json};
 use storage::{CacheRef, DatasetCacheLookup, DatasetKey};
+use thiserror::Error;
 use uuid::Uuid;
+
+/// Failures the blocking introspection helper can surface. Kept
+/// separate from [`EngineError`] so this tool's tool-level invariant
+/// violations don't masquerade as Polars output — `EngineError::Polars`
+/// has a documented stable contract (`<op>[ (<path>)]: <polars message>`
+/// where `op` is one of `scan parquet`, `scan csv`, `scan ndjson`,
+/// `collect`) and overloading it for "polars returned a cell shape we
+/// didn't expect" would corrupt log/grep patterns downstream consumers
+/// rely on.
+#[derive(Debug, Error)]
+enum IntrospectError {
+    /// Upstream engine failure (scan or collect). Preserves the
+    /// engine's own message verbatim so the stable op-label contract
+    /// flows through.
+    #[error("{0}")]
+    Engine(#[from] EngineError),
+    /// Polars' output didn't match the shape `describe_schema` expects
+    /// (missing column in an aggregation frame, empty cell where a
+    /// single u64 was promised, an `AnyValue` variant we haven't been
+    /// taught about). Indicates a contract drift, not an upstream
+    /// engine error.
+    #[error("describe_schema: {0}")]
+    UnexpectedShape(String),
+}
 
 /// MCP tool name. Stable identifier — clients pin to this string.
 pub const TOOL_NAME: &str = "describe_schema";
@@ -89,9 +114,11 @@ impl ToolHandler for DescribeSchemaTool {
             description: format!(
                 "Inspect a cached dataset's columns: dtype, nullability, sample values, \
                  and approximate distinct count (HyperLogLog++). Specify the dataset by \
-                 `id` (UUID) or `slug`; exactly one is required. Scan is capped at \
-                 {MAX_SAMPLE_ROWS} rows so the response is fast even on large tables — \
-                 `sampled: true` flags responses where the cap clipped the data."
+                 `id` (UUID) or `slug`; exactly one is required. Stats and sample values \
+                 are computed over at most {MAX_SAMPLE_ROWS} rows (the implementation \
+                 reads one extra row internally to disambiguate \"exactly cap rows\" from \
+                 \"clipped\"); `sampled: true` flags responses where the underlying \
+                 dataset has more rows than the cap."
             ),
             input_schema: input_schema(),
             output_schema: Some(output_schema()),
@@ -135,14 +162,15 @@ impl ToolHandler for DescribeSchemaTool {
         match tokio::time::timeout(SCHEMA_TIMEOUT, work).await {
             Ok(Ok(Ok(report))) => Ok(report.render()),
             Ok(Ok(Err(e))) => {
-                // EngineError messages can carry the cache path and
-                // raw Polars context — log full server-side, return
-                // a sanitised public message (same pattern as
-                // `query_rows`).
+                // IntrospectError covers both upstream Engine failures
+                // (which carry the cache path + raw Polars context) and
+                // local invariant violations from `approx_distinct_
+                // from_cell`. Log full server-side, return a sanitised
+                // public message — same pattern as `query_rows`.
                 tracing::warn!(
                     slug = %slug,
-                    engine_error = %e,
-                    "describe_schema engine call failed",
+                    introspect_error = %e,
+                    "describe_schema introspection failed",
                 );
                 Err(ToolError::Execution(
                     "schema introspection failed — see server logs for details".into(),
@@ -237,7 +265,7 @@ impl ColumnReport {
 /// the former returns ≤ `row_cap` rows; the latter returns
 /// `row_cap + 1`. Stats and sample values are then computed over the
 /// first `row_cap` rows of the resulting frame.
-fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineError> {
+fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, IntrospectError> {
     let probe_limit = row_cap.saturating_add(1);
     let lf = DatasetEngine::scan(
         DatasetSource::Parquet(path),
@@ -323,39 +351,40 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
 /// Extract the `approx_n_unique` result from the 1-row aggregation
 /// frame Polars returns. Every unexpected shape — missing column,
 /// empty result, negative integer, or a dtype the engine hasn't been
-/// taught about — surfaces as `EngineError::Polars` with the engine's
-/// `describe_schema:` prefix so contract drifts don't silently
-/// degrade to "0 distinct values" downstream.
-fn approx_distinct_from_cell(frame: &DataFrame, col_name: &str) -> Result<u64, EngineError> {
+/// taught about — surfaces as [`IntrospectError::UnexpectedShape`]
+/// so contract drifts don't silently degrade to "0 distinct values"
+/// downstream *and* don't pollute the `EngineError::Polars` op-label
+/// contract from #3.1.
+fn approx_distinct_from_cell(frame: &DataFrame, col_name: &str) -> Result<u64, IntrospectError> {
     let column = frame.column(col_name).map_err(|_| {
-        EngineError::Polars(format!(
-            "describe_schema: approx_n_unique result missing column `{col_name}`",
+        IntrospectError::UnexpectedShape(format!(
+            "approx_n_unique result missing column `{col_name}`",
         ))
     })?;
     let cell = column.get(0).map_err(|_| {
-        EngineError::Polars(format!(
-            "describe_schema: approx_n_unique returned empty result for column `{col_name}`",
+        IntrospectError::UnexpectedShape(format!(
+            "approx_n_unique returned empty result for column `{col_name}`",
         ))
     })?;
     match cell {
         AnyValue::UInt32(n) => Ok(u64::from(n)),
         AnyValue::UInt64(n) => Ok(n),
         AnyValue::Int64(n) => u64::try_from(n).map_err(|_| {
-            EngineError::Polars(format!(
-                "describe_schema: approx_n_unique returned negative Int64 ({n}) for column `{col_name}`",
+            IntrospectError::UnexpectedShape(format!(
+                "approx_n_unique returned negative Int64 ({n}) for column `{col_name}`",
             ))
         }),
         AnyValue::Int32(n) => u64::try_from(n).map_err(|_| {
-            EngineError::Polars(format!(
-                "describe_schema: approx_n_unique returned negative Int32 ({n}) for column `{col_name}`",
+            IntrospectError::UnexpectedShape(format!(
+                "approx_n_unique returned negative Int32 ({n}) for column `{col_name}`",
             ))
         }),
         // Empty / all-null columns yield 0 distinct non-nulls; map
         // Polars' Null cell to 0 explicitly so this case stays
         // intentional rather than silently caught by the catch-all.
         AnyValue::Null => Ok(0),
-        other => Err(EngineError::Polars(format!(
-            "describe_schema: approx_n_unique returned unexpected type for column `{col_name}`: {other}",
+        other => Err(IntrospectError::UnexpectedShape(format!(
+            "approx_n_unique returned unexpected type for column `{col_name}`: {other}",
         ))),
     }
 }
