@@ -290,15 +290,23 @@ fn draw_sample(
     })
 }
 
-/// Stratified sampling: partition by `stratify_col`, take `ceil(n/k)`
-/// per group (where `k` = distinct strata count, but ≤ n so empty
-/// groups don't claim slots), reservoir-sample within each group,
-/// then trim the concatenated frame to `n`. When the dataset has
-/// more strata than `n`, we sample from only the first `k` groups
-/// (`partition_by` with `maintain_order=true` gives a deterministic
-/// "first" by storage order) — sampling every group would blow up
-/// memory + time without contributing more than `n` rows to the
-/// final result.
+/// Stratified sampling: identify the first `k = min(distinct_strata, n)`
+/// strata keys in stable storage order, then `partition_by` and
+/// reservoir-sample `ceil(n/k)` per group from the first `k` groups
+/// only.
+///
+/// **High-cardinality caveat.** `partition_by` materialises a
+/// `Vec<DataFrame>` for *every* distinct strata value up-front;
+/// `take(k)` then discards the rest. For a `stratify_col` like
+/// `user_id` over a 100k-row scan, that's an `O(distinct_count)`
+/// allocation. The cost is bounded by `MAX_SAMPLE_SCAN_ROWS` (at
+/// most one strata value per row), but agents stratifying on a
+/// high-cardinality column should be aware that the work isn't
+/// proportional to `k` alone. Polars' `Series::is_in` would let us
+/// pre-filter to the first `k` keys and bound `partition_by` to
+/// exactly `k` groups, but Polars 0.53's API for the operation
+/// requires non-default features we don't currently enable — left
+/// as a follow-up.
 fn stratified_sample(
     scanned: &DataFrame,
     stratify_col: &str,
@@ -309,8 +317,7 @@ fn stratified_sample(
     }
     // Pre-check column existence so a caller mistake surfaces as
     // BadArgument (→ InvalidArguments) rather than a generic
-    // server-side error. partition_by would otherwise bubble up a
-    // Polars message that's not actionable for the agent.
+    // server-side error.
     if scanned.column(stratify_col).is_err() {
         return Err(SampleError::BadArgument(format!(
             "stratify_col `{stratify_col}` is not a column of the dataset",
@@ -325,9 +332,10 @@ fn stratified_sample(
     // `k = min(distinct_strata, n)` so when there are more groups
     // than `n` rows we don't compute a per-group share of 0 (which
     // would yield an empty result for non-empty input). Iterate
-    // only the first `k` partitions — sampling every group would
-    // do work proportional to the distinct-value count without
-    // contributing more than `n` rows to the final result.
+    // only the first `k` partitions; this saves the *sampling* work
+    // for unused groups, though `partition_by` already paid the
+    // per-group allocation cost above — see the "High-cardinality
+    // caveat" in the doc comment.
     let k = partitions.len().min(n);
     let per_group = n.div_ceil(k);
 
