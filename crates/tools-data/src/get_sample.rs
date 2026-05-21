@@ -533,16 +533,13 @@ impl Request {
                         "`seed` is only valid with strategy=\"random\"".into(),
                     ));
                 }
+                // `optional_string` already coerces "" → None, so an
+                // unwrapped stratify_col is guaranteed non-empty.
                 let col = stratify_col.ok_or_else(|| {
                     ToolError::InvalidArguments(
                         "`stratified` strategy requires `stratify_col`".into(),
                     )
                 })?;
-                if col.is_empty() {
-                    return Err(ToolError::InvalidArguments(
-                        "`stratify_col` must be a non-empty string".into(),
-                    ));
-                }
                 SampleStrategy::Stratified { stratify_col: col }
             }
             other => {
