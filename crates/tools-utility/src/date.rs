@@ -205,8 +205,15 @@ pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, 
     };
     if days_since_anchor < 0 {
         // Pre-lunar-new-year date → belongs to the previous lunar
-        // year. v0.1 returns `UnsupportedYear`; supporting prev-year
-        // tail requires keeping (year-1)'s table too.
+        // year. If (year-1) is in range, retry with that year's
+        // table so e.g. Gregorian 2025-01-01 resolves through the
+        // 2024 lunar table (lunar year 2024 spans through 2025-
+        // 01-28, the day before lunar new year 2025). Outside the
+        // table range → UnsupportedYear so callers see "extend
+        // the static table" not a silent wrong answer.
+        if (SUPPORTED_YEAR_MIN..=SUPPORTED_YEAR_MAX).contains(&(year - 1)) {
+            return gregorian_to_lunar_with_year(year, month, day, year - 1);
+        }
         return Err(DateError::UnsupportedYear(year - 1));
     }
     // Walk months: each entry is (length, is_leap). Sum lengths
@@ -282,6 +289,58 @@ pub fn is_national_holiday(year: i32, month: u32, day: u32) -> Result<HolidayLoo
         is_holiday: false,
         name: None,
     })
+}
+
+/// Resolve a Gregorian date that falls *after* the lunar new year
+/// of `lunar_year` (i.e. the previous Gregorian year's lunar
+/// table). Walks the same month-table loop as the primary path.
+fn gregorian_to_lunar_with_year(
+    year: i32,
+    month: u32,
+    day: u32,
+    lunar_year: i32,
+) -> Result<LunarDate, DateError> {
+    let info = lunar_year_info(lunar_year);
+    let anchor_doy = i32::try_from(day_of_year(
+        info.anchor_year,
+        info.anchor_month,
+        info.anchor_day,
+    ))
+    .expect("day-of-year ≤ 366 fits in i32");
+    let target_doy =
+        i32::try_from(day_of_year(year, month, day)).expect("day-of-year ≤ 366 fits in i32");
+    let days_in_anchor_year: i32 = if is_leap_year(info.anchor_year) {
+        366
+    } else {
+        365
+    };
+    let days_since_anchor = (days_in_anchor_year - anchor_doy) + target_doy;
+    if days_since_anchor < 0 {
+        return Err(DateError::UnsupportedYear(lunar_year));
+    }
+    let mut remaining =
+        u32::try_from(days_since_anchor).expect("non-negative days_since_anchor fits in u32");
+    let mut next_month_number: u32 = 1;
+    for (length, is_leap) in info.month_lengths {
+        if remaining < *length {
+            let reported_month = if *is_leap {
+                next_month_number - 1
+            } else {
+                next_month_number
+            };
+            return Ok(LunarDate {
+                year: lunar_year,
+                month: reported_month,
+                day: remaining + 1,
+                leap_month: *is_leap,
+            });
+        }
+        remaining -= *length;
+        if !*is_leap {
+            next_month_number += 1;
+        }
+    }
+    Err(DateError::UnsupportedYear(lunar_year + 1))
 }
 
 fn validate_gregorian(year: i32, month: u32, day: u32) -> Result<(), DateError> {
@@ -554,13 +613,19 @@ const SOLAR_TERMS_2027: [(SolarTerm, u32, u32); 24] = [
 ];
 
 /// Taiwan national holidays per year. Source: 行政院人事行政總處
-/// 公務人員一般辦公日曆 + 內政部行事曆 (fixed-date holidays plus
-/// observed dates for lunar holidays).
+/// 公務人員一般辦公日曆 + 內政部行事曆.
 ///
-/// Per the v0.1 scope, this is the *observed-date* table — we do
-/// not bake make-up-day / 補假 logic. Callers needing fully
-/// reflowed work-day calendars should consult the published 行事
-/// 曆 directly.
+/// **Scope**: these are the *anchor* dates for each holiday — the
+/// canonical day the holiday is named after (e.g. 春節 entry is
+/// 大年初一, not the full 6-day break around it). v0.1 does **not**
+/// bake the multi-day 連假 / 補假 reshuffles that the published
+/// 行事曆 carries. Callers needing a full "is this day off?"
+/// calendar should consult the published 行事曆 directly.
+///
+/// An `is_holiday=true` result means "this date is the named
+/// anchor of a TW national holiday." Agents needing the full
+/// observed-break calendar should treat this as a baseline and
+/// layer 連假 logic on top.
 fn holidays_for_year(year: i32) -> &'static [(u32, u32, &'static str)] {
     match year {
         2024 => &HOLIDAYS_2024,
@@ -571,7 +636,7 @@ fn holidays_for_year(year: i32) -> &'static [(u32, u32, &'static str)] {
     }
 }
 
-const HOLIDAYS_2024: [(u32, u32, &str); 8] = [
+const HOLIDAYS_2024: [(u32, u32, &str); 9] = [
     (1, 1, "中華民國開國紀念日"),
     (2, 10, "春節"),
     (2, 28, "和平紀念日"),
@@ -579,10 +644,11 @@ const HOLIDAYS_2024: [(u32, u32, &str); 8] = [
     (4, 5, "清明節"),
     (5, 1, "勞動節"),
     (6, 10, "端午節"),
+    (9, 17, "中秋節"),
     (10, 10, "國慶日"),
 ];
 
-const HOLIDAYS_2025: [(u32, u32, &str); 7] = [
+const HOLIDAYS_2025: [(u32, u32, &str); 8] = [
     (1, 1, "中華民國開國紀念日"),
     (1, 29, "春節"),
     (2, 28, "和平紀念日"),
@@ -593,6 +659,7 @@ const HOLIDAYS_2025: [(u32, u32, &str); 7] = [
     (4, 4, "兒童節 / 清明節"),
     (5, 1, "勞動節"),
     (5, 31, "端午節"),
+    (10, 6, "中秋節"),
     (10, 10, "國慶日"),
 ];
 
@@ -736,6 +803,36 @@ mod tests {
         assert_eq!(after_leap.month, 7);
         assert!(!after_leap.leap_month);
         assert_eq!(after_leap.day, 1);
+    }
+
+    /// R2 fix: Gregorian dates between Jan 1 and lunar new year
+    /// belong to the *previous* lunar year. 2025-01-01 falls in
+    /// lunar 2024 (the 2024 lunar year ends 2025-01-28). When the
+    /// previous year's table is in range we should resolve
+    /// through it, not return `UnsupportedYear`.
+    #[test]
+    fn lunar_pre_new_year_falls_back_to_previous_table() {
+        // 2025-01-01 is in lunar 2024.
+        let out = gregorian_to_lunar(2025, 1, 1).unwrap();
+        assert_eq!(out.year, 2024);
+        // 2025-01-28 is 大年三十 (last day of lunar 2024).
+        let last_day = gregorian_to_lunar(2025, 1, 28).unwrap();
+        assert_eq!(last_day.year, 2024);
+        assert_eq!(last_day.month, 12);
+    }
+
+    #[test]
+    fn holiday_2024_mid_autumn() {
+        let h = is_national_holiday(2024, 9, 17).unwrap();
+        assert!(h.is_holiday);
+        assert_eq!(h.name.as_deref(), Some("中秋節"));
+    }
+
+    #[test]
+    fn holiday_2025_mid_autumn() {
+        let h = is_national_holiday(2025, 10, 6).unwrap();
+        assert!(h.is_holiday);
+        assert_eq!(h.name.as_deref(), Some("中秋節"));
     }
 
     #[test]

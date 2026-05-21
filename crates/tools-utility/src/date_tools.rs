@@ -6,11 +6,14 @@
 //! - `tw_solar_term_for_date`
 //! - `tw_is_national_holiday`
 //!
-//! All four lunar/term/holiday tools share a bounded year-range
-//! contract (see [`crate::date::SUPPORTED_YEAR_MIN`] /
+//! The three table-driven tools (`tw_gregorian_to_lunar`,
+//! `tw_solar_term_for_date`, `tw_is_national_holiday`) share a
+//! bounded year-range contract (see
+//! [`crate::date::SUPPORTED_YEAR_MIN`] /
 //! [`crate::date::SUPPORTED_YEAR_MAX`]) — out-of-range queries
 //! surface as `ToolError::InvalidArguments` with a clear "extend
-//! the table" message.
+//! the table" message. The two ROC↔Gregorian tools are math-only
+//! and accept any year (ROC ≥ 1).
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
