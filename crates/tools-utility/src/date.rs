@@ -151,6 +151,12 @@ pub enum DateError {
     /// Input ROC year < 1 (passed to `roc_to_gregorian`).
     #[error("ROC year must be ≥ 1 (year 1 = 1912 CE)")]
     InvalidRocYear,
+    /// Input ROC year so large that `roc_year + 1911` overflows
+    /// i32. The schema layer puts a sanity cap on the input but
+    /// the math guard belongs in the function for callers using
+    /// the native Rust API.
+    #[error("ROC year {roc_year} overflows i32 when converted to Gregorian")]
+    RocOverflow { roc_year: i32 },
     /// Input Gregorian year < 1912 (passed to `gregorian_to_roc`).
     /// Pre-1912 dates have no ROC equivalent.
     #[error("Gregorian year must be ≥ 1912 for ROC conversion (year 1912 = ROC year 1)")]
@@ -178,7 +184,13 @@ pub fn roc_to_gregorian(roc_year: i32, month: u32, day: u32) -> Result<DateConve
     if roc_year < 1 {
         return Err(DateError::InvalidRocYear);
     }
-    let year = roc_year + 1911;
+    // Guard the addition explicitly — i32::MAX - 1911 ≈ 2.1B which
+    // no realistic ROC year approaches, but if a caller passes
+    // i32::MAX directly the wrapping result would be a silently
+    // wrong negative Gregorian year that still passes validation.
+    let year = roc_year
+        .checked_add(1911)
+        .ok_or(DateError::RocOverflow { roc_year })?;
     validate_gregorian(year, month, day)?;
     Ok(DateConversion { year, month, day })
 }
@@ -775,6 +787,18 @@ mod tests {
     fn roc_year_zero_rejected() {
         assert_eq!(roc_to_gregorian(0, 1, 1), Err(DateError::InvalidRocYear));
         assert_eq!(roc_to_gregorian(-1, 1, 1), Err(DateError::InvalidRocYear));
+    }
+
+    /// R6 fix: passing `i32::MAX` as the ROC year used to wrap to
+    /// a negative Gregorian year that still passed
+    /// `validate_gregorian` for a leap-year-shaped value. With
+    /// `checked_add` it now surfaces as `RocOverflow`.
+    #[test]
+    fn roc_year_overflow_rejected() {
+        assert_eq!(
+            roc_to_gregorian(i32::MAX, 1, 1),
+            Err(DateError::RocOverflow { roc_year: i32::MAX })
+        );
     }
 
     #[test]

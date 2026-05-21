@@ -217,11 +217,13 @@ fn kind_of(v: &Value) -> &'static str {
 }
 
 /// Map a `DateError` into the public `ToolError::InvalidArguments`
-/// surface. Takes the error by reference because every variant's
-/// payload is `Copy` — matching on `*err` doesn't consume the
-/// outer value, so by-reference is what clippy wants.
+/// surface. Matches on the reference (relying on Rust's match
+/// ergonomics) rather than dereferencing — `DateError` is not
+/// `Copy` (its variants would be Copy individually but the enum
+/// isn't derived as such), and matching on `err` avoids any
+/// confusion about move semantics.
 fn map_date_error(err: &DateError) -> ToolError {
-    match *err {
+    match err {
         DateError::UnsupportedYear(unsupported) => ToolError::InvalidArguments(format!(
             "year {unsupported} is outside the supported {SUPPORTED_YEAR_MIN}-\
              {SUPPORTED_YEAR_MAX} range — extend the static table in \
@@ -242,6 +244,11 @@ fn map_date_error(err: &DateError) -> ToolError {
         DateError::InvalidDate { year, month, day } => ToolError::InvalidArguments(format!(
             "invalid date: year={year} month={month} day={day}"
         )),
+        DateError::RocOverflow { roc_year } => ToolError::InvalidArguments(format!(
+            "ROC year {roc_year} overflows i32 when converted to Gregorian (roc_year + 1911); \
+             use a more reasonable year ≤ {}",
+            i32::MAX - 1911,
+        )),
         DateError::InvalidRocYear => {
             ToolError::InvalidArguments("ROC year must be ≥ 1 (year 1 = 1912 CE)".to_string())
         }
@@ -256,7 +263,11 @@ fn roc_input_schema() -> Map<String, Value> {
         "type": "object",
         "required": ["year", "month", "day"],
         "properties": {
-            "year": { "type": "integer", "minimum": 1, "description": "ROC year (民國). 1 = 1912 CE." },
+            // Upper bound is generous (good for ~10k years into the
+            // future) but stops i32::MAX nonsense at the schema
+            // layer. The `roc_to_gregorian` function itself uses
+            // checked_add for callers going around the schema.
+            "year": { "type": "integer", "minimum": 1, "maximum": 9999, "description": "ROC year (民國). 1 = 1912 CE." },
             "month": { "type": "integer", "minimum": 1, "maximum": 12 },
             "day": { "type": "integer", "minimum": 1, "maximum": 31 },
         },
