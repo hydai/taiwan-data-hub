@@ -12,10 +12,15 @@
 //! Polars is sync/blocking, and both halves of the pipeline can do
 //! real I/O:
 //!
-//! - [`DatasetEngine::scan`] reads file footers / infers schemas
-//!   (Parquet validates the footer, CSV / NDJSON probe rows for
-//!   types) — not a no-op.
-//! - [`DatasetEngine::collect`] executes the lazy plan.
+//! - [`DatasetEngine::scan`] *may* do blocking metadata or
+//!   schema-inference I/O depending on the format and Polars
+//!   version (CSV / NDJSON typically probe rows to infer types;
+//!   Parquet's `scan_parquet` is mostly lazy today but may
+//!   validate the footer eagerly in future releases). Treat it
+//!   as potentially blocking.
+//! - [`DatasetEngine::collect`] executes the lazy plan and is
+//!   always blocking — this is where the file body actually
+//!   gets read.
 //!
 //! Callers running under an async runtime should wrap the **whole**
 //! `scan → pipeline → collect` chain in `tokio::task::spawn_blocking`,
@@ -521,8 +526,13 @@ mod tests {
         );
         let msg = format!("{err}");
         assert!(msg.starts_with("polars:"), "got: {msg}");
+        // Substrings include the punctuation the engine writes
+        // immediately after the op label — `(` for scan-with-path,
+        // `:` for collect — so the test doesn't match an
+        // incidentally-occurring "collect" or "scan parquet" in
+        // Polars' raw message body.
         assert!(
-            msg.contains("scan parquet") || msg.contains("collect"),
+            msg.contains("scan parquet (") || msg.contains("collect:"),
             "missing-file error must carry an engine-owned op label: {msg}",
         );
     }
