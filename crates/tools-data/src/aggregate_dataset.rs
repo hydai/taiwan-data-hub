@@ -178,6 +178,8 @@ impl ToolHandler for AggregateDatasetTool {
         let slug = cache.slug.clone();
         let group_by = req.group_by.clone();
         let agg_specs = req.aggs.clone();
+        let page = req.page;
+        let page_size = req.page_size;
 
         let work = tokio::task::spawn_blocking(move || {
             run_aggregate(
@@ -186,6 +188,8 @@ impl ToolHandler for AggregateDatasetTool {
                 &agg_specs,
                 MAX_SCAN_ROWS,
                 MAX_GROUPS,
+                page,
+                page_size,
             )
         });
 
@@ -253,6 +257,8 @@ fn run_aggregate(
     aggs: &[AggSpec],
     scan_cap: u32,
     group_cap: u32,
+    page: u32,
+    page_size: u32,
 ) -> Result<AggReport, AggError> {
     // Probe scan_cap+1 so sampled flag reflects "underlying dataset
     // larger than the scan cap" — same +1 pattern as the other
@@ -265,33 +271,51 @@ fn run_aggregate(
             row_limit: Some(scan_probe),
         },
     )?;
-    let count_frame = DatasetEngine::collect(probed.clone().select([len()]))?;
-    let scan_height = parse_single_count(&count_frame, "scan probe")?;
+    let scan_count_frame = DatasetEngine::collect(probed.clone().select([len()]))?;
+    let scan_height = parse_single_count(&scan_count_frame, "scan probe")?;
     let sampled = scan_height > u64::from(scan_cap);
     let scanned_lf = probed.limit(scan_cap);
 
-    // Group_by expressions. Polars accepts a slice of `Expr` here.
     let group_exprs: Vec<Expr> = group_by.iter().map(|c| col(c.as_str())).collect();
     let agg_exprs: Vec<Expr> = aggs.iter().map(|a| a.agg_fn.to_expr(&a.col)).collect();
-
-    // Apply `.limit(group_cap + 1)` after the group_by so a runaway
-    // group cardinality stops materialising at the cap+1.
     let cap_plus_one = group_cap.saturating_add(1);
     let aggregated_lf = scanned_lf
         .group_by(group_exprs)
         .agg(agg_exprs)
         .limit(cap_plus_one);
 
-    let aggregated =
-        DatasetEngine::collect(aggregated_lf).map_err(|e| classify(e, group_by, aggs))?;
-
-    if aggregated.height() > group_cap as usize {
+    // Pass 1: count distinct groups. select([len()]) collapses to
+    // one cell; the lazy plan stops aggregating after cap+1.
+    let group_count_frame = DatasetEngine::collect(aggregated_lf.clone().select([len()]))
+        .map_err(|e| classify(e, group_by, aggs))?;
+    let total_groups_probe = parse_single_count(&group_count_frame, "group count probe")?;
+    if total_groups_probe > u64::from(group_cap) {
         return Err(AggError::TooManyGroups { cap: group_cap });
     }
+    let total_groups =
+        usize::try_from(total_groups_probe.min(u64::from(group_cap))).unwrap_or(usize::MAX);
+
+    // Honest accounting: when the input is sampled (the dataset is
+    // larger than the scan cap), the group count we just computed
+    // covers only the first `scan_cap` rows. The cap was respected
+    // for what we saw but *might not* hold on the full table. Flag
+    // it so callers don't trust the total as authoritative.
+    let groups_partial_due_to_sampling = sampled;
+
+    // Pass 2: collect only the requested page. .slice(offset,
+    // page_size) is folded into the lazy plan.
+    let offset = i64::from(page.saturating_sub(1)).saturating_mul(i64::from(page_size));
+    let page_lf = aggregated_lf.limit(group_cap).slice(offset, page_size);
+    let collected_page =
+        DatasetEngine::collect(page_lf).map_err(|e| classify(e, group_by, aggs))?;
 
     Ok(AggReport {
-        rows: aggregated,
+        rows: collected_page,
+        total_groups,
+        page,
+        page_size,
         sampled,
+        groups_partial_due_to_sampling,
         scan_cap,
         group_cap,
     })
@@ -333,8 +357,12 @@ fn classify(err: EngineError, group_by: &[String], aggs: &[AggSpec]) -> AggError
         || msg.contains("ColumnNotFound")
         || msg.contains("unable to find");
     if mentions_col && mentions_missing {
+        let agg_cols: Vec<&str> = aggs.iter().map(|a| a.col.as_str()).collect();
         AggError::BadArgument {
-            message: format!("one of group_by={group_by:?} or agg cols is not in the dataset"),
+            message: format!(
+                "one of the referenced columns is not in the dataset: \
+                 group_by={group_by:?}, agg_cols={agg_cols:?}",
+            ),
             underlying: Some(err),
         }
     } else {
@@ -345,7 +373,15 @@ fn classify(err: EngineError, group_by: &[String], aggs: &[AggSpec]) -> AggError
 #[derive(Debug)]
 struct AggReport {
     rows: DataFrame,
+    /// Total groups in the aggregation (capped at `group_cap`).
+    total_groups: usize,
+    page: u32,
+    page_size: u32,
     sampled: bool,
+    /// True when `sampled=true` — signals that the group count and
+    /// the per-group aggregates are over only the first `scan_cap`
+    /// rows, not the full dataset.
+    groups_partial_due_to_sampling: bool,
     scan_cap: u32,
     group_cap: u32,
 }
@@ -370,11 +406,18 @@ impl AggReport {
             }
             rows.push(Value::Array(row));
         }
+        let page_size_usize = (self.page_size as usize).max(1);
+        let total_pages_usize = self.total_groups.div_ceil(page_size_usize).max(1);
+        let total_pages = u32::try_from(total_pages_usize).unwrap_or(u32::MAX);
         json!({
-            "row_count": height,
+            "page": self.page,
+            "page_size": self.page_size,
+            "total_pages": total_pages,
+            "total_groups": self.total_groups,
             "columns": columns,
             "rows": rows,
             "sampled": self.sampled,
+            "groups_partial_due_to_sampling": self.groups_partial_due_to_sampling,
             "scan_cap": self.scan_cap,
             "group_cap": self.group_cap,
         })
@@ -433,11 +476,18 @@ fn redact_uri_for_log(uri: &str) -> String {
     head.to_owned()
 }
 
+/// Default page size for the aggregation response. Smaller than
+/// `MAX_GROUPS` so a 100k-group result naturally paginates.
+pub const DEFAULT_PAGE_SIZE: u32 = 100;
+pub const MAX_PAGE_SIZE: u32 = 1_000;
+
 struct Request {
     key: DatasetKey,
     lookup_repr: String,
     group_by: Vec<String>,
     aggs: Vec<AggSpec>,
+    page: u32,
+    page_size: u32,
 }
 
 impl Request {
@@ -470,11 +520,15 @@ impl Request {
 
         let group_by = parse_group_by(obj)?;
         let parsed_aggs = parse_aggs(obj)?;
+        let page = parse_positive_u32(obj, "page", 1, u32::MAX)?;
+        let page_size = parse_positive_u32(obj, "page_size", DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE)?;
         Ok(Self {
             key,
             lookup_repr,
             group_by,
             aggs: parsed_aggs,
+            page,
+            page_size,
         })
     }
 
@@ -552,6 +606,42 @@ fn parse_aggs(obj: &Map<String, Value>) -> Result<Vec<AggSpec>, ToolError> {
     Ok(out)
 }
 
+fn parse_positive_u32(
+    obj: &Map<String, Value>,
+    key: &str,
+    default: u32,
+    max: u32,
+) -> Result<u32, ToolError> {
+    match obj.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::Number(num)) => {
+            let n = num.as_u64().ok_or_else(|| {
+                ToolError::InvalidArguments(format!(
+                    "`{key}` must be a positive integer ≤ {max}, got {num}"
+                ))
+            })?;
+            let n_u32 = u32::try_from(n).map_err(|_| {
+                ToolError::InvalidArguments(format!("`{key}` must be ≤ {max}, got {num}"))
+            })?;
+            if n_u32 == 0 {
+                Err(ToolError::InvalidArguments(format!(
+                    "`{key}` must be a positive integer"
+                )))
+            } else if n_u32 > max {
+                Err(ToolError::InvalidArguments(format!(
+                    "`{key}` must be ≤ {max}, got {n_u32}"
+                )))
+            } else {
+                Ok(n_u32)
+            }
+        }
+        Some(other) => Err(ToolError::InvalidArguments(format!(
+            "`{key}` must be a positive integer, got {}",
+            kind_of(other)
+        ))),
+    }
+}
+
 fn optional_string(obj: &Map<String, Value>, key: &str) -> Result<Option<String>, ToolError> {
     match obj.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -576,15 +666,24 @@ fn kind_of(v: &Value) -> &'static str {
 }
 
 fn input_schema() -> Map<String, Value> {
-    let group_cap_description = format!(
-        "Refuses when aggregation would yield more than {MAX_GROUPS} groups; pre-filter the dataset or pick a coarser grouping."
+    let top_level_description = format!(
+        "Specify the dataset by `id` (UUID) or `slug`; exactly one is required. \
+         Refuses when aggregation would yield more than {MAX_GROUPS} groups; \
+         pre-filter the dataset or pick a coarser grouping."
     );
     json!({
         "type": "object",
         "required": ["group_by", "agg"],
         "properties": {
-            "id": { "type": "string", "format": "uuid", "description": "Dataset UUID." },
-            "slug": { "type": "string", "description": "Marketplace slug." },
+            "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Dataset UUID. Exactly one of `id` or `slug` is required.",
+            },
+            "slug": {
+                "type": "string",
+                "description": "Marketplace slug. Exactly one of `id` or `slug` is required.",
+            },
             "group_by": {
                 "type": "array",
                 "items": { "type": "string", "minLength": 1 },
@@ -605,9 +704,22 @@ fn input_schema() -> Map<String, Value> {
                 },
                 "description": "List of aggregations. Output columns are named `<col>_<fn>` so two specs on the same column don't collide.",
             },
+            "page": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 1,
+                "description": "1-based page number into the aggregation result.",
+            },
+            "page_size": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_PAGE_SIZE,
+                "default": DEFAULT_PAGE_SIZE,
+                "description": "Rows per page (each row is one group).",
+            },
         },
         "additionalProperties": false,
-        "description": group_cap_description,
+        "description": top_level_description,
     })
     .as_object()
     .cloned()
@@ -617,12 +729,16 @@ fn input_schema() -> Map<String, Value> {
 fn output_schema() -> Map<String, Value> {
     json!({
         "type": "object",
-        "required": ["row_count", "columns", "rows", "sampled", "scan_cap", "group_cap"],
+        "required": ["page", "page_size", "total_pages", "total_groups", "columns", "rows", "sampled", "groups_partial_due_to_sampling", "scan_cap", "group_cap"],
         "properties": {
-            "row_count": { "type": "integer", "minimum": 0, "description": "Number of distinct group rows in the result." },
+            "page": { "type": "integer", "minimum": 1 },
+            "page_size": { "type": "integer", "minimum": 1 },
+            "total_pages": { "type": "integer", "minimum": 1 },
+            "total_groups": { "type": "integer", "minimum": 0, "description": "Total distinct groups in the result (≤ group_cap)." },
             "columns": { "type": "array", "items": { "type": "string" } },
             "rows": { "type": "array", "items": { "type": "array" } },
             "sampled": { "type": "boolean", "description": "True when the underlying dataset has more rows than scan_cap." },
+            "groups_partial_due_to_sampling": { "type": "boolean", "description": "True when the input was sampled (sampled=true) — the group count and per-group aggregates cover only the first scan_cap rows. The full table may have more groups." },
             "scan_cap": { "type": "integer", "minimum": 1 },
             "group_cap": { "type": "integer", "minimum": 1, "description": "Maximum groups the tool will materialise." },
         },
@@ -699,7 +815,7 @@ mod tests {
             }))
             .await
             .expect("ok");
-        assert_eq!(out["row_count"], 2);
+        assert_eq!(out["total_groups"], 2);
         let columns: Vec<&str> = out["columns"]
             .as_array()
             .unwrap()
@@ -837,14 +953,16 @@ mod tests {
             agg_fn: AggFn::Sum,
         }];
         // 5 distinct groups > cap=3 → refusal.
-        let err = run_aggregate(&path, &["g".into()], &aggs, 100, 3).expect_err("over cap");
+        let err = run_aggregate(&path, &["g".into()], &aggs, 100, 3, 1, 100).expect_err("over cap");
         match err {
             AggError::TooManyGroups { cap } => assert_eq!(cap, 3),
             other => panic!("expected TooManyGroups, got {other:?}"),
         }
 
         // 5 distinct groups < cap=10 → success.
-        let ok = run_aggregate(&path, &["g".into()], &aggs, 100, 10).expect("under cap");
+        let ok = run_aggregate(&path, &["g".into()], &aggs, 100, 10, 1, 100).expect("under cap");
+        assert_eq!(ok.total_groups, 5);
+        // Page 1 of 100 returns all 5 group rows.
         assert_eq!(ok.rows.height(), 5);
     }
 
