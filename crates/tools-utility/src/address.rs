@@ -5,11 +5,14 @@
 //!    `台中縣` collapses to `台中市`, etc.
 //!  - `district` (鄉 / 鎮 / 市 / 區)
 //!  - `road` (路 / 街 / 道) including the final suffix character
-//!  - `section` (`段`) — when present, as a string ("一", "1", "二段")
-//!  - `lane` (`巷`)
-//!  - `alley` (`弄`)
-//!  - `number` (`號`) — handles `123`, `123-1`, `123之5`
-//!  - `floor` (`樓` / `F` / `B1F`) — best-effort, last token
+//!  - `section` (`段`) — the numeric portion only, without the
+//!    suffix character (e.g. `"一"` or `"2"`, not `"一段"`)
+//!  - `lane` (`巷`) — numeric portion only
+//!  - `alley` (`弄`) — numeric portion only
+//!  - `number` (`號`) — numeric portion only; handles `123`,
+//!    `123-1`, `123之5`
+//!  - `floor` (`樓` / `F` / `B1F`) — best-effort, last token; raw
+//!    digits or `B<n>` form without the suffix
 //!
 //! The normalised result is intentionally tolerant: any field the
 //! input doesn't have is `None`. This is a *segmentation*
@@ -32,8 +35,21 @@
 //! (改制 2010-12-25). We do **not** normalise district names (e.g.
 //! 三重市 → 三重區): that's a separate utility (#3.10).
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 use serde::Serialize;
+
+// Pre-compile the per-suffix regexes once at first access. Each
+// pattern is static; compiling on every call (which Copilot R1
+// caught) is wasted work on a per-request hot path.
+static SECTION_REGEX: LazyLock<Regex> = LazyLock::new(|| numeric_suffix_regex('段'));
+static LANE_REGEX: LazyLock<Regex> = LazyLock::new(|| numeric_suffix_regex('巷'));
+static ALLEY_REGEX: LazyLock<Regex> = LazyLock::new(|| numeric_suffix_regex('弄'));
+static NUMBER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^.*?(\d+(?:-\d+)?(?:之\d+)?)號").expect("number regex"));
+static FLOOR_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^.*?(B?\d+)(?:樓|F|f)").expect("floor regex"));
 
 /// Structured form of a normalised Taiwan address. Every field is
 /// optional — junk inputs surface as a struct of `None`s rather
@@ -90,7 +106,15 @@ pub fn normalize_address(input: &str) -> AddressParts {
     // the road token. Callers needing district-only parsing should
     // prepend a placeholder county on input.
     if out.county.is_some() {
-        if let Some((district, rest)) = take_until_suffix(cursor, &['鄉', '鎮', '市', '區']) {
+        // Reject a suffix at index 0 — that means there's no
+        // district *body*, just the suffix character (e.g.
+        // "台北市市府路45號" leaves cursor="市府路45號" after the
+        // county, and matching 市 at index 0 would steal the
+        // road's leading character). At least one non-suffix
+        // character must precede a real district suffix.
+        if let Some((district, rest)) =
+            take_until_suffix_after(cursor, &['鄉', '鎮', '市', '區'], 1)
+        {
             out.district = Some(district);
             cursor = rest;
         }
@@ -107,11 +131,11 @@ pub fn normalize_address(input: &str) -> AddressParts {
     // 4-8. Section / lane / alley / number / floor. Each is a
     // numeric / Chinese-numeral token immediately followed by its
     // suffix character.
-    out.section = take_numeric_token(&mut cursor, '段');
-    out.lane = take_numeric_token(&mut cursor, '巷');
-    out.alley = take_numeric_token(&mut cursor, '弄');
-    out.number = take_number_token(&mut cursor, '號');
-    out.floor = take_floor(&mut cursor);
+    out.section = take_numeric_token(&mut cursor, &SECTION_REGEX);
+    out.lane = take_numeric_token(&mut cursor, &LANE_REGEX);
+    out.alley = take_numeric_token(&mut cursor, &ALLEY_REGEX);
+    out.number = take_regex_token(&mut cursor, &NUMBER_REGEX);
+    out.floor = take_regex_token(&mut cursor, &FLOOR_REGEX);
 
     out
 }
@@ -190,45 +214,37 @@ fn strip_county_prefix(s: &str) -> Option<(&str, &'static str, &str)> {
 /// token plus the rest of the input. Returns `None` if no suffix
 /// appears.
 fn take_until_suffix<'a>(s: &'a str, suffixes: &[char]) -> Option<(String, &'a str)> {
-    let (idx, ch) = s.char_indices().find(|(_, c)| suffixes.contains(c))?;
+    take_until_suffix_after(s, suffixes, 0)
+}
+
+/// Same as [`take_until_suffix`] but requires at least `min_body_bytes`
+/// of input before the suffix character. Used by the district scan
+/// to reject a suffix at position 0 (which would mean the "district"
+/// is just the suffix character, e.g. matching the `市` in `市府路`
+/// when the actual district is missing).
+fn take_until_suffix_after<'a>(
+    s: &'a str,
+    suffixes: &[char],
+    min_body_bytes: usize,
+) -> Option<(String, &'a str)> {
+    let (idx, ch) = s
+        .char_indices()
+        .find(|(idx, c)| *idx >= min_body_bytes && suffixes.contains(c))?;
     let end = idx + ch.len_utf8();
     Some((s[..end].to_string(), &s[end..]))
 }
 
-/// Take a `<digits-or-Chinese-numeral>+<suffix>` token. Returns the
-/// numeric / Chinese-numeral portion (without the suffix character)
-/// and advances `cursor`. Returns `None` if the token isn't present.
-fn take_numeric_token(cursor: &mut &str, suffix: char) -> Option<String> {
-    let re = numeric_suffix_regex(suffix);
-    let m = re.find(cursor)?;
-    let captured = re.captures(cursor)?;
-    let value = captured.get(1)?.as_str().to_string();
-    let end = m.end();
-    *cursor = &cursor[end..];
-    Some(value)
+/// Take a `<digits-or-Chinese-numeral>+<suffix>` token using a
+/// pre-compiled regex. Returns capture group 1 (the numeric portion
+/// without the suffix) and advances `cursor` past the match.
+fn take_numeric_token(cursor: &mut &str, re: &Regex) -> Option<String> {
+    take_regex_token(cursor, re)
 }
 
-/// Take a `<number>+號` token. Numbers can include `-` and `之`
-/// (e.g. `123-1號`, `45之2號`). Returns the digit portion without
-/// the 號 suffix.
-fn take_number_token(cursor: &mut &str, suffix: char) -> Option<String> {
-    debug_assert_eq!(suffix, '號');
-    // (\d+(-\d+)?(之\d+)?)號
-    let re = Regex::new(r"^.*?(\d+(?:-\d+)?(?:之\d+)?)號").ok()?;
-    let captures = re.captures(cursor)?;
-    let value = captures.get(1)?.as_str().to_string();
-    let end = captures.get(0)?.end();
-    *cursor = &cursor[end..];
-    Some(value)
-}
-
-/// Take a floor token. Accepts `123樓`, `B1樓`, `12F`, `B1F` —
-/// the trailing 樓 or F. Returns the raw token without the suffix.
-fn take_floor(cursor: &mut &str) -> Option<String> {
-    // Floors are commonly the last thing, so we accept either 樓
-    // or `F`/`f`. The captured group is the alphanumeric / B-prefix
-    // run; "B1" + "F" is one valid form.
-    let re = Regex::new(r"^.*?(B?\d+)(?:樓|F|f)").ok()?;
+/// Generic helper: run `re` against `cursor`, take capture group 1,
+/// advance `cursor` past the full match. The regexes used here are
+/// expected to anchor with `^.*?` and capture exactly one group.
+fn take_regex_token(cursor: &mut &str, re: &Regex) -> Option<String> {
     let captures = re.captures(cursor)?;
     let value = captures.get(1)?.as_str().to_string();
     let end = captures.get(0)?.end();
@@ -237,9 +253,7 @@ fn take_floor(cursor: &mut &str) -> Option<String> {
 }
 
 /// Build the regex that matches a `<digits-or-Chinese-numeral>+<suffix>`
-/// token. Cached per-suffix would be nicer but the tool's call rate
-/// is per-request, not hot-loop, so the rebuild cost is negligible
-/// against tracing overhead.
+/// token. Called once per suffix at module init via `LazyLock`.
 fn numeric_suffix_regex(suffix: char) -> Regex {
     // The group is digits OR Chinese numerals. Chinese numerals
     // for sections / lanes / alleys typically use the single
@@ -367,10 +381,13 @@ mod tests {
     }
 
     #[test]
-    fn taitung_county_keeps_traditional_form() {
-        // 臺東縣 keeps the 臺 form because that's the official admin
-        // name (per 戶政司). The mapping is only for the 直轄市
-        // reorganisation cases.
+    fn taitung_county_normalises_traditional_to_simplified() {
+        // 臺東縣 → 台東縣 via the COUNTY_ALIASES map: we normalise
+        // the 臺 prefix to 台 consistently with the rest of the
+        // canonical-form output, so downstream callers don't have
+        // to handle both glyph forms. The county itself stays as
+        // a 縣 (not a 直轄市) — the 改制 mapping only applies to
+        // the five reorganised entities.
         let out = normalize_address("臺東縣台東市中華路一段1號");
         assert_eq!(out.county.as_deref(), Some("台東縣"));
     }
@@ -463,6 +480,24 @@ mod tests {
         assert_eq!(out.district, None);
         assert_eq!(out.road, None);
         assert_eq!(out.number, None);
+    }
+
+    /// Locks the R1 fix for district scan stealing a road suffix
+    /// when the district is omitted. Input has a real county
+    /// ("台北市") but no district — the next character after the
+    /// county is the start of the road ("市府路"). The district
+    /// scan must not consume that leading "市".
+    #[test]
+    fn district_scan_rejects_suffix_at_index_zero() {
+        let out = normalize_address("台北市市府路45號");
+        assert_eq!(out.county.as_deref(), Some("台北市"));
+        assert_eq!(out.district, None, "district was empty in input");
+        assert_eq!(
+            out.road.as_deref(),
+            Some("市府路"),
+            "road must keep its leading 市, not have it eaten by the district scan",
+        );
+        assert_eq!(out.number.as_deref(), Some("45"));
     }
 
     #[test]
