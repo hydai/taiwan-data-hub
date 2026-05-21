@@ -19,6 +19,13 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rmcp = { workspace = true }
+# DatasetEngine (#3.1) — Polars LazyFrame helper used by every rich
+# MCP tool in M3 (#3.2 describe_schema, #3.3 get_sample, #3.4
+# join_datasets, #3.5 aggregate_dataset). Living in mcp-core is the
+# DoD's call: the engine is part of the MCP server's core capability,
+# not a per-tool implementation detail.
+polars = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
