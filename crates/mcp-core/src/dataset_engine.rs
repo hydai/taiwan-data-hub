@@ -61,9 +61,14 @@
 //! ## Error sanitisation
 //!
 //! **Treat every [`EngineError`] variant as potentially sensitive.**
-//! - [`EngineError::Polars`] carries Polars' raw `Display`, which
-//!   can include file paths, schema details, byte offsets, and
-//!   column names.
+//! - [`EngineError::Polars`] is built as
+//!   `<op>[ (<path>)]: <polars message>` — the leading op label
+//!   (`scan parquet`, `scan csv`, `scan ndjson`, or `collect`) and
+//!   the optional path are *engine-controlled* and form a stable
+//!   contract callers/tests can assert on; the trailing message is
+//!   Polars' raw `Display` and can include schema details, byte
+//!   offsets, and column names (and isn't a stable assertion
+//!   target — Polars wording shifts across patch releases).
 //! - [`EngineError::InvalidOption`] includes a lossy-rendered form
 //!   of the offending input — today that's the dataset path via
 //!   `path.display()`. The exact byte sequence isn't preserved (and
@@ -132,10 +137,23 @@ pub struct LoadOptions {
 /// Callers serialising to MCP clients should sanitise both variants
 /// before responding; the module-level "Error sanitisation" docs
 /// and `tools_data::query_rows` document the canonical pattern.
+///
+/// ## Stable contract for `Polars` messages
+///
+/// The engine wraps every [`PolarsError`] with an engine-owned
+/// prefix before exposing it: `<op>[ (<path>)]: <polars message>`.
+/// Callers and tests can assert on the engine-controlled prefix
+/// (`op` is one of `scan parquet`, `scan csv`, `scan ndjson`, or
+/// `collect`; `path` appears for scan ops only) without coupling
+/// to upstream Polars wording. The trailing `<polars message>`
+/// stays as Polars' raw `Display`, so logs keep the upstream
+/// detail — but it isn't a stable test target.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    /// Polars reader / scan / lazy-plan failure. The string is
-    /// Polars' own `Display` of the underlying error and may include
+    /// Polars reader / scan / lazy-plan failure, wrapped with the
+    /// engine's own context prefix (see the type-level "Stable
+    /// contract" note). The prefix is engine-controlled; the
+    /// remaining detail is Polars' raw `Display` and may include
     /// paths, schemas, byte offsets, or column names.
     #[error("polars: {0}")]
     Polars(String),
@@ -147,12 +165,6 @@ pub enum EngineError {
     /// (e.g. min/max bounds on `row_limit`) would surface here too.
     #[error("invalid input: {0}")]
     InvalidOption(String),
-}
-
-impl From<PolarsError> for EngineError {
-    fn from(value: PolarsError) -> Self {
-        Self::Polars(value.to_string())
-    }
 }
 
 /// Namespace for the engine's associated functions. The struct
@@ -177,18 +189,28 @@ impl DatasetEngine {
         // can't tell the difference between "I lost a byte" and "this
         // file genuinely doesn't exist". Surfacing `InvalidOption`
         // here gives the caller a deterministic error to handle.
+        //
+        // Polars errors are wrapped with the engine's own context
+        // prefix (`scan <kind> (<path>): <polars message>`) so
+        // callers/tests assert on engine-controlled wording instead
+        // of upstream Polars `Display` (which isn't a stable API).
         let raw = match source {
             DatasetSource::Parquet(p) => {
                 let s = utf8_path(p)?;
-                LazyFrame::scan_parquet(s.into(), ScanArgsParquet::default())?
+                LazyFrame::scan_parquet(s.into(), ScanArgsParquet::default())
+                    .map_err(|e| polars_err_with_path("scan parquet", p, &e))?
             }
             DatasetSource::Csv(p) => {
                 let s = utf8_path(p)?;
-                LazyCsvReader::new(s.into()).finish()?
+                LazyCsvReader::new(s.into())
+                    .finish()
+                    .map_err(|e| polars_err_with_path("scan csv", p, &e))?
             }
             DatasetSource::NdJson(p) => {
                 let s = utf8_path(p)?;
-                LazyJsonLineReader::new(s.into()).finish()?
+                LazyJsonLineReader::new(s.into())
+                    .finish()
+                    .map_err(|e| polars_err_with_path("scan ndjson", p, &e))?
             }
         };
 
@@ -219,8 +241,26 @@ impl DatasetEngine {
     /// **Blocking**: do not call from an async task without
     /// `spawn_blocking`. Polars `collect` is fully synchronous.
     pub fn collect(lf: LazyFrame) -> Result<DataFrame, EngineError> {
-        Ok(lf.collect()?)
+        lf.collect().map_err(|e| polars_err("collect", &e))
     }
+}
+
+/// Wrap a Polars error with engine-owned context. The `op` string
+/// (`"scan parquet"`, `"collect"`, etc.) is the stable contract
+/// callers can assert on; `err`'s `Display` follows and may shift
+/// between Polars patch releases. `&err` because `Display` only
+/// reads the value — taking by value would force a move at the
+/// call site for no benefit.
+fn polars_err(op: &str, err: &PolarsError) -> EngineError {
+    EngineError::Polars(format!("{op}: {err}"))
+}
+
+/// Same as [`polars_err`] but interpolates the dataset path into the
+/// engine-owned prefix — used by `scan` so logs (and tests) see the
+/// path the engine was reading without depending on Polars' own
+/// path formatting.
+fn polars_err_with_path(op: &str, path: &Path, err: &PolarsError) -> EngineError {
+    EngineError::Polars(format!("{op} ({}): {err}", path.display()))
 }
 
 /// Require the input path to be valid UTF-8. Polars' lazy readers
@@ -361,12 +401,18 @@ mod tests {
         let Err(err) = DatasetEngine::collect(lf) else {
             panic!("collect should fail for unknown column");
         };
+        assert!(
+            matches!(err, EngineError::Polars(_)),
+            "expected Polars variant, got: {err}",
+        );
         let msg = format!("{err}");
+        // Assertions target only engine-owned text — the `polars:`
+        // variant prefix and our own `collect:` op label. The
+        // remainder of the message is Polars' raw `Display` and is
+        // intentionally not asserted on (Polars wording is not a
+        // stable API; see EngineError type docs).
         assert!(msg.starts_with("polars:"), "got: {msg}");
-        // Polars' message must mention the missing column for the
-        // caller to know what went wrong (after they sanitise it for
-        // outward-facing logs).
-        assert!(msg.contains("nope"), "got: {msg}");
+        assert!(msg.contains("collect:"), "got: {msg}");
     }
 
     #[test]
@@ -455,15 +501,20 @@ mod tests {
                 Ok(_) => panic!("expected scan/collect to fail for missing file"),
             },
         };
-        // Three assertions, each pinning a separate part of the
-        // contract this test claims to cover:
-        // 1. variant — must be `Polars`, not `InvalidOption` etc.
-        // 2. prefix  — `EngineError::Display` impl puts `polars:`
-        //              up front; lock that wire format.
-        // 3. content — Polars' "file not found" message must echo
-        //              the missing filename, otherwise sanitisation
-        //              callers downstream can't pull useful context
-        //              for their logs.
+        // Assertions target only engine-controlled text — variant,
+        // variant-Display prefix, and an engine op label. **No
+        // assertion on Polars' raw message body**: Polars wording
+        // isn't a stable API across patch releases (see EngineError
+        // type docs).
+        //
+        // Polars `scan_parquet` is fully lazy — the missing-file
+        // error fires at `collect()`, never at scan — so the op
+        // label we see here is `collect`, even though the engine
+        // is happy to label scan-time failures with `scan parquet`
+        // when they occur eagerly (e.g. on CSV / NDJSON schema
+        // inference). The OR-of-engine-labels keeps the test stable
+        // against Polars deciding to validate eagerly in a future
+        // version.
         assert!(
             matches!(err, EngineError::Polars(_)),
             "expected Polars variant, got: {err}",
@@ -471,8 +522,8 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.starts_with("polars:"), "got: {msg}");
         assert!(
-            msg.contains(filename),
-            "missing-file error must mention the filename for log debugging: {msg}",
+            msg.contains("scan parquet") || msg.contains("collect"),
+            "missing-file error must carry an engine-owned op label: {msg}",
         );
     }
 
