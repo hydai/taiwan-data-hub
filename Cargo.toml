@@ -61,7 +61,7 @@ tokio-cron-scheduler = "0.15.1"
 #   loaders (#3.1). Polars' `json` feature exposes
 #   `LazyJsonLineReader` for newline-delimited JSON; plain-object
 #   JSON files aren't a supported lazy source upstream.
-polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming", "csv", "json", "approx_unique"] }
+polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming", "csv", "json", "approx_unique", "random"] }
 # Aligned with the version `polars-sql` 0.53 transitively pulls in.
 # Pinning a newer release would double-compile sqlparser; the API
 # surface we use (`Visit`/`Visitor`/`LimitClause`/`TableFactor`) is
