@@ -138,6 +138,14 @@ pub enum DateError {
 }
 
 /// Bounds of the static table support. Inclusive on both ends.
+///
+/// Note: lunar years are offset — a Gregorian date in early
+/// `SUPPORTED_YEAR_MIN` (before lunar new year of that year)
+/// requires the *previous* year's lunar table. v0.1 does not
+/// bake lunar `SUPPORTED_YEAR_MIN - 1`, so a small slice of
+/// `SUPPORTED_YEAR_MIN` Gregorian dates surfaces as
+/// `UnsupportedYear(SUPPORTED_YEAR_MIN - 1)`. The error message
+/// names the missing year so callers know what to extend.
 pub const SUPPORTED_YEAR_MIN: i32 = 2024;
 pub const SUPPORTED_YEAR_MAX: i32 = 2027;
 
@@ -169,8 +177,17 @@ pub fn gregorian_to_roc(year: i32, month: u32, day: u32) -> Result<DateConversio
     })
 }
 
-/// Convert a Gregorian date to lunar. Table-based for the
-/// supported year range.
+/// Convert a Gregorian date to lunar via the baked tables.
+///
+/// **Supported range nuance**: the lunar year is offset from the
+/// Gregorian year — a lunar year *starts* late January or
+/// February of its Gregorian year. So a Gregorian date between
+/// `Jan 1` and `lunar new year` of `Y` actually belongs to lunar
+/// year `Y-1`. The conversion transparently re-anchors on the
+/// previous year's table when it's available; otherwise it
+/// returns `UnsupportedYear(Y-1)` so the caller knows *which*
+/// year needs adding (e.g. `2024-01-15` needs lunar 2023's
+/// table, which v0.1 does not bake).
 pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, DateError> {
     validate_gregorian(year, month, day)?;
     if !(SUPPORTED_YEAR_MIN..=SUPPORTED_YEAR_MAX).contains(&year) {

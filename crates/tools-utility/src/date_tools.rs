@@ -222,8 +222,12 @@ fn kind_of(v: &Value) -> &'static str {
 /// outer value, so by-reference is what clippy wants.
 fn map_date_error(err: &DateError) -> ToolError {
     match *err {
-        DateError::UnsupportedYear(_) => ToolError::InvalidArguments(format!(
-            "year is outside the supported {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX} range — extend the static table in tools-utility/src/date.rs to add more years",
+        DateError::UnsupportedYear(unsupported) => ToolError::InvalidArguments(format!(
+            "needs the lunar table for year {unsupported}, which is outside the supported \
+             {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX} range. Note: Gregorian dates between \
+             Jan 1 and lunar new year fall in the *previous* lunar year (e.g. 2024-01-15 \
+             needs the lunar 2023 table). Extend the static table in \
+             tools-utility/src/date.rs to add the missing year."
         )),
         DateError::InvalidDate { year, month, day } => ToolError::InvalidArguments(format!(
             "invalid date: year={year} month={month} day={day}"
@@ -441,6 +445,25 @@ mod tests {
         );
         match err {
             ToolError::InvalidArguments(m) => assert!(m.contains("2024-2027"), "msg: {m}"),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    /// R3 fix: when a Gregorian date in 2024 (in-range) needs the
+    /// 2023 lunar table (out-of-range), the error must name 2023
+    /// specifically — not the user-supplied 2024 — so the caller
+    /// knows what to extend.
+    #[test]
+    fn pre_lunar_new_year_2024_names_2023_in_error() {
+        let err = invoke_err(
+            &GregorianToLunarTool,
+            json!({"year": 2024, "month": 1, "day": 15}),
+        );
+        match err {
+            ToolError::InvalidArguments(m) => {
+                assert!(m.contains("2023"), "must name 2023: {m}");
+                assert!(m.contains("lunar"), "must mention lunar: {m}");
+            }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
     }
