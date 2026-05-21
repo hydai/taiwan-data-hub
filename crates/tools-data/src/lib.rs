@@ -21,6 +21,7 @@
 pub mod describe_schema;
 pub mod domains;
 pub mod get_dataset;
+pub mod get_sample;
 pub mod list_domains;
 pub mod materialize_dataset;
 pub mod query_rows;
@@ -29,6 +30,7 @@ pub mod sql_guard;
 
 pub use describe_schema::{DescribeSchemaTool, TOOL_NAME as DESCRIBE_SCHEMA_TOOL_NAME};
 pub use get_dataset::{GetDatasetTool, TOOL_NAME as GET_DATASET_TOOL_NAME};
+pub use get_sample::{GetSampleTool, TOOL_NAME as GET_SAMPLE_TOOL_NAME};
 pub use list_domains::{ListDomainsTool, TOOL_NAME as LIST_DOMAINS_TOOL_NAME};
 pub use materialize_dataset::{
     MaterializeDatasetTool, ObjectStoreRouter, TOOL_NAME as MATERIALIZE_DATASET_TOOL_NAME,
@@ -101,7 +103,8 @@ pub fn register_db_tools_with(
         .register(GetDatasetTool::from_arc(reader))
         .register(SearchDatasetsTool::from_arc(searcher))
         .register(QueryRowsTool::from_arc(cache.clone()))
-        .register(DescribeSchemaTool::from_arc(cache))
+        .register(DescribeSchemaTool::from_arc(cache.clone()))
+        .register(GetSampleTool::from_arc(cache))
         .register(MaterializeDatasetTool::from_arcs(
             view,
             recorder,
