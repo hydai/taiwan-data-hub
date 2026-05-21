@@ -9,11 +9,19 @@
 //!
 //! ## Threading model
 //!
-//! Polars is sync/blocking. Callers running under an async runtime
-//! must wrap `collect()` in `tokio::task::spawn_blocking` (see
-//! `tools-data::query_rows` for the established pattern). The engine
-//! itself stays sync to keep the API the same for blocking and async
-//! consumers.
+//! Polars is sync/blocking, and both halves of the pipeline can do
+//! real I/O:
+//!
+//! - [`DatasetEngine::scan`] reads file footers / infers schemas
+//!   (Parquet validates the footer, CSV / NDJSON probe rows for
+//!   types) — not a no-op.
+//! - [`DatasetEngine::collect`] executes the lazy plan.
+//!
+//! Callers running under an async runtime should wrap the **whole**
+//! `scan → pipeline → collect` chain in `tokio::task::spawn_blocking`,
+//! not just the `collect()`. The engine itself stays sync to keep
+//! the API identical for blocking and async consumers; see
+//! `tools-data::query_rows` for the established pattern.
 //!
 //! ## Memory bound
 //!
@@ -44,11 +52,18 @@
 //!
 //! ## Error sanitisation
 //!
-//! [`EngineError`] variants embed Polars' raw message, which can
-//! include file paths and schema details. Callers that surface
-//! errors to MCP clients should log the full error server-side and
-//! return a sanitised message (the `query_rows` tool is the
-//! reference implementation of this pattern).
+//! **Treat every [`EngineError`] variant as potentially sensitive.**
+//! - [`EngineError::Polars`] carries Polars' raw `Display`, which
+//!   can include file paths, schema details, byte offsets, and
+//!   column names.
+//! - [`EngineError::InvalidOption`] includes the offending input
+//!   verbatim — today that means the dataset path (via
+//!   `path.display()`).
+//!
+//! Callers that surface errors to MCP clients should log the full
+//! error server-side and return a sanitised message; the
+//! `query_rows` tool is the reference implementation of this
+//! pattern.
 
 use std::path::Path;
 
@@ -90,8 +105,13 @@ pub struct LoadOptions {
     pub row_limit: Option<u32>,
 }
 
-/// Errors the engine produces. Variants embed Polars' raw error text;
-/// callers serialising to MCP clients should sanitise.
+/// Errors the engine produces. **Every** variant can carry sensitive
+/// filesystem context — `Polars` embeds raw Polars output (paths,
+/// schemas, offsets, column names), and `InvalidOption` embeds the
+/// offending caller input verbatim (today: the rejected dataset
+/// path). Callers serialising to MCP clients should sanitise both
+/// variants before responding; the module-level "Error sanitisation"
+/// docs and `tools-data::query_rows` document the canonical pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// Polars reader / scan / lazy-plan failure. The string is
