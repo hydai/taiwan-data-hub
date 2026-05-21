@@ -118,6 +118,17 @@ impl ToolHandler for DescribeSchemaTool {
         // `DatasetEngine::scan` + `collect` are blocking — move to a
         // dedicated blocking task and bound the wallclock the same
         // way `query_rows` does.
+        //
+        // **Timeout limitation**: `tokio::time::timeout` is a
+        // caller-side deadline only. Dropping the `JoinHandle` does
+        // not preempt an OS thread, so a Polars scan that overruns
+        // the deadline keeps running on the blocking pool until it
+        // naturally completes — the *caller* gets the deadline
+        // error but resources aren't reclaimed. The MAX_SAMPLE_ROWS
+        // cap plus the bounded per-column work keep the worst-case
+        // wallclock predictable; a hard kill needs worker-process
+        // isolation (DESIGN.md §6, tracked separately, same as the
+        // identical caveat in `query_rows`).
         let work =
             tokio::task::spawn_blocking(move || introspect_parquet(&parquet_path, MAX_SAMPLE_ROWS));
 
@@ -265,15 +276,21 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
         let dtype = format!("{}", column.dtype());
         let nullable = column.null_count() > 0;
 
-        // Sample values: drop_null → head(5). The drop_null call
-        // is what makes "first 5 *non-null*" hold — without it a
-        // column whose first values are nulls would surface only
-        // nulls.
-        let non_null = column.drop_nulls();
-        let head = non_null.head(Some(SAMPLE_VALUE_COUNT));
+        // Sample values: iterate row-by-row and short-circuit once
+        // SAMPLE_VALUE_COUNT non-null values are found. The earlier
+        // `column.drop_nulls()` materialised an entire non-null
+        // Series per column — wasteful for wide tables (up to 100k
+        // rows × N columns) when we only need 5 values. The
+        // iterator path allocates one Vec of at most 5 entries.
         let mut sample_values = Vec::with_capacity(SAMPLE_VALUE_COUNT);
-        for i in 0..head.len() {
-            sample_values.push(any_value_to_json(&head.get(i).unwrap_or(AnyValue::Null)));
+        for i in 0..column.len() {
+            if sample_values.len() == SAMPLE_VALUE_COUNT {
+                break;
+            }
+            let cell = column.get(i).unwrap_or(AnyValue::Null);
+            if !matches!(cell, AnyValue::Null) {
+                sample_values.push(any_value_to_json(&cell));
+            }
         }
 
         // approx_n_unique returns one cell per column. Polars
@@ -517,7 +534,7 @@ fn output_schema() -> Map<String, Value> {
             "row_count": {
                 "type": "integer",
                 "minimum": 0,
-                "description": "Rows the scan returned. May be `sample_cap` if the underlying file is larger.",
+                "description": "Number of rows the engine used to compute stats and sample values (always ≤ `sample_cap`). When `sampled=true` the underlying dataset has *more* rows than this — `row_count` is not the total file size.",
             },
             "sampled": {
                 "type": "boolean",
