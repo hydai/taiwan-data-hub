@@ -444,7 +444,8 @@ mod tests {
         // duration of the test and is reaped on drop, so the
         // *filename* inside it is guaranteed not to exist.
         let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("__guaranteed_missing__.parquet");
+        let filename = "__guaranteed_missing__.parquet";
+        let path = dir.path().join(filename);
         let scan_result =
             DatasetEngine::scan(DatasetSource::Parquet(&path), &LoadOptions::default());
         let err = match scan_result {
@@ -454,8 +455,25 @@ mod tests {
                 Ok(_) => panic!("expected scan/collect to fail for missing file"),
             },
         };
+        // Three assertions, each pinning a separate part of the
+        // contract this test claims to cover:
+        // 1. variant — must be `Polars`, not `InvalidOption` etc.
+        // 2. prefix  — `EngineError::Display` impl puts `polars:`
+        //              up front; lock that wire format.
+        // 3. content — Polars' "file not found" message must echo
+        //              the missing filename, otherwise sanitisation
+        //              callers downstream can't pull useful context
+        //              for their logs.
+        assert!(
+            matches!(err, EngineError::Polars(_)),
+            "expected Polars variant, got: {err}",
+        );
         let msg = format!("{err}");
         assert!(msg.starts_with("polars:"), "got: {msg}");
+        assert!(
+            msg.contains(filename),
+            "missing-file error must mention the filename for log debugging: {msg}",
+        );
     }
 
     /// The engine's return value is a *real* `LazyFrame` — downstream
