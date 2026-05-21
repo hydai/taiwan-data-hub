@@ -135,13 +135,15 @@ pub enum DateError {
     #[error("year {0} is out of the supported range")]
     UnsupportedYear(i32),
     /// Lunar conversion needs the prev-year table for a Gregorian
-    /// date before that year's lunar new year, and the
-    /// requested lunar year isn't baked. Distinct from
-    /// `UnsupportedYear` so callers can produce an accurate
-    /// "Gregorian X needs lunar Y" message.
+    /// date before that year's lunar new year, and the requested
+    /// lunar year isn't baked. Carries the full input Gregorian
+    /// date so the error message can name it precisely (distinct
+    /// from `UnsupportedYear` which lacks the date context).
     #[error("lunar conversion needs the lunar table for year {needed_lunar_year}")]
     UnsupportedLunarYear {
         input_gregorian_year: i32,
+        input_month: u32,
+        input_day: u32,
         needed_lunar_year: i32,
     },
     #[error("invalid date: year={year} month={month} day={day}")]
@@ -162,8 +164,9 @@ pub enum DateError {
 /// requires the *previous* year's lunar table. v0.1 does not
 /// bake lunar `SUPPORTED_YEAR_MIN - 1`, so a small slice of
 /// `SUPPORTED_YEAR_MIN` Gregorian dates surfaces as
-/// `UnsupportedYear(SUPPORTED_YEAR_MIN - 1)`. The error message
-/// names the missing year so callers know what to extend.
+/// `UnsupportedLunarYear { needed_lunar_year: SUPPORTED_YEAR_MIN - 1, .. }`.
+/// The error message names the missing year so callers know
+/// what to extend.
 pub const SUPPORTED_YEAR_MIN: i32 = 2024;
 pub const SUPPORTED_YEAR_MAX: i32 = 2027;
 
@@ -203,9 +206,10 @@ pub fn gregorian_to_roc(year: i32, month: u32, day: u32) -> Result<DateConversio
 /// `Jan 1` and `lunar new year` of `Y` actually belongs to lunar
 /// year `Y-1`. The conversion transparently re-anchors on the
 /// previous year's table when it's available; otherwise it
-/// returns `UnsupportedYear(Y-1)` so the caller knows *which*
-/// year needs adding (e.g. `2024-01-15` needs lunar 2023's
-/// table, which v0.1 does not bake).
+/// returns `UnsupportedLunarYear { needed_lunar_year: Y-1, .. }`
+/// so the caller knows *which* year needs adding (e.g.
+/// `2024-01-15` needs lunar 2023's table, which v0.1 does not
+/// bake).
 pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, DateError> {
     validate_gregorian(year, month, day)?;
     if !(SUPPORTED_YEAR_MIN..=SUPPORTED_YEAR_MAX).contains(&year) {
@@ -251,6 +255,8 @@ pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, 
         }
         return Err(DateError::UnsupportedLunarYear {
             input_gregorian_year: year,
+            input_month: month,
+            input_day: day,
             needed_lunar_year: year - 1,
         });
     }

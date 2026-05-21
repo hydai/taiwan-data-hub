@@ -229,13 +229,15 @@ fn map_date_error(err: &DateError) -> ToolError {
         )),
         DateError::UnsupportedLunarYear {
             input_gregorian_year,
+            input_month,
+            input_day,
             needed_lunar_year,
         } => ToolError::InvalidArguments(format!(
-            "Gregorian {input_gregorian_year}-MM-DD needs the lunar table for year \
-             {needed_lunar_year}, which is outside the supported {SUPPORTED_YEAR_MIN}-\
-             {SUPPORTED_YEAR_MAX} range. Gregorian dates between Jan 1 and lunar new year \
-             fall in the *previous* lunar year. Extend the static table in \
-             tools-utility/src/date.rs to add the missing year."
+            "Gregorian {input_gregorian_year}-{input_month:02}-{input_day:02} needs the \
+             lunar table for year {needed_lunar_year}, which is outside the supported \
+             {SUPPORTED_YEAR_MIN}-{SUPPORTED_YEAR_MAX} range. Gregorian dates between \
+             Jan 1 and lunar new year fall in the *previous* lunar year. Extend the \
+             static table in tools-utility/src/date.rs to add the missing year."
         )),
         DateError::InvalidDate { year, month, day } => ToolError::InvalidArguments(format!(
             "invalid date: year={year} month={month} day={day}"
@@ -511,6 +513,12 @@ mod tests {
             ToolError::InvalidArguments(m) => {
                 assert!(m.contains("2023"), "must name 2023: {m}");
                 assert!(m.contains("lunar"), "must mention lunar: {m}");
+                // Full date appears (zero-padded) so callers can
+                // copy-paste it without re-checking inputs.
+                assert!(
+                    m.contains("2024-01-15"),
+                    "must include the input date verbatim: {m}",
+                );
             }
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
