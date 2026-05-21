@@ -48,9 +48,12 @@ pub const MAX_SAMPLE_ROWS: u32 = 100_000;
 /// order, no random sample.
 pub const SAMPLE_VALUE_COUNT: usize = 5;
 
-/// Per-call deadline. Matches the `query_rows` cap so an
-/// accidentally-huge schema scan (rare — schema is wide, not deep)
-/// can't tie up the blocking pool indefinitely.
+/// Per-call deadline. Deliberately higher than `query_rows`'s 5s
+/// cap because `describe_schema` runs *per-column* work (sample
+/// materialise + HLL pass) over up to `MAX_SAMPLE_ROWS` rows;
+/// wider tables can approach the cap legitimately. An accidentally
+/// huge schema scan still cannot tie up the blocking pool
+/// indefinitely.
 const SCHEMA_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads from any [`DatasetCacheLookup`]; production wires a
@@ -273,23 +276,12 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
             sample_values.push(any_value_to_json(&head.get(i).unwrap_or(AnyValue::Null)));
         }
 
-        // approx_n_unique returns a single u64 cell per column.
-        // Polars sometimes surfaces the result as Int64 (lazy-plan
-        // fallback for small inputs); narrow the conversion to
-        // non-negative integers and route through u64::try_from to
-        // avoid `n as u64` sign-loss warnings.
-        let approx_distinct_count = approx_frame
-            .column(&name)
-            .ok()
-            .and_then(|c| c.get(0).ok())
-            .and_then(|av| match av {
-                AnyValue::UInt32(n) => Some(u64::from(n)),
-                AnyValue::UInt64(n) => Some(n),
-                AnyValue::Int64(n) => u64::try_from(n).ok(),
-                AnyValue::Int32(n) => u64::try_from(n).ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
+        // approx_n_unique returns one cell per column. Polars
+        // surfaces it as UInt32/UInt64 normally, occasionally as
+        // Int64 from the lazy-plan fallback on small inputs. Surface
+        // every other shape as an EngineError so a Polars contract
+        // shift doesn't silently masquerade as "0 distinct values".
+        let approx_distinct_count = approx_distinct_from_cell(&approx_frame, &name)?;
 
         columns.push(ColumnReport {
             name,
@@ -305,6 +297,46 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
         row_count: df.height(),
         sampled,
     })
+}
+
+/// Extract the `approx_n_unique` result from the 1-row aggregation
+/// frame Polars returns. Every unexpected shape — missing column,
+/// empty result, negative integer, or a dtype the engine hasn't been
+/// taught about — surfaces as `EngineError::Polars` with the engine's
+/// `describe_schema:` prefix so contract drifts don't silently
+/// degrade to "0 distinct values" downstream.
+fn approx_distinct_from_cell(frame: &DataFrame, col_name: &str) -> Result<u64, EngineError> {
+    let column = frame.column(col_name).map_err(|_| {
+        EngineError::Polars(format!(
+            "describe_schema: approx_n_unique result missing column `{col_name}`",
+        ))
+    })?;
+    let cell = column.get(0).map_err(|_| {
+        EngineError::Polars(format!(
+            "describe_schema: approx_n_unique returned empty result for column `{col_name}`",
+        ))
+    })?;
+    match cell {
+        AnyValue::UInt32(n) => Ok(u64::from(n)),
+        AnyValue::UInt64(n) => Ok(n),
+        AnyValue::Int64(n) => u64::try_from(n).map_err(|_| {
+            EngineError::Polars(format!(
+                "describe_schema: approx_n_unique returned negative Int64 ({n}) for column `{col_name}`",
+            ))
+        }),
+        AnyValue::Int32(n) => u64::try_from(n).map_err(|_| {
+            EngineError::Polars(format!(
+                "describe_schema: approx_n_unique returned negative Int32 ({n}) for column `{col_name}`",
+            ))
+        }),
+        // Empty / all-null columns yield 0 distinct non-nulls; map
+        // Polars' Null cell to 0 explicitly so this case stays
+        // intentional rather than silently caught by the catch-all.
+        AnyValue::Null => Ok(0),
+        other => Err(EngineError::Polars(format!(
+            "describe_schema: approx_n_unique returned unexpected type for column `{col_name}`: {other}",
+        ))),
+    }
 }
 
 /// Resolve the file-system path Polars should scan. Mirrors
