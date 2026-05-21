@@ -31,18 +31,71 @@ use crate::{national_id, passport, tax_id};
 
 pub const TOOL_NAME: &str = "tw_validate_id";
 
-/// User-facing `kind` values accepted on input. `arc` is an alias for
-/// the modern unified resident-permit format (covered by
-/// `national_id` since 2021). It's kept as a separate input value so
-/// callers asking "is this an ARC?" can express that intent
-/// explicitly; we route it through `national_id::validate` and the
-/// output kind echoes `arc` when the value matches the modern
-/// envelope, or surfaces `legacy_resident` when the value matches
-/// the pre-2021 2-letter envelope (an *output-only* kind — callers
-/// can't request it via `kind=`). The underlying narrowed kind like
-/// `resident` is never echoed when the caller requested `arc`. See
-/// [`dispatch_arc`] for the full echo-vs-narrow rules.
-const ACCEPTED_KINDS: &[&str] = &["auto", "national_id", "tax_id", "arc", "passport"];
+/// User-facing `kind` values accepted on input. Each variant has a
+/// stable wire name (via [`RequestedKind::as_str`]) which is the
+/// single source of truth for the dispatch match arms, the JSON
+/// schema's `kind.enum`, and the error message listing accepted
+/// values. Adding a new kind = add a variant + extend `ALL` + add
+/// a match arm in `dispatch`; the compiler enforces exhaustiveness.
+///
+/// `Arc` is an alias for the modern unified resident-permit format
+/// (covered by `national_id` since 2021). It's kept as a separate
+/// input value so callers asking "is this an ARC?" can express that
+/// intent explicitly; we route it through `national_id::validate`
+/// and the output kind echoes `arc` when the value matches the
+/// modern envelope, or surfaces `legacy_resident` when the value
+/// matches the pre-2021 2-letter envelope (an *output-only* kind —
+/// callers can't request it via `kind=`). The underlying narrowed
+/// kind like `resident` is never echoed when the caller requested
+/// `arc`. See [`dispatch_arc`] for the full echo-vs-narrow rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedKind {
+    Auto,
+    NationalId,
+    TaxId,
+    Arc,
+    Passport,
+}
+
+impl RequestedKind {
+    /// Display order = input-schema enum order = error-message order.
+    /// Keep `Auto` first so docs and tooling that lift the first
+    /// entry as the "default" find the right value.
+    const ALL: [RequestedKind; 5] = [
+        Self::Auto,
+        Self::NationalId,
+        Self::TaxId,
+        Self::Arc,
+        Self::Passport,
+    ];
+
+    /// Stable wire name. Don't reorder or rename — it's part of the
+    /// MCP tool's external contract.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::NationalId => "national_id",
+            Self::TaxId => "tax_id",
+            Self::Arc => "arc",
+            Self::Passport => "passport",
+        }
+    }
+
+    fn from_wire(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.as_str() == s)
+    }
+
+    /// Accepted wire names as a comma-separated, quoted list for
+    /// error messages. Built fresh each time (no allocation in the
+    /// hot path; only invoked on `InvalidArguments`).
+    fn accepted_wire_names() -> String {
+        Self::ALL
+            .iter()
+            .map(|k| format!("\"{}\"", k.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ValidateIdTool;
@@ -81,17 +134,16 @@ impl ToolHandler for ValidateIdTool {
         // regardless of `kind`.
         let tax_opts = tax_id::Options { strict };
 
-        let response = match requested_kind.as_str() {
-            "auto" => dispatch_auto(&value, tax_opts),
-            "national_id" => dispatch_national_id(&value),
-            "arc" => dispatch_arc(&value),
-            "tax_id" => dispatch_tax_id(&value, tax_opts),
-            "passport" => dispatch_passport(&value),
-            other => {
-                return Err(ToolError::InvalidArguments(format!(
-                    "`kind` must be one of {ACCEPTED_KINDS:?}, got {other:?}"
-                )));
-            }
+        // Exhaustive match over `RequestedKind`; the compiler refuses
+        // to compile if a new variant is added without wiring it up
+        // here, which is exactly the drift-prevention the dedupe
+        // earned.
+        let response = match requested_kind {
+            RequestedKind::Auto => dispatch_auto(&value, tax_opts),
+            RequestedKind::NationalId => dispatch_national_id(&value),
+            RequestedKind::Arc => dispatch_arc(&value),
+            RequestedKind::TaxId => dispatch_tax_id(&value, tax_opts),
+            RequestedKind::Passport => dispatch_passport(&value),
         };
         Ok(response)
     }
@@ -129,11 +181,22 @@ fn parse_value(args: &Value) -> Result<String, ToolError> {
     }
 }
 
-fn parse_kind(args: &Value) -> Result<String, ToolError> {
+/// Parses the `kind` argument and resolves it to a [`RequestedKind`].
+/// Missing / null / empty-string all default to `Auto`. Unknown
+/// wire names surface as `InvalidArguments` with the full accepted
+/// list — the list is enumerated from `RequestedKind::ALL`, so it
+/// can't drift away from the dispatch arms.
+fn parse_kind(args: &Value) -> Result<RequestedKind, ToolError> {
     match args.get("kind") {
-        None | Some(Value::Null) => Ok("auto".to_string()),
-        Some(Value::String(s)) if s.is_empty() => Ok("auto".to_string()),
-        Some(Value::String(s)) => Ok(s.clone()),
+        None | Some(Value::Null) => Ok(RequestedKind::Auto),
+        Some(Value::String(s)) if s.is_empty() => Ok(RequestedKind::Auto),
+        Some(Value::String(s)) => RequestedKind::from_wire(s).ok_or_else(|| {
+            ToolError::InvalidArguments(format!(
+                "`kind` must be one of {}, got {:?}",
+                RequestedKind::accepted_wire_names(),
+                s
+            ))
+        }),
         Some(other) => Err(ToolError::InvalidArguments(format!(
             "`kind` must be a string, got {}",
             kind_of(other)
@@ -296,6 +359,16 @@ fn dispatch_passport(value: &str) -> Value {
 }
 
 fn input_schema() -> Map<String, Value> {
+    // Derive the `kind` enum from `RequestedKind::ALL` so the schema
+    // can't drift away from the dispatch arms (or the error message
+    // in `parse_kind`). The default is the first variant by
+    // convention.
+    let kind_enum: Vec<Value> = RequestedKind::ALL
+        .iter()
+        .map(|k| Value::String(k.as_str().into()))
+        .collect();
+    let kind_default = Value::String(RequestedKind::Auto.as_str().into());
+
     json!({
         "type": "object",
         "required": ["value"],
@@ -311,8 +384,8 @@ fn input_schema() -> Map<String, Value> {
             },
             "kind": {
                 "type": "string",
-                "enum": ["auto", "national_id", "tax_id", "arc", "passport"],
-                "default": "auto",
+                "enum": kind_enum,
+                "default": kind_default,
                 "description": "Identifier family. `auto` (default) routes by \
                                  length+shape signature; explicit kinds force a \
                                  single validator and return valid=false when the \
@@ -410,6 +483,47 @@ mod tests {
         let d = ValidateIdTool::new().descriptor();
         assert_eq!(d.name, "tw_validate_id");
         assert!(d.output_schema.is_some());
+    }
+
+    /// Locks the round-7 dedupe: the input schema's `kind.enum` is
+    /// generated from `RequestedKind::ALL`, so this test fails the
+    /// instant either side drifts. Without it, a future PR could
+    /// add a variant + match arm and silently leave the schema stale.
+    #[test]
+    fn schema_kind_enum_matches_requested_kind_all() {
+        let d = ValidateIdTool::new().descriptor();
+        let schema_enum: Vec<&str> = d.input_schema["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("kind.enum is an array")
+            .iter()
+            .map(|v| v.as_str().expect("enum entries are strings"))
+            .collect();
+        let from_enum: Vec<&str> = RequestedKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(schema_enum, from_enum);
+        // Default must echo the first variant so docs/tooling that
+        // lift the default find a real wire name.
+        assert_eq!(
+            d.input_schema["properties"]["kind"]["default"]
+                .as_str()
+                .unwrap(),
+            RequestedKind::Auto.as_str()
+        );
+    }
+
+    #[test]
+    fn unknown_kind_error_lists_accepted_values() {
+        // The dedupe means the accepted-values list in the error
+        // message is built from `RequestedKind::ALL`; this test
+        // double-checks the wiring rather than the formatting itself.
+        let err = invoke_err(json!({"value": "A123456789", "kind": "bogus"}));
+        let msg = format!("{err:?}");
+        for kind in RequestedKind::ALL {
+            assert!(
+                msg.contains(kind.as_str()),
+                "error message {msg:?} should mention {}",
+                kind.as_str()
+            );
+        }
     }
 
     #[test]
