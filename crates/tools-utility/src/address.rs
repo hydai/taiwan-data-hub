@@ -92,10 +92,13 @@ pub fn normalize_address(input: &str) -> AddressParts {
     // over "新北" (which isn't a real prefix but defends against
     // ambiguity if the list grows). Apply 改制 mapping so e.g. the
     // input "台中縣..." normalises to "台中市".
-    if let Some((matched, normalised, rest)) = strip_county_prefix(cursor) {
+    // `_matched_raw` would be the input prefix before normalisation
+    // (e.g. "臺東縣"); unused at the call site today but kept in the
+    // tuple so a future test / caller can compare pre- vs post-
+    // normalisation forms without re-running the matcher.
+    if let Some((_matched_raw, normalised, rest)) = strip_county_prefix(cursor) {
         out.county = Some(normalised.to_string());
         cursor = rest;
-        let _ = matched; // matched form preserved only for tests
     }
 
     // 2. District. Greedy scan to the next 鄉/鎮/市/區 character.
@@ -517,15 +520,12 @@ mod tests {
         assert_eq!(out.number.as_deref(), Some("45"));
     }
 
-    /// Bulk-coverage corpus: 20 well-formed addresses across all 22
-    /// canonical counties and a smattering of edge cases. Combined
-    /// with the targeted tests above, this gives us ≥40 distinct
-    /// parses — short of the issue's "100+ test cases" line but
-    /// covering each canonical county at least once. The bar is a
-    /// proxy for *coverage*, and the parser is regex-driven so
-    /// adding 80 more permutations would mostly re-test the same
-    /// suffix-detection branches. Issue tracker can extend this if
-    /// real-world failures surface.
+    /// Canonical-county corpus: 22 well-formed addresses, one per
+    /// county / 直轄市. Combined with the targeted single-purpose
+    /// tests above, the alias mapping corpus, and the
+    /// number/floor/section permutation matrix below, the total
+    /// assertion count clears the 100+ bar from the #3.7 issue's
+    /// Definition of Done.
     #[test]
     fn canonical_county_corpus() {
         let cases: &[(&str, &str)] = &[
@@ -594,5 +594,79 @@ mod tests {
                 "input `{input}` should normalise to `{expected_county}`",
             );
         }
+    }
+
+    /// Number/floor/section permutation matrix. Generates well over
+    /// 60 distinct parses by Cartesian-ing 4 number forms × 4 floor
+    /// forms × 4 section forms × 2 base addresses. Each assertion
+    /// hits an independent input string, so this isn't redundant
+    /// with the canonical / pre-reorg corpora — they cover
+    /// county/district variation; this matrix covers everything
+    /// after the road.
+    #[test]
+    fn permutation_matrix_numbers_floors_sections() {
+        // (number_token, expected_number_field)
+        let numbers: &[(&str, &str)] = &[
+            ("45", "45"),
+            ("100", "100"),
+            ("45-1", "45-1"),
+            ("123之5", "123之5"),
+        ];
+        // (floor_token_with_suffix, expected_floor_field).
+        // Last empty entry exercises the "no floor" path.
+        let floors: &[(&str, Option<&str>)] = &[
+            ("5樓", Some("5")),
+            ("12F", Some("12")),
+            ("B1F", Some("B1")),
+            ("", None),
+        ];
+        // (section_text_with_suffix, expected_section_field). Last
+        // empty entry exercises the "no section" path.
+        let sections: &[(&str, Option<&str>)] = &[
+            ("一段", Some("一")),
+            ("二段", Some("二")),
+            ("3段", Some("3")),
+            ("", None),
+        ];
+        // (county_prefix + district + road, expected_county).
+        let bases: &[(&str, &str)] = &[
+            ("台北市信義區市府路", "台北市"),
+            ("台中市西屯區台灣大道", "台中市"),
+        ];
+
+        let mut total = 0_usize;
+        for (base, expected_county) in bases {
+            for (sec_in, sec_out) in sections {
+                for (num_in, num_out) in numbers {
+                    for (floor_in, floor_out) in floors {
+                        let input = format!("{base}{sec_in}{num_in}號{floor_in}");
+                        let out = normalize_address(&input);
+                        assert_eq!(
+                            out.county.as_deref(),
+                            Some(*expected_county),
+                            "input `{input}` should parse county",
+                        );
+                        assert_eq!(
+                            out.number.as_deref(),
+                            Some(*num_out),
+                            "input `{input}` should parse number = `{num_out}`",
+                        );
+                        assert_eq!(
+                            out.section.as_deref(),
+                            *sec_out,
+                            "input `{input}` should parse section = {sec_out:?}",
+                        );
+                        assert_eq!(
+                            out.floor.as_deref(),
+                            *floor_out,
+                            "input `{input}` should parse floor = {floor_out:?}",
+                        );
+                        total += 1;
+                    }
+                }
+            }
+        }
+        // 2 bases × 4 sections × 4 numbers × 4 floors = 128 cases.
+        assert_eq!(total, 128, "permutation count drifted");
     }
 }

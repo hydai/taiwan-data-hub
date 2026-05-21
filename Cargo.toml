@@ -33,8 +33,12 @@ tower = { version = "0.5", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 # Used by `tools-utility::normalize_address` (#3.7) for the
-# Taiwan address-segmentation regex. Kept narrow (no `unicode-*`
-# features beyond defaults) so the supply-chain surface stays small.
+# Taiwan address-segmentation regex. Default features are enabled
+# (incl. Unicode tables); a `default-features = false` build would
+# compile our patterns (they use literal CJK chars, not class
+# escapes), but the perf-default features keep regex execution
+# fast and the size delta is small. Feature pinning is a tracked
+# follow-up if a dep-audit ever pressures it.
 regex = "1.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json"] }

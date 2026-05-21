@@ -1,10 +1,17 @@
 //! `tw_normalize_address` MCP tool — surfaces
 //! [`crate::address::normalize_address`] to MCP clients.
 //!
-//! The tool is intentionally permissive: it never errors on a junk
-//! input. The response is always `{ parts: {...}, normalized: bool }`
-//! where `parts` is the structured form with every field optional,
-//! and `normalized` is `true` when at least `county` and `district`
+//! The tool is intentionally permissive about the *content* of the
+//! address — pure-junk strings (Latin text, garbled CJK) don't
+//! error; they just return a struct of `None`s with
+//! `normalized: false`. The MCP argument shape is still validated,
+//! though: a missing, non-string, empty, or whitespace-only
+//! `address` surfaces as `ToolError::InvalidArguments` so callers
+//! can fix the call shape distinct from "the address didn't parse".
+//!
+//! The response is `{ parts: {...}, normalized: bool }` where
+//! `parts` is the structured form with every field optional, and
+//! `normalized` is `true` when at least `county` and `district`
 //! were parsed (the conservative "this looks like a Taiwan
 //! address" signal — agents can rely on it to decide whether to
 //! trust the breakdown).
@@ -93,7 +100,7 @@ fn input_schema() -> Map<String, Value> {
             "address": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Free-form Taiwan address. ASCII / 全形 whitespace and commas are stripped before parsing.",
+                "description": "Free-form Taiwan address. Must contain at least one non-whitespace character (whitespace-only strings are rejected after trimming). ASCII / 全形 whitespace and commas are stripped before parsing.",
             },
         },
         "additionalProperties": false,
