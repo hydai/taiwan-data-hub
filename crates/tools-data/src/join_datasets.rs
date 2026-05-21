@@ -257,60 +257,53 @@ fn run_join(
     // is a follow-up if a real use case emerges.
     let on_exprs: Vec<Expr> = on.iter().map(|c| col(c.as_str())).collect();
 
-    // Apply `.limit(join_cap + 1)` to the lazy plan so the join
-    // materialises at most one row past the cap. That's enough to
-    // signal "would have been larger" without blowing up memory if
-    // the join is wildly non-selective.
     let cap_plus_one = join_cap.saturating_add(1);
-    let joined_lf = left_lf
-        .join(right_lf, on_exprs.clone(), on_exprs, how.to_args())
-        .limit(cap_plus_one);
+    let joined_lf = left_lf.join(right_lf, on_exprs.clone(), on_exprs, how.to_args());
 
-    let joined = DatasetEngine::collect(joined_lf).map_err(|e| match e {
-        // The Polars error path for missing-key columns is the most
-        // common BadArgument case; sniff for the column names in the
-        // message so the agent gets actionable feedback instead of
-        // the generic "see server logs". Polars wording isn't a
-        // stable API — if this miss-detects we still log + return
-        // Execution, never crash.
-        EngineError::Polars(ref msg)
-            if on.iter().any(|c| msg.contains(c.as_str()))
-                && (msg.contains("not found")
-                    || msg.contains("ColumnNotFound")
-                    || msg.contains("unable to find")) =>
-        {
-            JoinError::BadArgument(format!(
-                "join key {on:?} not found in one or both datasets ({msg})",
-            ))
-        }
-        other => JoinError::Engine(other),
-    })?;
-
-    let total_height = joined.height();
-    let exceeded = total_height > join_cap as usize;
+    // Pass 1: count probe with `.limit(cap + 1)`. We never
+    // materialise the full join into memory — `select([len()])`
+    // collapses to one cell. The +1 probe lets us tell
+    // "exactly cap" from "clipped".
+    let probe_lf = joined_lf.clone().limit(cap_plus_one);
+    let count_frame =
+        DatasetEngine::collect(probe_lf.clone().select([len()])).map_err(|e| classify(e, on))?;
+    let total_probe: u64 = count_frame
+        .column("len")
+        .ok()
+        .and_then(|c| c.get(0).ok())
+        .and_then(|av| match av {
+            AnyValue::UInt32(n) => Some(u64::from(n)),
+            AnyValue::UInt64(n) => Some(n),
+            AnyValue::Int64(n) => u64::try_from(n).ok(),
+            AnyValue::Int32(n) => u64::try_from(n).ok(),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let exceeded = total_probe > u64::from(join_cap);
 
     if exceeded && !force {
         return Err(JoinError::TooLarge {
-            // The cap+1 probe gives us the lower bound, not the
-            // actual total. Report it as "at least" via the estimate
-            // (the wrapper formats it that way).
             estimate: u64::from(join_cap) + 1,
             cap: join_cap,
         });
     }
 
-    // Cap materialised rows at MAX_JOIN_ROWS for the response even
-    // when force=true; force exists to confirm the join was the
-    // intended op, not to disable the bounded-output contract.
-    let usable_total = total_height.min(join_cap as usize);
-    let usable = joined.head(Some(usable_total));
+    // Effective total after the cap clamp. Even with force=true the
+    // materialised total honours MAX_JOIN_ROWS — `force` exists to
+    // confirm intent, not to disable the bounded-output contract.
+    // total_probe is bounded by `join_cap + 1`, which fits in u32
+    // and therefore in usize on every supported target. try_from is
+    // conservative defence against the clippy lint.
+    let usable_total = usize::try_from(total_probe.min(u64::from(join_cap))).unwrap_or(usize::MAX);
 
-    // Pagination — `page` is 1-based, `page_size` clamped at
-    // MAX_PAGE_SIZE upstream. Slice returns an empty frame when the
-    // offset is past the end, which is the right behaviour for a
-    // "page out of range" query.
+    // Pass 2: collect only the requested page. `.slice(offset,
+    // page_size)` is folded into the lazy plan, so Polars stops
+    // joining after enough rows for the slice — for page 1 of 100
+    // that's typically <<1M rows of work even when the full join
+    // is much larger.
     let offset = i64::from(page.saturating_sub(1)).saturating_mul(i64::from(page_size));
-    let page_df = usable.slice(offset, page_size as usize);
+    let page_lf = probe_lf.slice(offset, page_size);
+    let collected_page = DatasetEngine::collect(page_lf).map_err(|e| classify(e, on))?;
 
     Ok(JoinReport {
         how_wire: how.as_wire(),
@@ -318,10 +311,35 @@ fn run_join(
         page_size,
         total_rows: usable_total,
         exceeded,
-        rows: page_df,
+        rows: collected_page,
     })
 }
 
+/// Classify a Polars collect error: the most common surface-level
+/// caller mistake is a missing join key column. Sniff for the
+/// requested key names in the error wording (Polars uses
+/// `ColumnNotFound` / `not found` / `unable to find`) and surface
+/// the actionable case as `BadArgument` — but **without** echoing
+/// the raw engine message, which may carry cache paths or schema
+/// details. The full message still ends up server-side via the
+/// `tracing::warn!` in `call()` because the `BadArgument` variant
+/// itself implements `Display`.
+fn classify(err: EngineError, on: &[String]) -> JoinError {
+    let EngineError::Polars(ref msg) = err else {
+        return JoinError::Engine(err);
+    };
+    let mentions_key = on.iter().any(|c| msg.contains(c.as_str()));
+    let mentions_missing = msg.contains("not found")
+        || msg.contains("ColumnNotFound")
+        || msg.contains("unable to find");
+    if mentions_key && mentions_missing {
+        JoinError::BadArgument(format!("join key {on:?} not found in one or both datasets"))
+    } else {
+        JoinError::Engine(err)
+    }
+}
+
+#[derive(Debug)]
 struct JoinReport {
     how_wire: &'static str,
     page: u32,
@@ -982,6 +1000,57 @@ mod tests {
             ToolError::InvalidArguments(m) => assert!(m.contains("left"), "got: {m}"),
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
+    }
+
+    /// Locks the safety-cap contract:
+    ///  - over-cap join with `force=false` → `JoinError::TooLarge`
+    ///  - over-cap join with `force=true`  → materialises only up
+    ///    to `join_cap` rows, sets `exceeded=true`
+    ///  - under-cap join → `exceeded=false`, `total_rows=actual`
+    ///
+    /// Uses a tiny per-test `join_cap` so we don't have to build
+    /// 1M-row fixtures. Plain `#[test]` (not `#[tokio::test]`)
+    /// because `run_join` is synchronous; Polars `collect` spins up
+    /// its own runtime and would panic in a Tokio context.
+    #[test]
+    fn safety_cap_rejects_without_force_and_truncates_with_force() {
+        let (_u, u_path) = write_users();
+        let (_o, o_path) = write_orders();
+        let on = vec!["uid".to_string()];
+
+        // Inner join produces 4 rows on the fixture. Setting join_cap=2
+        // is over-cap → should reject when force=false.
+        let err = run_join(&u_path, &o_path, &on, JoinHow::Inner, false, 1, 100, 100, 2)
+            .expect_err("over-cap without force");
+        match err {
+            JoinError::TooLarge { cap, estimate } => {
+                assert_eq!(cap, 2);
+                assert!(estimate >= 3, "estimate is cap+1 = 3, got {estimate}");
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+
+        // Same call with force=true → materialises only cap rows.
+        let report =
+            run_join(&u_path, &o_path, &on, JoinHow::Inner, true, 1, 100, 100, 2).expect("forced");
+        assert_eq!(report.total_rows, 2, "total_rows clamped to cap");
+        assert!(report.exceeded, "exceeded flag set when force=true clipped");
+
+        // Under-cap join — actual total returned, exceeded=false.
+        let under = run_join(
+            &u_path,
+            &o_path,
+            &on,
+            JoinHow::Inner,
+            false,
+            1,
+            100,
+            100,
+            100,
+        )
+        .expect("under cap");
+        assert_eq!(under.total_rows, 4);
+        assert!(!under.exceeded);
     }
 
     #[test]
