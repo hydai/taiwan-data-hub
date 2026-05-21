@@ -94,12 +94,25 @@ impl ToolHandler for ValidateIdTool {
     }
 }
 
+/// Trims surrounding whitespace before returning so downstream
+/// dispatch functions don't re-trim (and the input-schema description
+/// "surrounding whitespace is stripped" is honored uniformly). A
+/// value that is non-empty but trims to empty (e.g. `"   "`) is
+/// rejected here as `InvalidArguments` rather than silently surfacing
+/// as `kind: "unknown"` downstream — consistent with how the rest
+/// of the codebase treats blank-after-trim values (cf. `query_rows`).
 fn parse_value(args: &Value) -> Result<String, ToolError> {
     match args.get("value") {
-        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
-        Some(Value::String(_)) => Err(ToolError::InvalidArguments(
-            "`value` must be a non-empty string".into(),
-        )),
+        Some(Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Err(ToolError::InvalidArguments(
+                    "`value` must be a non-empty string (after trimming whitespace)".into(),
+                ))
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
         Some(other) => Err(ToolError::InvalidArguments(format!(
             "`value` must be a string, got {}",
             kind_of(other)
@@ -280,7 +293,9 @@ fn input_schema() -> Map<String, Value> {
                 "minLength": 1,
                 "description": "The identifier to validate. ASCII letters are \
                                  normalized to upper case; surrounding whitespace \
-                                 is stripped."
+                                 is stripped. Whitespace-only values (e.g. `\"   \"`) \
+                                 are rejected as InvalidArguments rather than \
+                                 silently treated as unknown."
             },
             "kind": {
                 "type": "string",
@@ -548,12 +563,13 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_value_returns_unknown_via_auto() {
-        // Non-empty per parse_value, but auto-dispatch trims and
-        // finds no length match.
-        let out = invoke(json!({"value": "   "}));
-        assert_eq!(out["valid"], false);
-        assert_eq!(out["kind"], "unknown");
+    fn whitespace_only_value_is_invalid_arguments() {
+        // A whitespace-only value is rejected at parse_value: the
+        // input schema promises whitespace is stripped, so callers
+        // who submit `"   "` should get an explicit error, not a
+        // silent `kind: "unknown"` result that swallows the typo.
+        let err = invoke_err(json!({"value": "   "}));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
     }
 
     #[test]
