@@ -1,30 +1,33 @@
 //! Taiwan business tax-ID (統一編號) validator.
 //!
-//! 統一編號 is 8 numeric digits. Each digit is multiplied by a fixed
-//! weight, the products are reduced by *digital root* (recursive
-//! digit-sum until single digit), and the total must be divisible by
-//! 10.
+//! 統一編號 is 8 numeric digits. The standard MOEA algorithm:
 //!
-//! Weights: `[1, 2, 1, 2, 1, 2, 4, 1]` (positions 0..7).
+//! 1. Multiply each digit by its weight in `[1, 2, 1, 2, 1, 2, 4, 1]`.
+//! 2. For each product, replace it with the sum of its decimal
+//!    digits — applied *once*, i.e. `tens + units`. For our weights
+//!    the only product that stays multi-digit after one sum is
+//!    `7 × 4 = 28 → 2 + 8 = 10` at position 6; every other product
+//!    is already a single digit.
+//! 3. Sum the reduced values; valid iff `total mod 10 == 0`.
 //!
 //! ### The 2023 rule change
 //!
 //! Historically, when the 7th digit (position 6, 0-indexed) was `7`,
-//! MOEA accepted *two* valid checksums — both `sum mod 10 == 0` and
-//! `(sum + 1) mod 10 == 0`. This stemmed from an ambiguity in how the
-//! contribution of position 6's product (`7 * 4 = 28`) was reduced:
-//! sum-once (`2 + 8 = 10`) vs digital-root (`10 → 1`), a difference of
-//! 9 ≡ −1 mod 10.
+//! MOEA accepted a second checksum: `(total + 1) mod 10 == 0`. The
+//! canonical published example `12345675` reaches a single-sum total
+//! of 39 and validates only via this `+1` form — so most pre-2023
+//! issuance batches relied on it.
 //!
 //! Starting **2023-03-01**, MOEA stopped issuing IDs that would only
 //! satisfy the `+1` form; new IDs all satisfy the strict
-//! `sum mod 10 == 0` rule. Legacy IDs that pass only the `+1` form
+//! `total mod 10 == 0` rule. Legacy IDs that pass only the `+1` form
 //! remain in circulation, so the default validator accepts both. Set
 //! [`Options::strict`] = `true` to reject the `+1` form.
 //!
 //! References:
 //! - 財政部 「統一編號編配原則」 §3 (revised 2023-03-01)
 //! - 商業司公開的統一編號檢核演算法 (公司行號查詢專區)
+//! - `python-stdnum`'s `tw.gui` implementation (cross-reference)
 
 use serde::Serialize;
 
@@ -70,14 +73,14 @@ pub fn validate_with(input: &str, opts: Options) -> (bool, Option<ParsedTaxId>) 
     let bytes = trimmed.as_bytes();
     let digits: [u32; 8] = std::array::from_fn(|i| u32::from(bytes[i] - b'0'));
 
-    let mut sum = 0u32;
+    let mut total = 0u32;
     for i in 0..8 {
-        sum += digital_root(digits[i] * WEIGHTS[i]);
+        total += sum_digits_once(digits[i] * WEIGHTS[i]);
     }
 
-    let strict_2023 = sum % 10 == 0;
+    let strict_2023 = total % 10 == 0;
     let seven_at_pos_6 = digits[6] == 7;
-    let legacy_alternative = !strict_2023 && seven_at_pos_6 && (sum + 1) % 10 == 0;
+    let legacy_alternative = !strict_2023 && seven_at_pos_6 && (total + 1) % 10 == 0;
 
     let valid = if opts.strict {
         strict_2023
@@ -93,60 +96,64 @@ pub fn validate_with(input: &str, opts: Options) -> (bool, Option<ParsedTaxId>) 
     (valid, Some(parsed))
 }
 
-/// Digital root: collapse a non-negative integer to its single-digit
-/// representation by iteratively summing its decimal digits.
-/// `digital_root(0) == 0`; for n > 0, this equals `1 + (n - 1) % 9`.
+/// Sum the decimal digits of `n` once (`tens + units`).
 ///
-/// Our products are in `0..=36`, so the loop terminates in ≤ 2
-/// iterations.
-fn digital_root(mut n: u32) -> u32 {
-    while n >= 10 {
-        n = (n / 10) + (n % 10);
-    }
-    n
+/// This is the per-product reduction MOEA's algorithm specifies. We
+/// deliberately do **not** iterate to a single digit — for the
+/// `digit × weight` products this function sees (`0..=36`), the only
+/// case where the result is multi-digit is `28 → 10`, and *that
+/// extra digit matters*. Iterating once more (`10 → 1`) is the
+/// mistake the historical `+1` rule was patched around: the
+/// difference between "use 10" (correct) and "use 1" (mistake) is
+/// 9 ≡ −1 mod 10, which is exactly the legacy alternative's window.
+fn sum_digits_once(n: u32) -> u32 {
+    (n / 10) + (n % 10)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 12345675 is the most-cited valid 統一編號 test vector. Position 6
-    /// digit is 7, but the strict rule still passes (the `+1` legacy
-    /// alternative doesn't kick in here).
+    /// 12345675 is MOEA's most-cited published example. It validates
+    /// only via the legacy `+1` rule:
+    /// - `d = [1,2,3,4,5,6,7,5]`
+    /// - `w = [1,2,1,2,1,2,4,1]`
+    /// - `p = [1,4,3,8,5,12,28,5]`
+    /// - `sum_once = [1,4,3,8,5,3,10,5]` → total = 39
+    /// - `strict_2023`: 39 mod 10 = 9 → false
+    /// - `digit[6] = 7` → legacy: (39+1) mod 10 = 0 → true
+    ///
+    /// Permissive default accepts; strict mode rejects (it would have
+    /// been a no-issue from 2023-03-01 onward).
     #[test]
-    fn canonical_test_vector_validates() {
+    fn canonical_12345675_is_legacy_form() {
         let (ok, parsed) = validate("12345675");
-        assert!(ok);
+        assert!(ok, "permissive default accepts the legacy +1 form");
         let p = parsed.unwrap();
-        assert!(p.strict_2023);
-        assert!(!p.legacy_alternative);
+        assert!(!p.strict_2023, "12345675 fails the strict 2023 rule");
+        assert!(p.legacy_alternative, "12345675 passes only via the +1 rule");
         assert_eq!(p.canonical, "12345675");
+
+        let (ok_strict, _) = validate_with("12345675", Options { strict: true });
+        assert!(!ok_strict, "strict 2023 rejects the legacy +1 form");
     }
 
-    /// Constructed legacy-alternative case: pick an 8-digit ID with
-    /// position 6 = 7 whose digital-root sum mod 10 ≡ 9 (i.e., only
-    /// the `+1` rule rescues it). Verifies the lenient default and
-    /// strict-mode rejection.
+    /// 04595257 is a known strict-2023-valid 統一編號 (position 6 digit
+    /// is 5, so the legacy branch never applies):
+    /// - `d = [0,4,5,9,5,2,5,7]`
+    /// - `p = [0,8,5,18,5,4,20,7]`
+    /// - `sum_once = [0,8,5,9,5,4,2,7]` → total = 40
+    /// - `strict_2023`: 40 mod 10 = 0 → true
     #[test]
-    fn legacy_alternative_is_accepted_in_default_and_rejected_in_strict() {
-        // d = [0, 0, 0, 0, 0, 0, 7, 1]
-        // w = [1, 2, 1, 2, 1, 2, 4, 1]
-        // p = [0, 0, 0, 0, 0, 0, 28, 1]
-        // roots = [0, 0, 0, 0, 0, 0, 1, 1] → sum = 2
-        // 2 mod 10 = 2 (strict fails), (2 + 1) mod 10 = 3 (legacy +1 also fails)
-        //
-        // We need sum mod 10 == 9. With pos 6 = 7 contributing root 1
-        // and pos 7 contributing some d*1, let's pick last digit = 8
-        // and adjust: d = [0, 0, 0, 0, 0, 0, 7, 8]
-        // roots = [0, 0, 0, 0, 0, 0, 1, 8] → sum = 9. (9+1) mod 10 = 0 ✓
-        let (ok_default, parsed_default) = validate("00000078");
-        assert!(ok_default, "permissive default accepts +1 alternative");
+    fn strict_2023_valid_example_validates_in_both_modes() {
+        let (ok_default, parsed_default) = validate("04595257");
+        assert!(ok_default);
         let p = parsed_default.unwrap();
-        assert!(!p.strict_2023);
-        assert!(p.legacy_alternative);
+        assert!(p.strict_2023);
+        assert!(!p.legacy_alternative);
 
-        let (ok_strict, _) = validate_with("00000078", Options { strict: true });
-        assert!(!ok_strict, "strict 2023 rejects legacy +1 form");
+        let (ok_strict, _) = validate_with("04595257", Options { strict: true });
+        assert!(ok_strict, "strict mode accepts strict-valid IDs unchanged");
     }
 
     #[test]
@@ -169,10 +176,12 @@ mod tests {
 
     #[test]
     fn checksum_failure_keeps_kind() {
-        // 11111111: roots sum to 14 (mod 10 = 4); position 6 = 1, so
-        // the legacy +1 path doesn't apply. Picked deliberately to
-        // fail *both* rules — a near-miss like "12345674" would pass
-        // legacy because position 6 = 7 turns on the +1 alternative.
+        // 11111111: sum_once = [1,2,1,2,1,2,4,1] → total = 14
+        //           14 mod 10 = 4 (strict fails)
+        //           digit[6] = 1, not 7, so legacy doesn't apply.
+        // Picked deliberately to fail *both* rules — a near-miss like
+        // "12345674" would pass legacy because position 6 = 7 turns
+        // on the +1 alternative.
         let (ok, parsed) = validate("11111111");
         assert!(!ok);
         // Parsed metadata still returned so the caller can echo back
@@ -200,12 +209,17 @@ mod tests {
     }
 
     #[test]
-    fn digital_root_matches_closed_form() {
-        // 1 + (n - 1) % 9 for n > 0, and 0 for n == 0.
-        for n in 0u32..=100 {
-            let expected = if n == 0 { 0 } else { 1 + (n - 1) % 9 };
-            assert_eq!(digital_root(n), expected, "n = {n}");
-        }
+    fn sum_digits_once_is_tens_plus_units_not_iterated() {
+        // Key contract: NOT iterated to single digit. 28 → 10, not 1.
+        // The legacy `+1` rule exists precisely because the "wrong"
+        // iterated reduction (28 → 1) gives a different residual mod 10.
+        assert_eq!(sum_digits_once(0), 0);
+        assert_eq!(sum_digits_once(9), 9);
+        assert_eq!(sum_digits_once(10), 1);
+        assert_eq!(sum_digits_once(18), 9);
+        assert_eq!(sum_digits_once(19), 10); // not 1
+        assert_eq!(sum_digits_once(28), 10); // not 1
+        assert_eq!(sum_digits_once(36), 9);
     }
 
     #[test]

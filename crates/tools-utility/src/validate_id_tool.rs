@@ -15,9 +15,13 @@
 //! - anything else (including 10-char strings that fail the envelope) → `unknown`
 //!
 //! The output shape per the issue's Definition of Done is `{valid,
-//! kind, parsed}`. `parsed`
-//! is `{}` when the input doesn't match any known shape; the per-
-//! validator modules document their own `parsed` schemas.
+//! kind, parsed}`. `parsed` is `{}` in two cases:
+//! - the input doesn't match any known shape (`kind: "unknown"`); or
+//! - the input matches a known shape but is rejected by an explicit
+//!   sub-kind restriction — e.g. a valid citizen ID with `kind=arc`
+//!   returns `{valid: false, kind: "arc", parsed: {}}`.
+//!
+//! The per-validator modules document their own `parsed` schemas.
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
@@ -337,8 +341,12 @@ fn output_schema() -> Map<String, Value> {
             },
             "parsed": {
                 "type": "object",
-                "description": "Family-specific structured fields. Empty when \
-                                 the input didn't match any known shape."
+                "description": "Family-specific structured fields. Empty in \
+                                 two cases: (a) the input didn't match any \
+                                 known shape (kind=unknown); (b) the input \
+                                 matched a known shape but was rejected by an \
+                                 explicit sub-kind restriction (e.g. a valid \
+                                 citizen ID submitted with kind=arc)."
             }
         },
         "additionalProperties": false,
@@ -403,12 +411,13 @@ mod tests {
 
     #[test]
     fn strict_true_rejects_legacy_plus_one_alternative() {
-        // 00000078 only validates via the legacy +1 path (per
-        // tax_id::tests::legacy_alternative_is_accepted_in_default_and_rejected_in_strict).
-        // Permissive default ⇒ valid. strict=true ⇒ invalid.
-        let permissive = invoke(json!({"value": "00000078", "kind": "tax_id"}));
+        // 12345675 — MOEA's canonical published example; validates
+        // only via the legacy +1 rule (digit[6] = 7). See
+        // tax_id::tests::canonical_12345675_is_legacy_form for the
+        // arithmetic. Permissive default ⇒ valid. strict=true ⇒ invalid.
+        let permissive = invoke(json!({"value": "12345675", "kind": "tax_id"}));
         assert_eq!(permissive["valid"], true);
-        let strict = invoke(json!({"value": "00000078", "kind": "tax_id", "strict": true}));
+        let strict = invoke(json!({"value": "12345675", "kind": "tax_id", "strict": true}));
         assert_eq!(strict["valid"], false);
         // Parsed metadata still surfaces the legacy diagnosis so the
         // caller can present a meaningful "this is a legacy-format
@@ -420,7 +429,7 @@ mod tests {
     fn strict_affects_auto_dispatch_to_tax_id() {
         // Auto-dispatch routes 8-digit input through dispatch_tax_id.
         // strict=true should propagate the option through.
-        let out = invoke(json!({"value": "00000078", "strict": true}));
+        let out = invoke(json!({"value": "12345675", "strict": true}));
         assert_eq!(out["valid"], false);
         assert_eq!(out["kind"], "tax_id");
     }
@@ -444,10 +453,16 @@ mod tests {
 
     #[test]
     fn auto_routes_tax_id_by_length() {
-        let out = invoke(json!({"value": "12345675"}));
+        // 04595257 is a strict-2023 valid tax_id (digit[6] = 5, so
+        // the legacy +1 branch never applies). Picked so the auto-
+        // dispatch routing assertion isn't entangled with the legacy
+        // form — that wiring has its own dedicated test.
+        let out = invoke(json!({"value": "04595257"}));
         assert_eq!(out["valid"], true);
         assert_eq!(out["kind"], "tax_id");
-        assert_eq!(out["parsed"]["canonical"], "12345675");
+        assert_eq!(out["parsed"]["canonical"], "04595257");
+        assert_eq!(out["parsed"]["strict_2023"], true);
+        assert_eq!(out["parsed"]["legacy_alternative"], false);
     }
 
     #[test]
@@ -497,8 +512,8 @@ mod tests {
 
     #[test]
     fn explicit_tax_id_returns_legacy_alternative_flag() {
-        // 00000078 — legacy +1 path (per tax_id::tests).
-        let out = invoke(json!({"value": "00000078", "kind": "tax_id"}));
+        // 12345675 — MOEA's canonical legacy +1 form (digit[6] = 7).
+        let out = invoke(json!({"value": "12345675", "kind": "tax_id"}));
         assert_eq!(out["valid"], true);
         assert_eq!(out["kind"], "tax_id");
         assert_eq!(out["parsed"]["strict_2023"], false);
