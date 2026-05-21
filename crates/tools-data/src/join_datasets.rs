@@ -184,7 +184,22 @@ impl ToolHandler for JoinDatasetsTool {
 
         match tokio::time::timeout(JOIN_TIMEOUT, work).await {
             Ok(Ok(Ok(report))) => Ok(report.render()),
-            Ok(Ok(Err(JoinError::BadArgument(msg)))) => Err(ToolError::InvalidArguments(msg)),
+            Ok(Ok(Err(JoinError::BadArgument(msg)))) => {
+                // The agent gets a sanitised message, but ops still
+                // needs the audit trail for diagnostics. classify()
+                // already stripped the polars body, so the
+                // tracing event echoes only the user-facing form;
+                // the underlying EngineError logged by the engine
+                // when it built the source error is separately
+                // visible in operator logs (DESIGN.md §6).
+                tracing::info!(
+                    left = %left_slug,
+                    right = %right_slug,
+                    bad_argument = %msg,
+                    "join_datasets rejected user request",
+                );
+                Err(ToolError::InvalidArguments(msg))
+            }
             Ok(Ok(Err(JoinError::TooLarge { estimate, cap }))) => {
                 Err(ToolError::InvalidArguments(format!(
                     "join would materialise at least {estimate} rows (cap {cap}); \
@@ -245,20 +260,38 @@ fn run_join(
     scan_cap: u32,
     join_cap: u32,
 ) -> Result<JoinReport, JoinError> {
-    let left_lf = DatasetEngine::scan(
+    // Probe each side with `scan_cap + 1` so a `select([len()])` on
+    // it tells us whether the underlying dataset was larger than the
+    // cap — `left_sampled` / `right_sampled` then warn the agent
+    // that the join is only over the first N rows of that side, not
+    // the full table. We use the *capped* (no `+1`) plan for the
+    // actual join so the result respects MAX_SCAN_ROWS_PER_SIDE.
+    let scan_probe = scan_cap.saturating_add(1);
+    let left_probed = DatasetEngine::scan(
         DatasetSource::Parquet(left_path),
         &LoadOptions {
             projection: None,
-            row_limit: Some(scan_cap),
+            row_limit: Some(scan_probe),
         },
     )?;
-    let right_lf = DatasetEngine::scan(
+    let right_probed = DatasetEngine::scan(
         DatasetSource::Parquet(right_path),
         &LoadOptions {
             projection: None,
-            row_limit: Some(scan_cap),
+            row_limit: Some(scan_probe),
         },
     )?;
+    let left_count_frame =
+        DatasetEngine::collect(left_probed.clone().select([len()])).map_err(JoinError::Engine)?;
+    let left_full_height = parse_probe_count(&left_count_frame)?;
+    let left_sampled = left_full_height > u64::from(scan_cap);
+    let right_count_frame =
+        DatasetEngine::collect(right_probed.clone().select([len()])).map_err(JoinError::Engine)?;
+    let right_full_height = parse_probe_count(&right_count_frame)?;
+    let right_sampled = right_full_height > u64::from(scan_cap);
+
+    let left_lf = left_probed.limit(scan_cap);
+    let right_lf = right_probed.limit(scan_cap);
 
     // Polars' join expressions take `Vec<Expr>`. Reuse the same key
     // list on both sides — the DoD allows multi-column keys but does
@@ -312,6 +345,8 @@ fn run_join(
         page_size,
         total_rows: usable_total,
         exceeded,
+        left_sampled,
+        right_sampled,
         rows: collected_page,
     })
 }
@@ -350,9 +385,15 @@ fn parse_probe_count(frame: &DataFrame) -> Result<u64, JoinError> {
 /// `ColumnNotFound` / `not found` / `unable to find`) and surface
 /// the actionable case as `BadArgument` — but **without** echoing
 /// the raw engine message, which may carry cache paths or schema
-/// details. The full message still ends up server-side via the
-/// `tracing::warn!` in `call()` because the `BadArgument` variant
-/// itself implements `Display`.
+/// details.
+///
+/// The async `call()` then logs the sanitised `BadArgument` via
+/// `tracing::info!` (audit trail for ops) and surfaces it as
+/// `ToolError::InvalidArguments` to the agent. Note: the raw
+/// `EngineError::Polars` body is **not** preserved in our logs at
+/// this site — operators relying on it for diagnostics need to
+/// drop the classification short-circuit (or add a debug-level
+/// log here) until DESIGN.md §6 worker-process isolation lands.
 fn classify(err: EngineError, on: &[String]) -> JoinError {
     let EngineError::Polars(ref msg) = err else {
         return JoinError::Engine(err);
@@ -380,6 +421,12 @@ struct JoinReport {
     /// the join was larger than the cap and `force=true` was used to
     /// continue anyway.
     exceeded: bool,
+    /// True when the left side's underlying dataset is larger than
+    /// `MAX_SCAN_ROWS_PER_SIDE` — the join only saw the first N
+    /// rows from that side, so results may miss matches against
+    /// rows beyond the scan cap.
+    left_sampled: bool,
+    right_sampled: bool,
     rows: DataFrame,
 }
 
@@ -417,6 +464,8 @@ impl JoinReport {
             "total_pages": total_pages,
             "total_rows": self.total_rows,
             "exceeded_cap": self.exceeded,
+            "left_sampled": self.left_sampled,
+            "right_sampled": self.right_sampled,
             "columns": columns,
             "rows": rows,
         })
@@ -754,7 +803,7 @@ fn input_schema() -> Map<String, Value> {
 fn output_schema() -> Map<String, Value> {
     json!({
         "type": "object",
-        "required": ["how", "page", "page_size", "total_pages", "total_rows", "exceeded_cap", "columns", "rows"],
+        "required": ["how", "page", "page_size", "total_pages", "total_rows", "exceeded_cap", "left_sampled", "right_sampled", "columns", "rows"],
         "properties": {
             "how": { "type": "string", "enum": ACCEPTED_HOWS },
             "page": { "type": "integer", "minimum": 1 },
@@ -762,6 +811,8 @@ fn output_schema() -> Map<String, Value> {
             "total_pages": { "type": "integer", "minimum": 1 },
             "total_rows": { "type": "integer", "minimum": 0, "description": "Total rows in the materialised join (post-cap)." },
             "exceeded_cap": { "type": "boolean", "description": "True when the cap probe surfaced an extra row, i.e. the un-capped join would have produced more than MAX_JOIN_ROWS. Requires `force=true` to materialise." },
+            "left_sampled": { "type": "boolean", "description": "True when the left dataset is larger than MAX_SCAN_ROWS_PER_SIDE — the join only saw the first N rows of that side, so matches against rows beyond the scan cap are missing." },
+            "right_sampled": { "type": "boolean", "description": "Same semantic as left_sampled but for the right side." },
             "columns": { "type": "array", "items": { "type": "string" } },
             "rows": { "type": "array", "items": { "type": "array" } },
         },
@@ -1047,6 +1098,48 @@ mod tests {
             ToolError::InvalidArguments(m) => assert!(m.contains("left"), "got: {m}"),
             other => panic!("expected InvalidArguments, got {other:?}"),
         }
+    }
+
+    /// Locks the per-side sampled-flag contract. Fixtures: users
+    /// has 4 rows, orders has 5. The `left_sampled` flag is true iff
+    /// the left dataset has *more* than `scan_cap` rows (the cap+1
+    /// probe in `run_join` detects this without doing an extra scan).
+    #[test]
+    fn sampled_flags_track_per_side_clipping() {
+        let (_u, u_path) = write_users();
+        let (_o, o_path) = write_orders();
+        let on = vec!["uid".to_string()];
+
+        // scan_cap=1000 → both sides fit comfortably.
+        let baseline = run_join(
+            &u_path,
+            &o_path,
+            &on,
+            JoinHow::Inner,
+            false,
+            1,
+            100,
+            1000,
+            100,
+        )
+        .expect("baseline");
+        assert!(!baseline.left_sampled);
+        assert!(!baseline.right_sampled);
+
+        // scan_cap=3 → users (4 rows) is clipped; orders (5) is too.
+        let both_clipped =
+            run_join(&u_path, &o_path, &on, JoinHow::Inner, false, 1, 100, 3, 100).expect("ok");
+        assert!(both_clipped.left_sampled, "users has 4 > 3");
+        assert!(both_clipped.right_sampled, "orders has 5 > 3");
+
+        // scan_cap=4 → users fits exactly (not clipped), orders
+        // exceeds. Confirms the > comparison (not >=) is what makes
+        // exact-cap distinct from clipped — same shape as the
+        // describe_schema disambiguation.
+        let only_right =
+            run_join(&u_path, &o_path, &on, JoinHow::Inner, false, 1, 100, 4, 100).expect("ok");
+        assert!(!only_right.left_sampled, "users has 4 == scan_cap=4");
+        assert!(only_right.right_sampled, "orders has 5 > 4");
     }
 
     /// Locks the safety-cap contract:
