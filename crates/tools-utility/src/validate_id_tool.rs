@@ -35,9 +35,12 @@ pub const TOOL_NAME: &str = "tw_validate_id";
 /// the modern unified resident-permit format (covered by
 /// `national_id` since 2021). It's kept as a separate input value so
 /// callers asking "is this an ARC?" can express that intent
-/// explicitly; we route it through `national_id::validate` and echo
-/// the *requested* kind (`arc` or `legacy_resident`) in the output —
-/// not the underlying narrowed kind like `resident`. See
+/// explicitly; we route it through `national_id::validate` and the
+/// output kind echoes `arc` when the value matches the modern
+/// envelope, or surfaces `legacy_resident` when the value matches
+/// the pre-2021 2-letter envelope (an *output-only* kind — callers
+/// can't request it via `kind=`). The underlying narrowed kind like
+/// `resident` is never echoed when the caller requested `arc`. See
 /// [`dispatch_arc`] for the full echo-vs-narrow rules.
 const ACCEPTED_KINDS: &[&str] = &["auto", "national_id", "tax_id", "arc", "passport"];
 
@@ -94,10 +97,15 @@ impl ToolHandler for ValidateIdTool {
     }
 }
 
-/// Trims surrounding whitespace before returning so downstream
-/// dispatch functions don't re-trim (and the input-schema description
-/// "surrounding whitespace is stripped" is honored uniformly). A
-/// value that is non-empty but trims to empty (e.g. `"   "`) is
+/// Trims surrounding whitespace before returning so the `dispatch_*`
+/// functions in this module don't re-trim (and the input-schema
+/// description "surrounding whitespace is stripped" is honored
+/// uniformly). The per-validator modules (`national_id`, `tax_id`,
+/// `passport`) still trim defensively on their own Rust-API entry
+/// points — they're called directly by Rust callers too — so the
+/// "no re-trim" contract is scoped to this MCP wrapper.
+///
+/// A value that is non-empty but trims to empty (e.g. `"   "`) is
 /// rejected here as `InvalidArguments` rather than silently surfacing
 /// as `kind: "unknown"` downstream — consistent with how the rest
 /// of the codebase treats blank-after-trim values (cf. `query_rows`).
@@ -171,8 +179,12 @@ fn kind_of(v: &Value) -> &'static str {
 /// parse. Explicit `kind="national_id"` still surfaces the `kind`
 /// echo for direct callers.
 fn dispatch_auto(value: &str, tax_opts: tax_id::Options) -> Value {
-    let trimmed = value.trim();
-    if trimmed.len() == 10 {
+    // `value` arrives pre-trimmed from parse_value; the per-validator
+    // modules (`national_id::validate`, `tax_id::validate_with`,
+    // `passport::validate`) each trim again on their own Rust-API
+    // entry points, but that's their concern. Within the MCP layer
+    // we rely on parse_value's contract and don't re-trim.
+    if value.len() == 10 {
         let (valid, parsed) = national_id::validate(value);
         if let Some(p) = parsed {
             return json!({
@@ -184,10 +196,10 @@ fn dispatch_auto(value: &str, tax_opts: tax_id::Options) -> Value {
         // Length matches but envelope doesn't — fall through to
         // unknown rather than emit a misleading national_id kind.
     }
-    if trimmed.len() == 9 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+    if value.len() == 9 && value.bytes().all(|b| b.is_ascii_digit()) {
         return dispatch_passport(value);
     }
-    if trimmed.len() == 8 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+    if value.len() == 8 && value.bytes().all(|b| b.is_ascii_digit()) {
         return dispatch_tax_id(value, tax_opts);
     }
     json!({
