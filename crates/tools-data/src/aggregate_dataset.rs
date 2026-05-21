@@ -608,13 +608,12 @@ fn parse_aggs(obj: &Map<String, Value>) -> Result<Vec<AggSpec>, ToolError> {
                 kind_of(item)
             ))
         })?;
-        let col = optional_string(spec_obj, "col")?.ok_or_else(|| {
-            ToolError::InvalidArguments(format!(
-                "`agg[{idx}].col` is required (non-empty column name)"
-            ))
-        })?;
-        let fn_wire = optional_string(spec_obj, "fn")?
-            .ok_or_else(|| ToolError::InvalidArguments(format!("`agg[{idx}].fn` is required")))?;
+        // Inline-parse instead of going through `optional_string` so
+        // type-mismatch errors include the full `agg[{idx}]` path —
+        // when multiple specs are provided the agent needs to know
+        // *which* one is malformed.
+        let col = require_indexed_string(spec_obj, "col", idx)?;
+        let fn_wire = require_indexed_string(spec_obj, "fn", idx)?;
         let agg_fn = AggFn::from_wire(&fn_wire).ok_or_else(|| {
             ToolError::InvalidArguments(format!(
                 "`agg[{idx}].fn` must be one of {ACCEPTED_FNS:?}, got {fn_wire:?}"
@@ -623,6 +622,30 @@ fn parse_aggs(obj: &Map<String, Value>) -> Result<Vec<AggSpec>, ToolError> {
         out.push(AggSpec { col, agg_fn });
     }
     Ok(out)
+}
+
+/// Pull a required non-empty string out of an `agg[idx]` spec
+/// object, attributing every error message to the full
+/// `agg[idx].field` path so multi-spec callers can locate the
+/// malformed entry.
+fn require_indexed_string(
+    spec_obj: &Map<String, Value>,
+    field: &str,
+    idx: usize,
+) -> Result<String, ToolError> {
+    match spec_obj.get(field) {
+        None | Some(Value::Null) => Err(ToolError::InvalidArguments(format!(
+            "`agg[{idx}].{field}` is required"
+        ))),
+        Some(Value::String(s)) if s.is_empty() => Err(ToolError::InvalidArguments(format!(
+            "`agg[{idx}].{field}` must be a non-empty string"
+        ))),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(other) => Err(ToolError::InvalidArguments(format!(
+            "`agg[{idx}].{field}` must be a string, got {}",
+            kind_of(other)
+        ))),
+    }
 }
 
 fn parse_positive_u32(
