@@ -269,9 +269,13 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
     );
     let approx_frame = DatasetEngine::collect(approx_lf)?;
 
-    let mut columns = Vec::with_capacity(df.width());
-    for col_idx in 0..df.width() {
-        let column = &df.columns()[col_idx];
+    // Hoist `df.columns()` out of the loop — it returns a borrow
+    // that's stable for the loop's lifetime, so calling per
+    // iteration just adds bounds-check overhead. Matches the same
+    // pattern in `query_rows::render_dataframe`.
+    let df_columns = df.columns();
+    let mut columns = Vec::with_capacity(df_columns.len());
+    for column in df_columns {
         let name = column.name().to_string();
         let dtype = format!("{}", column.dtype());
         let nullable = column.null_count() > 0;
