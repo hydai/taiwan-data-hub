@@ -184,21 +184,29 @@ impl ToolHandler for JoinDatasetsTool {
 
         match tokio::time::timeout(JOIN_TIMEOUT, work).await {
             Ok(Ok(Ok(report))) => Ok(report.render()),
-            Ok(Ok(Err(JoinError::BadArgument(msg)))) => {
-                // The agent gets a sanitised message, but ops still
-                // needs the audit trail for diagnostics. classify()
-                // already stripped the polars body, so the
-                // tracing event echoes only the user-facing form;
-                // the underlying EngineError logged by the engine
-                // when it built the source error is separately
-                // visible in operator logs (DESIGN.md §6).
+            Ok(Ok(Err(JoinError::BadArgument {
+                message,
+                underlying,
+            }))) => {
+                // The agent gets the sanitised `message`; ops gets
+                // the full `underlying` engine error at debug level
+                // for diagnostics. Keeping the polars body off the
+                // public surface but on the operator log is the
+                // pattern the rest of the file already uses for
+                // unexpected execution errors.
+                tracing::debug!(
+                    left = %left_slug,
+                    right = %right_slug,
+                    underlying = ?underlying,
+                    "join_datasets BadArgument underlying engine error",
+                );
                 tracing::info!(
                     left = %left_slug,
                     right = %right_slug,
-                    bad_argument = %msg,
+                    bad_argument = %message,
                     "join_datasets rejected user request",
                 );
-                Err(ToolError::InvalidArguments(msg))
+                Err(ToolError::InvalidArguments(message))
             }
             Ok(Ok(Err(JoinError::TooLarge { estimate, cap }))) => {
                 Err(ToolError::InvalidArguments(format!(
@@ -240,8 +248,16 @@ impl ToolHandler for JoinDatasetsTool {
 enum JoinError {
     #[error("{0}")]
     Engine(#[from] EngineError),
-    #[error("join_datasets: {0}")]
-    BadArgument(String),
+    /// Caller-controlled mistake (missing join key, bad argument).
+    /// Carries both a sanitised user message *and* the raw engine
+    /// error that prompted it — `call()` logs the engine body at
+    /// debug level for ops, then surfaces the sanitised message
+    /// to the agent.
+    #[error("join_datasets: {message}")]
+    BadArgument {
+        message: String,
+        underlying: Option<EngineError>,
+    },
     #[error("join would materialise {estimate} rows (cap {cap})")]
     TooLarge { estimate: u64, cap: u32 },
 }
@@ -383,17 +399,10 @@ fn parse_probe_count(frame: &DataFrame) -> Result<u64, JoinError> {
 /// caller mistake is a missing join key column. Sniff for the
 /// requested key names in the error wording (Polars uses
 /// `ColumnNotFound` / `not found` / `unable to find`) and surface
-/// the actionable case as `BadArgument` — but **without** echoing
-/// the raw engine message, which may carry cache paths or schema
-/// details.
-///
-/// The async `call()` then logs the sanitised `BadArgument` via
-/// `tracing::info!` (audit trail for ops) and surfaces it as
-/// `ToolError::InvalidArguments` to the agent. Note: the raw
-/// `EngineError::Polars` body is **not** preserved in our logs at
-/// this site — operators relying on it for diagnostics need to
-/// drop the classification short-circuit (or add a debug-level
-/// log here) until DESIGN.md §6 worker-process isolation lands.
+/// the actionable case as `BadArgument` with a sanitised public
+/// message. The raw `EngineError` is preserved in
+/// `BadArgument.underlying` so `call()` can log it at debug level
+/// for ops — the agent only sees the sanitised `message`.
 fn classify(err: EngineError, on: &[String]) -> JoinError {
     let EngineError::Polars(ref msg) = err else {
         return JoinError::Engine(err);
@@ -403,7 +412,10 @@ fn classify(err: EngineError, on: &[String]) -> JoinError {
         || msg.contains("ColumnNotFound")
         || msg.contains("unable to find");
     if mentions_key && mentions_missing {
-        JoinError::BadArgument(format!("join key {on:?} not found in one or both datasets"))
+        JoinError::BadArgument {
+            message: format!("join key {on:?} not found in one or both datasets"),
+            underlying: Some(err),
+        }
     } else {
         JoinError::Engine(err)
     }
@@ -520,9 +532,15 @@ fn parquet_path_for_join(cache: &CacheRef, side: &str) -> Result<PathBuf, ToolEr
     if let Some(stripped) = raw.strip_prefix("file://") {
         Ok(PathBuf::from(stripped))
     } else if let Some(scheme) = raw.split_once("://").map(|(s, _)| s) {
+        // Match `query_rows::parquet_path_for_query`: log scheme +
+        // a *redacted* URI (query string + fragment stripped) so
+        // ops can correlate incidents without the signed-URL
+        // signature ending up in aggregated log backends.
         tracing::warn!(
             slug = %cache.slug,
+            side = %side,
             cache_scheme = %scheme,
+            cache_path_redacted = %redact_uri_for_log(raw),
             "cache uri scheme not yet supported by join_datasets",
         );
         Err(ToolError::Execution(format!(
@@ -531,6 +549,16 @@ fn parquet_path_for_join(cache: &CacheRef, side: &str) -> Result<PathBuf, ToolEr
     } else {
         Ok(PathBuf::from(raw))
     }
+}
+
+/// Strip the query string and fragment from a URI for log output —
+/// same shape as `query_rows::redact_uri_for_log`. Inlined here
+/// rather than shared because the two tools may diverge (e.g. one
+/// adding scheme-aware redaction); the function is one branch deep.
+fn redact_uri_for_log(uri: &str) -> String {
+    let head = uri.split_once('?').map_or(uri, |(head, _)| head);
+    let head = head.split_once('#').map_or(head, |(head, _)| head);
+    head.to_owned()
 }
 
 struct DatasetSide {
