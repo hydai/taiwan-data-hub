@@ -4701,6 +4701,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mcp-core",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

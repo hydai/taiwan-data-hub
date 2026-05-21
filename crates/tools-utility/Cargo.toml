@@ -20,6 +20,7 @@ workspace = true
 # avoids unused-dep noise in clippy.
 async-trait = { workspace = true }
 mcp-core = { path = "../mcp-core" }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

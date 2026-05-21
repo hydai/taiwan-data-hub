@@ -11,11 +11,16 @@
 //! unit-tested without spinning up rmcp, and Rust callers don't pay
 //! for `serde_json::Value` round-trips.
 
+pub mod address;
 pub mod national_id;
+pub mod normalize_address_tool;
 pub mod passport;
 pub mod tax_id;
 pub mod validate_id_tool;
 
+pub use normalize_address_tool::{
+    NormalizeAddressTool, TOOL_NAME as TW_NORMALIZE_ADDRESS_TOOL_NAME,
+};
 pub use validate_id_tool::{TOOL_NAME as TW_VALIDATE_ID_TOOL_NAME, ValidateIdTool};
 
 use mcp_core::DispatcherBuilder;
@@ -26,5 +31,7 @@ use mcp_core::DispatcherBuilder;
 /// function — call sites in `mcp-stdio` and `gateway` don't need to
 /// change.
 pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
-    builder.register(ValidateIdTool::new())
+    builder
+        .register(ValidateIdTool::new())
+        .register(NormalizeAddressTool::new())
 }
