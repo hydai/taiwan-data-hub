@@ -50,10 +50,19 @@ pub const DEFAULT_PAGE_SIZE: u32 = 100;
 /// reason about than a follow-up paginated call.
 pub const MAX_PAGE_SIZE: u32 = 1_000;
 
-/// Per-call deadline. Larger than `query_rows`' 5s because a join
+/// Per-call deadline. Larger than `query_rows`'s 5s because a join
 /// over two 100k-row sides can do significantly more work than a
-/// single-table `SELECT`. Caller-side only — see the inline timeout
-/// note (and the matching `query_rows` caveat).
+/// single-table `SELECT`.
+///
+/// **Caller-side only**: `tokio::time::timeout` wrapping
+/// `spawn_blocking` returns a deadline error to the caller after
+/// `JOIN_TIMEOUT`, but dropping the `JoinHandle` doesn't preempt an
+/// OS thread. The Polars work keeps running on the blocking pool
+/// until it naturally completes; resources aren't reclaimed. The
+/// `MAX_SCAN_ROWS_PER_SIDE` + `MAX_JOIN_ROWS` caps bound the
+/// worst-case wallclock; a true hard kill needs worker-process
+/// isolation (DESIGN.md §6 long-term, tracked separately — same
+/// caveat as `query_rows`).
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,23 +271,12 @@ fn run_join(
 
     // Pass 1: count probe with `.limit(cap + 1)`. We never
     // materialise the full join into memory — `select([len()])`
-    // collapses to one cell. The +1 probe lets us tell
-    // "exactly cap" from "clipped".
+    // collapses to one cell. The +1 lets us tell "exactly cap"
+    // from "clipped".
     let probe_lf = joined_lf.clone().limit(cap_plus_one);
     let count_frame =
-        DatasetEngine::collect(probe_lf.clone().select([len()])).map_err(|e| classify(e, on))?;
-    let total_probe: u64 = count_frame
-        .column("len")
-        .ok()
-        .and_then(|c| c.get(0).ok())
-        .and_then(|av| match av {
-            AnyValue::UInt32(n) => Some(u64::from(n)),
-            AnyValue::UInt64(n) => Some(n),
-            AnyValue::Int64(n) => u64::try_from(n).ok(),
-            AnyValue::Int32(n) => u64::try_from(n).ok(),
-            _ => None,
-        })
-        .unwrap_or(0);
+        DatasetEngine::collect(probe_lf.select([len()])).map_err(|e| classify(e, on))?;
+    let total_probe = parse_probe_count(&count_frame)?;
     let exceeded = total_probe > u64::from(join_cap);
 
     if exceeded && !force {
@@ -291,18 +289,21 @@ fn run_join(
     // Effective total after the cap clamp. Even with force=true the
     // materialised total honours MAX_JOIN_ROWS — `force` exists to
     // confirm intent, not to disable the bounded-output contract.
-    // total_probe is bounded by `join_cap + 1`, which fits in u32
-    // and therefore in usize on every supported target. try_from is
-    // conservative defence against the clippy lint.
+    // total_probe is bounded by `join_cap + 1`, so try_from never
+    // saturates on 64-bit; the unwrap is conservative defence.
     let usable_total = usize::try_from(total_probe.min(u64::from(join_cap))).unwrap_or(usize::MAX);
 
-    // Pass 2: collect only the requested page. `.slice(offset,
-    // page_size)` is folded into the lazy plan, so Polars stops
-    // joining after enough rows for the slice — for page 1 of 100
-    // that's typically <<1M rows of work even when the full join
-    // is much larger.
+    // Pass 2: collect only the requested page. **Crucially** this
+    // re-uses the *un-probed* `joined_lf` and applies a fresh
+    // `.limit(join_cap)` (not cap+1) so the materialised page can't
+    // include the probe's "is there one extra row?" overflow row.
+    // If we re-used `probe_lf` here, a force=true caller could see
+    // an extra row beyond the cap. `.slice(offset, page_size)` is
+    // folded into the lazy plan, so Polars stops joining once
+    // enough rows accumulate for the slice — page 1 of 100 does
+    // ≈100 rows of work even when the full join is much larger.
     let offset = i64::from(page.saturating_sub(1)).saturating_mul(i64::from(page_size));
-    let page_lf = probe_lf.slice(offset, page_size);
+    let page_lf = joined_lf.limit(join_cap).slice(offset, page_size);
     let collected_page = DatasetEngine::collect(page_lf).map_err(|e| classify(e, on))?;
 
     Ok(JoinReport {
@@ -313,6 +314,34 @@ fn run_join(
         exceeded,
         rows: collected_page,
     })
+}
+
+/// Pull the row count out of the 1-cell aggregation frame Polars
+/// returns from `select([len()])`. Every unexpected shape — missing
+/// column, empty cell, unhandled dtype, negative integer — surfaces
+/// as `JoinError::Engine` so a Polars contract drift can't silently
+/// degrade to "0 rows" and bypass the over-cap guard.
+fn parse_probe_count(frame: &DataFrame) -> Result<u64, JoinError> {
+    let column = frame
+        .column("len")
+        .map_err(|_| EngineError::Polars("join probe missing `len` column".into()))?;
+    let cell = column
+        .get(0)
+        .map_err(|_| EngineError::Polars("join probe count returned empty result".into()))?;
+    match cell {
+        AnyValue::UInt32(n) => Ok(u64::from(n)),
+        AnyValue::UInt64(n) => Ok(n),
+        AnyValue::Int64(n) => u64::try_from(n).map_err(|_| {
+            EngineError::Polars(format!("join probe count returned negative Int64 ({n})")).into()
+        }),
+        AnyValue::Int32(n) => u64::try_from(n).map_err(|_| {
+            EngineError::Polars(format!("join probe count returned negative Int32 ({n})")).into()
+        }),
+        other => Err(EngineError::Polars(format!(
+            "join probe count returned unexpected type: {other}"
+        ))
+        .into()),
+    }
 }
 
 /// Classify a Polars collect error: the most common surface-level
@@ -855,6 +884,24 @@ mod tests {
             .expect("ok");
         // 4 users, uid=4 unmatched but kept with null amount.
         // uid=2 has 2 orders → 1+2+1+1 = 5 rows total.
+        assert_eq!(out["total_rows"], 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn right_join_keeps_unmatched_right_rows() {
+        let (_u, _o, tool) = build_tool();
+        let out = tool
+            .call(json!({
+                "left": {"slug": "users"},
+                "right": {"slug": "orders"},
+                "on": "uid",
+                "how": "right",
+            }))
+            .await
+            .expect("ok");
+        // 4 matched + 1 unmatched order (uid=99 has no user) = 5.
+        // uid=4 user is dropped (unmatched left side discarded).
+        assert_eq!(out["how"], "right");
         assert_eq!(out["total_rows"], 5);
     }
 
