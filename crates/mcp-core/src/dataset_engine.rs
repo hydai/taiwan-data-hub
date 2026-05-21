@@ -310,8 +310,10 @@ mod tests {
         };
         // The scan returns lazily — the column-mismatch error fires
         // when the plan runs, not when projection is registered.
-        // `LazyFrame: !Debug` rules out `expect`, so match the Ok
-        // explicitly.
+        // `Result::expect` only needs `EngineError: Debug` (which it
+        // has) but `expect_err` would need `LazyFrame: Debug` which
+        // it doesn't have, so the Ok branch is matched out via
+        // `let-else`.
         let scan_result = DatasetEngine::scan(DatasetSource::Parquet(&path), &opts);
         let Ok(lf) = scan_result else {
             panic!("scan should defer the column-mismatch to collect()");
@@ -388,13 +390,21 @@ mod tests {
 
     #[test]
     fn nonexistent_file_surfaces_polars_error() {
-        // `LazyFrame` doesn't implement `Debug` so the usual
-        // `.expect_err` path doesn't compile; spell out the match.
+        // `expect_err` would need `LazyFrame: Debug` (which it
+        // doesn't have), so the Ok branch is matched out by hand.
         // Some scans validate the path eagerly (Parquet hits the
         // footer), so the error may fire here; others defer until
         // `collect()`. Try both paths and assert one of them yields
         // a `Polars` error mentioning the missing file.
-        let path = PathBuf::from("/tmp/__nope_nonexistent_fixture__.parquet");
+        //
+        // Build the path under a fresh `TempDir` rather than a
+        // hard-coded `/tmp/...` literal — the literal isn't portable
+        // (Windows has no `/tmp`) and could collide with a real
+        // file if one happened to exist. `TempDir` exists for the
+        // duration of the test and is reaped on drop, so the
+        // *filename* inside it is guaranteed not to exist.
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("__guaranteed_missing__.parquet");
         let scan_result =
             DatasetEngine::scan(DatasetSource::Parquet(&path), &LoadOptions::default());
         let err = match scan_result {
