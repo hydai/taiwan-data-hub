@@ -157,20 +157,23 @@ impl ToolHandler for DescribeSchemaTool {
 /// JSON building doesn't need to know about the lazy plan.
 struct SchemaReport {
     columns: Vec<ColumnReport>,
-    /// Total rows the scan returned. `< MAX_SAMPLE_ROWS` means the
-    /// underlying file fit under the cap; otherwise the cap clipped
-    /// it.
+    /// Number of rows the engine actually inspected — the smaller of
+    /// the dataset size and [`MAX_SAMPLE_ROWS`].
     row_count: usize,
+    /// True iff the underlying dataset has *more* than `MAX_SAMPLE_ROWS`
+    /// rows (detected by the +1 probe in `introspect_parquet`). False
+    /// when the dataset fits within the cap exactly or under it; in
+    /// that case the stats are authoritative for the whole table.
+    sampled: bool,
 }
 
 impl SchemaReport {
     fn render(&self) -> Value {
         let cols: Vec<Value> = self.columns.iter().map(ColumnReport::render).collect();
-        let sampled = self.row_count >= MAX_SAMPLE_ROWS as usize;
         json!({
             "columns": cols,
             "row_count": self.row_count,
-            "sampled": sampled,
+            "sampled": self.sampled,
             "sample_cap": MAX_SAMPLE_ROWS,
         })
     }
@@ -214,15 +217,29 @@ impl ColumnReport {
 
 /// Blocking helper that runs on `spawn_blocking`. Scans, collects,
 /// and per-column computes sample + `approx_distinct`.
+///
+/// Probes `row_cap + 1` rows so we can disambiguate "dataset is
+/// exactly `row_cap` rows" from "dataset was clipped to `row_cap`":
+/// the former returns ≤ `row_cap` rows; the latter returns
+/// `row_cap + 1`. Stats and sample values are then computed over the
+/// first `row_cap` rows of the resulting frame.
 fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineError> {
+    let probe_limit = row_cap.saturating_add(1);
     let lf = DatasetEngine::scan(
         DatasetSource::Parquet(path),
         &LoadOptions {
             projection: None,
-            row_limit: Some(row_cap),
+            row_limit: Some(probe_limit),
         },
     )?;
-    let df = DatasetEngine::collect(lf)?;
+    let probed = DatasetEngine::collect(lf)?;
+    let cap_usize = row_cap as usize;
+    let sampled = probed.height() > cap_usize;
+    let df = if sampled {
+        probed.head(Some(cap_usize))
+    } else {
+        probed
+    };
 
     // Compute approx distinct per column in a single lazy pass so
     // Polars can fold the aggregations together. The result is a
@@ -286,6 +303,7 @@ fn introspect_parquet(path: &Path, row_cap: u32) -> Result<SchemaReport, EngineE
     Ok(SchemaReport {
         columns,
         row_count: df.height(),
+        sampled,
     })
 }
 
@@ -442,7 +460,7 @@ fn output_schema() -> Map<String, Value> {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["name", "dtype", "nullable", "sample_values", "approx_distinct_count"],
+                    "required": ["name", "dtype", "nullable", "sample_values", "approx_distinct_count", "description"],
                     "properties": {
                         "name": { "type": "string" },
                         "dtype": { "type": "string", "description": "Polars data type name (e.g. `i64`, `str`, `List[i64]`)." },
@@ -476,7 +494,7 @@ fn output_schema() -> Map<String, Value> {
             "sample_cap": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Row cap the engine applied — see DescribeSchemaTool::MAX_SAMPLE_ROWS.",
+                "description": "Row cap the engine applied — see the `MAX_SAMPLE_ROWS` module const.",
             },
         },
         "additionalProperties": false,
@@ -633,6 +651,53 @@ mod tests {
                 "description is null pending column_metadata table: {col}",
             );
         }
+    }
+
+    /// Locks the R1 disambiguation: a dataset whose row count
+    /// *exactly* equals the engine cap must report `sampled: false`,
+    /// not `true`. The +1 probe in `introspect_parquet` is what makes
+    /// this possible — without it a 100k-row dataset would look
+    /// identical to a clipped 100k+ one. Uses a per-test cap injected
+    /// via the private helper so we don't have to build a 100k-row
+    /// fixture.
+    ///
+    /// Plain `#[test]` (not `#[tokio::test]`) because the helper is
+    /// synchronous; Polars' `collect` spins up its own runtime and
+    /// would panic with "cannot start a runtime from within a
+    /// runtime" if we wrapped this in a Tokio context.
+    #[test]
+    fn dataset_exactly_at_cap_reports_sampled_false() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("at-cap.parquet");
+        let mut df = df! {
+            "id" => &(0_i64..6).collect::<Vec<_>>(),
+        }
+        .expect("build df");
+        let file = std::fs::File::create(&path).expect("create");
+        ParquetWriter::new(file).finish(&mut df).expect("write");
+
+        // 6-row dataset, 5-row cap → +1 probe sees 6 rows, sampled=true.
+        let report_above = introspect_parquet(&path, 5).expect("introspect");
+        assert_eq!(report_above.row_count, 5, "stats run over first cap rows");
+        assert!(
+            report_above.sampled,
+            "6 rows > 5 cap must surface as sampled=true",
+        );
+
+        // 6-row dataset, 6-row cap → +1 probe sees 6 rows (no extra),
+        // so we know the dataset fits exactly. sampled=false.
+        let report_at = introspect_parquet(&path, 6).expect("introspect");
+        assert_eq!(report_at.row_count, 6);
+        assert!(
+            !report_at.sampled,
+            "exact-cap dataset must surface as sampled=false",
+        );
+
+        // 6-row dataset, 10-row cap → +1 probe sees 6 rows (under cap),
+        // so we know the dataset is smaller than the cap. sampled=false.
+        let report_under = introspect_parquet(&path, 10).expect("introspect");
+        assert_eq!(report_under.row_count, 6);
+        assert!(!report_under.sampled);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
