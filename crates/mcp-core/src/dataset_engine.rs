@@ -21,7 +21,7 @@
 //! `scan → pipeline → collect` chain in `tokio::task::spawn_blocking`,
 //! not just the `collect()`. The engine itself stays sync to keep
 //! the API identical for blocking and async consumers; see
-//! `tools-data::query_rows` for the established pattern.
+//! `tools_data::query_rows` for the established pattern.
 //!
 //! ## Memory bound
 //!
@@ -86,7 +86,7 @@ use polars::prelude::*;
 #[derive(Debug, Clone, Copy)]
 pub enum DatasetSource<'a> {
     /// Apache Parquet file. The expected on-disk format for cached
-    /// datasets (see `tools-data::materialize_dataset`).
+    /// datasets (see `tools_data::materialize_dataset`).
     Parquet(&'a Path),
     /// CSV file with a header row. The engine relies on Polars'
     /// default schema inference; callers needing typed columns must
@@ -131,7 +131,7 @@ pub struct LoadOptions {
 /// lossy for non-UTF-8 — fine for server logs, not preservation).
 /// Callers serialising to MCP clients should sanitise both variants
 /// before responding; the module-level "Error sanitisation" docs
-/// and `tools-data::query_rows` document the canonical pattern.
+/// and `tools_data::query_rows` document the canonical pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// Polars reader / scan / lazy-plan failure. The string is
