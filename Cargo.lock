@@ -1260,6 +1260,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tools-data",
+ "tools-utility",
  "tower",
  "tower-http",
  "tracing",
@@ -1956,6 +1957,7 @@ dependencies = [
  "storage",
  "tokio",
  "tools-data",
+ "tools-utility",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4601,6 +4603,13 @@ dependencies = [
 [[package]]
 name = "tools-utility"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mcp-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "tower"

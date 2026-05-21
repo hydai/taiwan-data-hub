@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut builder: DispatcherBuilder = tools_data::register_data_tools(Dispatcher::builder());
+    builder = tools_utility::register_utility_tools(builder);
     builder = wire_db_tools_if_available(builder).await;
     let dispatcher = builder.build();
     let tool_count = dispatcher.len();

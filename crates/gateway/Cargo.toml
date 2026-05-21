@@ -19,6 +19,7 @@ mcp-core = { path = "../mcp-core" }
 object-store = { path = "../object-store" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
+tools-utility = { path = "../tools-utility" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
