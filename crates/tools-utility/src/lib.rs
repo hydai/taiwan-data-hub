@@ -12,12 +12,22 @@
 //! for `serde_json::Value` round-trips.
 
 pub mod address;
+pub mod date;
+pub mod date_tools;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;
 pub mod tax_id;
 pub mod validate_id_tool;
 
+pub use date_tools::{
+    GregorianToLunarTool, GregorianToRocTool, IsNationalHolidayTool, RocToGregorianTool,
+    SolarTermForDateTool, TOOL_GREGORIAN_TO_LUNAR as TW_GREGORIAN_TO_LUNAR_TOOL_NAME,
+    TOOL_GREGORIAN_TO_ROC as TW_GREGORIAN_TO_ROC_TOOL_NAME,
+    TOOL_IS_NATIONAL_HOLIDAY as TW_IS_NATIONAL_HOLIDAY_TOOL_NAME,
+    TOOL_ROC_TO_GREGORIAN as TW_ROC_TO_GREGORIAN_TOOL_NAME,
+    TOOL_SOLAR_TERM_FOR_DATE as TW_SOLAR_TERM_FOR_DATE_TOOL_NAME,
+};
 pub use normalize_address_tool::{
     NormalizeAddressTool, TOOL_NAME as TW_NORMALIZE_ADDRESS_TOOL_NAME,
 };
@@ -34,4 +44,9 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
     builder
         .register(ValidateIdTool::new())
         .register(NormalizeAddressTool::new())
+        .register(RocToGregorianTool)
+        .register(GregorianToRocTool)
+        .register(GregorianToLunarTool)
+        .register(SolarTermForDateTool)
+        .register(IsNationalHolidayTool)
 }
