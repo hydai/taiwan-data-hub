@@ -7,10 +7,12 @@
 //! `kind = "auto"` (the default) routes by the input's length+shape
 //! signature, which is unambiguous because each format has a unique
 //! envelope:
-//! - 10 chars starting with a letter → `national_id`
-//! - 9 digits                        → `passport`
-//! - 8 digits                        → `tax_id`
-//! - anything else                   → `unknown`
+//! - 10 chars matching the `national_id` envelope (first char A-Z plus
+//!   either `[1289]` for the modern format or another A-Z for the
+//!   legacy 2-letter resident format) → `national_id`
+//! - 9 digits                                                       → `passport`
+//! - 8 digits                                                       → `tax_id`
+//! - anything else (including 10-char strings that fail the envelope) → `unknown`
 //!
 //! The output shape per the issue's Definition of Done is `{valid,
 //! kind, parsed}`. `parsed`

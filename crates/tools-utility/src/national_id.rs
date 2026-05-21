@@ -65,11 +65,13 @@ pub struct ParsedNationalId {
     pub canonical: String,
     pub kind: NationalIdKind,
     pub gender: Gender,
-    /// Two-letter county code derived from the first character —
-    /// `"TPE"` for Taipei City, `"NTC"` for New Taipei, etc. `None`
-    /// when the first letter isn't in the standard table (only Z is
-    /// reserved as "其他 / 未填" so this stays `Some` for all valid
-    /// letters).
+    /// Short ASCII mnemonic for the issuing county/city, derived from
+    /// the first character. 3–7 characters, upper-case, with a
+    /// `-OLD` suffix for letters covering municipalities that have
+    /// since been reorganised (e.g. `"TXG-OLD"` for the pre-2010
+    /// 台中縣 letter `B`). `None` only when the first letter is
+    /// outside the standard A-Z table — which can't happen once
+    /// `validate` has accepted the input.
     pub county_code: Option<&'static str>,
 }
 
@@ -207,11 +209,11 @@ fn letter_to_code(c: char) -> Option<u32> {
     })
 }
 
-/// Short county code mnemonic for the first letter. Maps to the
-/// English short form used by `pyethonics`-style libraries so external
-/// callers get a stable string. Returns `None` only for letters
-/// outside the table (which never happens once `letter_to_code`
-/// succeeds, since the two tables share keys).
+/// Short ASCII mnemonic for the issuing county/city. Stable strings
+/// suitable for keying or filtering downstream — see the
+/// `county_code` field on [`ParsedNationalId`] for the format. Returns
+/// `None` only for letters outside the table (which never happens
+/// once `letter_to_code` succeeds, since the two tables share keys).
 fn county_code_for(c: char) -> Option<&'static str> {
     Some(match c {
         'A' => "TPE",
