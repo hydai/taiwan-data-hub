@@ -25,8 +25,8 @@
 //!
 //! ## Memory bound
 //!
-//! Memory is bounded by two scan-time pushdowns Polars performs on
-//! the returned `LazyFrame`:
+//! `LoadOptions` bounds *scan-time* memory only — what's read from
+//! the source and decoded into the lazy plan's first stage:
 //!
 //! - [`LoadOptions::projection`] — column subset, pushed into the
 //!   Parquet/CSV/JSON reader so only the requested columns are
@@ -34,13 +34,21 @@
 //! - [`LoadOptions::row_limit`] — `.limit(n)` applied immediately
 //!   after the scan; for Parquet this triggers row-group skipping.
 //!
-//! A *hard* memory ceiling needs Polars 0.53's `engine_affinity`
-//! plumbing, which is out of scope for #3.1; the `new_streaming`
-//! feature is already on so single-pass aggregations stream when
-//! they can. Tools that want a smaller cap pass a smaller `row_limit`
-//! — the engine doesn't impose its own ceiling because different
-//! tools have different DoD-mandated caps (e.g. `query_rows` caps at
-//! `10_000`, `get_sample` will cap at a much smaller default).
+//! These are **not** a general memory ceiling: downstream lazy ops
+//! the caller adds (joins, sorts, wide `group_by`s, `explode`,
+//! window functions) can materialise far more rows or memory than
+//! the scan let in. Callers needing a hard ceiling at the *final*
+//! result level have to bound their own pipeline (e.g. `.limit(n)`
+//! after the heavy op, or pre-aggregating).
+//!
+//! A *true* hard memory ceiling at the engine level needs Polars
+//! 0.53's `engine_affinity` plumbing, which is out of scope for
+//! #3.1; the `new_streaming` feature is already on so single-pass
+//! aggregations stream when they can. Tools that want a smaller
+//! scan cap pass a smaller `row_limit` — the engine doesn't impose
+//! its own ceiling because different tools have different
+//! DoD-mandated caps (e.g. `query_rows` caps at `10_000`,
+//! `get_sample` will cap at a much smaller default).
 //!
 //! ## Why `DatasetSource` is an enum, not extension sniffing
 //!
@@ -56,9 +64,12 @@
 //! - [`EngineError::Polars`] carries Polars' raw `Display`, which
 //!   can include file paths, schema details, byte offsets, and
 //!   column names.
-//! - [`EngineError::InvalidOption`] includes the offending input
-//!   verbatim — today that means the dataset path (via
-//!   `path.display()`).
+//! - [`EngineError::InvalidOption`] includes a lossy-rendered form
+//!   of the offending input — today that's the dataset path via
+//!   `path.display()`. The exact byte sequence isn't preserved (and
+//!   *can't* be when the non-UTF-8 path is what's being rejected),
+//!   but the message is debuggable enough for server logs and
+//!   carries the same sensitivity as the full path.
 //!
 //! Callers that surface errors to MCP clients should log the full
 //! error server-side and return a sanitised message; the
@@ -98,8 +109,15 @@ pub struct LoadOptions {
     /// the file's schema because doing so would require an extra scan
     /// that defeats the lazy contract.
     pub projection: Option<Vec<String>>,
-    /// Hard cap on rows returned. `None` ⇒ no engine-level limit;
-    /// the caller is responsible for bounding memory in that case.
+    /// Cap on rows the engine reads from the source before any
+    /// downstream lazy ops the caller adds. `None` ⇒ no scan-time
+    /// limit; the caller is responsible for bounding memory.
+    ///
+    /// **Not** a hard cap on the final collected row count — a
+    /// downstream `join`, `explode`, or window function can still
+    /// produce more rows than `n` from a `row_limit: Some(n)` scan.
+    /// Callers wanting a true result-size cap need to apply their
+    /// own `.limit(n)` after the heavy op (or pre-aggregate).
     /// Tools typically pass a finite limit derived from their own
     /// Definition of Done (e.g. `10_000` for `query_rows`).
     pub row_limit: Option<u32>,
@@ -107,11 +125,13 @@ pub struct LoadOptions {
 
 /// Errors the engine produces. **Every** variant can carry sensitive
 /// filesystem context — `Polars` embeds raw Polars output (paths,
-/// schemas, offsets, column names), and `InvalidOption` embeds the
-/// offending caller input verbatim (today: the rejected dataset
-/// path). Callers serialising to MCP clients should sanitise both
-/// variants before responding; the module-level "Error sanitisation"
-/// docs and `tools-data::query_rows` document the canonical pattern.
+/// schemas, offsets, column names), and `InvalidOption` embeds a
+/// lossy-rendered form of the offending caller input (today: the
+/// rejected dataset path via `Path::display()`, which itself is
+/// lossy for non-UTF-8 — fine for server logs, not preservation).
+/// Callers serialising to MCP clients should sanitise both variants
+/// before responding; the module-level "Error sanitisation" docs
+/// and `tools-data::query_rows` document the canonical pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// Polars reader / scan / lazy-plan failure. The string is
