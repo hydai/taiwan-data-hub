@@ -290,7 +290,9 @@ fn gregorian_input_schema() -> Map<String, Value> {
         "type": "object",
         "required": ["year", "month", "day"],
         "properties": {
-            "year": { "type": "integer", "description": "Gregorian year (CE)." },
+            // Sanity-cap year at 9999 to match parse_ymd's runtime
+            // bound. The ROC tools also share this cap.
+            "year": { "type": "integer", "maximum": 9999, "description": "Gregorian year (CE), capped at 9999." },
             "month": { "type": "integer", "minimum": 1, "maximum": 12 },
             "day": { "type": "integer", "minimum": 1, "maximum": 31 },
         },

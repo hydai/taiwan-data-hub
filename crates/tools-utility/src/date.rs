@@ -692,12 +692,16 @@ fn holidays_for_year(year: i32) -> &'static [(u32, u32, &'static str)] {
     }
 }
 
-const HOLIDAYS_2024: [(u32, u32, &str); 9] = [
+const HOLIDAYS_2024: [(u32, u32, &str); 8] = [
     (1, 1, "中華民國開國紀念日"),
     (2, 10, "春節"),
     (2, 28, "和平紀念日"),
-    (4, 4, "兒童節"),
-    (4, 5, "清明節"),
+    // 2024 清明 (solar term) fell on April 4, the same day as
+    // 兒童節 — same coincidence as 2025. Combined into one entry
+    // matching the SOLAR_TERMS_2024 anchor (which has QingMing on
+    // 4/4) so `is_national_holiday` and `solar_term_for_date`
+    // agree on the date.
+    (4, 4, "兒童節 / 清明節"),
     (5, 1, "勞動節"),
     (6, 10, "端午節"),
     (9, 17, "中秋節"),
@@ -895,6 +899,25 @@ mod tests {
         assert_eq!(next_new_year.year, 2025);
         assert_eq!(next_new_year.month, 1);
         assert_eq!(next_new_year.day, 1);
+    }
+
+    /// R9 fix: in 2024, 清明 (solar term) and 兒童節 (calendar
+    /// holiday) both fell on April 4. The holiday table now
+    /// matches the solar-term table — both report 4/4. Same
+    /// pattern as 2025.
+    #[test]
+    fn qingming_anchor_2024_aligns_holiday_and_solar_term() {
+        let solar = solar_term_for_date(2024, 4, 4).unwrap();
+        assert_eq!(solar, Some(SolarTerm::QingMing));
+        let holiday = is_national_holiday(2024, 4, 4).unwrap();
+        assert!(holiday.is_holiday);
+        let name = holiday.name.expect("name present");
+        assert!(name.contains("清明節"), "got: {name}");
+        assert!(name.contains("兒童節"), "got: {name}");
+        // 4/5 is *not* a holiday anchor in our table (the actual
+        // government 行事曆 had a 補假 there, but v0.1 anchors only).
+        let not_holiday = is_national_holiday(2024, 4, 5).unwrap();
+        assert!(!not_holiday.is_holiday);
     }
 
     #[test]
