@@ -99,9 +99,13 @@ pub enum EngineError {
     /// paths, schemas, byte offsets, or column names.
     #[error("polars: {0}")]
     Polars(String),
-    /// Caller supplied an option the engine can't honour (e.g. a
-    /// `row_limit` that doesn't fit in the underlying `u32` slot).
-    #[error("invalid option: {0}")]
+    /// Caller supplied an input the engine can't honour. Today the
+    /// only producer is `scan` rejecting a non-UTF-8 dataset path —
+    /// Polars' lazy readers take `&str`, and silently lossy
+    /// conversion would mangle the path into a confusing
+    /// "file not found" downstream. Future option validations
+    /// (e.g. min/max bounds on `row_limit`) would surface here too.
+    #[error("invalid input: {0}")]
     InvalidOption(String),
 }
 
@@ -124,26 +128,27 @@ impl DatasetEngine {
     /// steps (filter, `group_by`, join, ...) and collects on a
     /// blocking executor.
     pub fn scan(source: DatasetSource<'_>, opts: &LoadOptions) -> Result<LazyFrame, EngineError> {
-        // Each branch performs the same `path.to_string_lossy() →
-        // .as_ref().into()` dance the existing `query_rows` tool uses
-        // — Polars 0.53 takes a path type that converts from `&str`
-        // via `From`/`Into`, but isn't a stable public name we can
-        // hold in a helper signature without leaking polars-internal
-        // types into our API surface. Lossy UTF-8 is acceptable
-        // because consumers reject non-UTF-8 cache URIs upstream
-        // (see `tools-data::query_rows::parquet_path_for_query`).
+        // Polars 0.53's lazy readers take a path type that converts
+        // from `&str` via `Into`. We require the input `&Path` to be
+        // valid UTF-8 rather than going through `to_string_lossy()`:
+        // lossy conversion would silently mangle non-UTF-8 paths
+        // (Latin-1 file names, raw bytes from a misconfigured FS) into
+        // a confusing downstream "file not found", and the engine
+        // can't tell the difference between "I lost a byte" and "this
+        // file genuinely doesn't exist". Surfacing `InvalidOption`
+        // here gives the caller a deterministic error to handle.
         let raw = match source {
             DatasetSource::Parquet(p) => {
-                let s = p.to_string_lossy();
-                LazyFrame::scan_parquet(s.as_ref().into(), ScanArgsParquet::default())?
+                let s = utf8_path(p)?;
+                LazyFrame::scan_parquet(s.into(), ScanArgsParquet::default())?
             }
             DatasetSource::Csv(p) => {
-                let s = p.to_string_lossy();
-                LazyCsvReader::new(s.as_ref().into()).finish()?
+                let s = utf8_path(p)?;
+                LazyCsvReader::new(s.into()).finish()?
             }
             DatasetSource::NdJson(p) => {
-                let s = p.to_string_lossy();
-                LazyJsonLineReader::new(s.as_ref().into()).finish()?
+                let s = utf8_path(p)?;
+                LazyJsonLineReader::new(s.into()).finish()?
             }
         };
 
@@ -176,6 +181,19 @@ impl DatasetEngine {
     pub fn collect(lf: LazyFrame) -> Result<DataFrame, EngineError> {
         Ok(lf.collect()?)
     }
+}
+
+/// Require the input path to be valid UTF-8. Polars' lazy readers
+/// accept `&str`; falling back to `to_string_lossy()` would silently
+/// drop non-UTF-8 bytes and leave the caller chasing a
+/// "file not found" that isn't actually about the file.
+fn utf8_path(path: &Path) -> Result<&str, EngineError> {
+    path.to_str().ok_or_else(|| {
+        EngineError::InvalidOption(format!(
+            "dataset path must be valid UTF-8: {}",
+            path.display(),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -344,6 +362,28 @@ mod tests {
         };
         let df = collect(DatasetSource::Parquet(&path), &opts);
         assert_eq!(df.height(), 5, "row_limit is a cap, not a target");
+    }
+
+    /// Non-UTF-8 dataset paths surface as `InvalidOption`, not a
+    /// confusing "file not found" propagated from Polars after a
+    /// lossy conversion. Constructing an invalid-UTF-8 `Path` is
+    /// platform-specific: on Unix we can use `OsStr::from_bytes` to
+    /// inject a byte that isn't valid UTF-8; Windows has different
+    /// rules so we gate the test to Unix-family platforms.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_path_returns_invalid_option() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad: &std::ffi::OsStr = std::ffi::OsStr::from_bytes(b"/tmp/\xFFinvalid.parquet");
+        let path = Path::new(bad);
+        let scan = DatasetEngine::scan(DatasetSource::Parquet(path), &LoadOptions::default());
+        match scan {
+            Err(EngineError::InvalidOption(msg)) => {
+                assert!(msg.contains("UTF-8"), "got: {msg}");
+            }
+            Err(other) => panic!("expected InvalidOption, got: {other}"),
+            Ok(_) => panic!("expected scan to reject non-UTF-8 path"),
+        }
     }
 
     #[test]
