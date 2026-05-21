@@ -143,8 +143,8 @@ pub const SUPPORTED_YEAR_MAX: i32 = 2027;
 
 /// Convert a ROC date to its Gregorian form. The month / day pass
 /// through and are validated against the resulting Gregorian year
-/// (so 民國 113-02-29 surfaces as `InvalidDate` because 2024 is a
-/// leap year but 2025 is not).
+/// (民國 113-02-29 → 2024-02-29 is valid because 2024 is a leap
+/// year; 民國 114-02-29 → 2025-02-29 surfaces as `InvalidDate`).
 pub fn roc_to_gregorian(roc_year: i32, month: u32, day: u32) -> Result<DateConversion, DateError> {
     if roc_year < 1 {
         return Err(DateError::InvalidRocYear);
@@ -214,27 +214,32 @@ pub fn gregorian_to_lunar(year: i32, month: u32, day: u32) -> Result<LunarDate, 
     // safe — the < 0 check above is the upper bound on negativity.
     let mut remaining =
         u32::try_from(days_since_anchor).expect("non-negative days_since_anchor fits in u32");
-    let mut lunar_month: u32 = 1;
-    let mut leap = false;
+    let mut next_month_number: u32 = 1;
     for (length, is_leap) in info.month_lengths {
         if remaining < *length {
+            // The current entry is the hit. A leap entry repeats
+            // the *previous* month number with the leap flag set;
+            // a non-leap entry uses `next_month_number` directly.
+            let reported_month = if *is_leap {
+                next_month_number - 1
+            } else {
+                next_month_number
+            };
             return Ok(LunarDate {
                 year,
-                month: lunar_month,
+                month: reported_month,
                 day: remaining + 1,
                 leap_month: *is_leap,
             });
         }
         remaining -= *length;
-        if *is_leap {
-            // Leap month doesn't increment the count.
-            leap = true;
-        } else {
-            lunar_month += 1;
-            leap = false;
+        // Non-leap entries advance the count; leap entries hold it
+        // steady (so the next non-leap entry can take the same
+        // number as the most recent advance + 1).
+        if !*is_leap {
+            next_month_number += 1;
         }
     }
-    let _ = leap;
     // Off the end of the year's table — fell into the next lunar
     // new year. Caller should re-query with year+1.
     Err(DateError::UnsupportedYear(year + 1))
@@ -577,12 +582,15 @@ const HOLIDAYS_2024: [(u32, u32, &str); 8] = [
     (10, 10, "國慶日"),
 ];
 
-const HOLIDAYS_2025: [(u32, u32, &str); 8] = [
+const HOLIDAYS_2025: [(u32, u32, &str); 7] = [
     (1, 1, "中華民國開國紀念日"),
     (1, 29, "春節"),
     (2, 28, "和平紀念日"),
-    (4, 4, "兒童節"),
-    (4, 4, "清明節"),
+    // 兒童節 (always 4/4) and 清明節 happen to fall on the same
+    // calendar day in 2025 — `is_national_holiday` returns the
+    // first match, so we combine the names rather than burying
+    // the second behind an unreachable entry.
+    (4, 4, "兒童節 / 清明節"),
     (5, 1, "勞動節"),
     (5, 31, "端午節"),
     (10, 10, "國慶日"),
@@ -711,6 +719,23 @@ mod tests {
         let lunar = gregorian_to_lunar(2024, 6, 10).unwrap();
         assert_eq!(lunar.month, 5);
         assert_eq!(lunar.day, 5);
+    }
+
+    /// R1 fix: 2025 has 閏六月 (leap 6th month). A date inside the
+    /// leap month must report `month=6` with `leap_month=true`,
+    /// **not** `month=7`. 2025 閏六月 spans Gregorian 2025-07-25
+    /// through 2025-08-22 inclusive (per 中央氣象署 民國農曆年表).
+    #[test]
+    fn lunar_leap_month_2025_reports_previous_month_number() {
+        // Inside the leap month → month 6, leap=true.
+        let leap_day = gregorian_to_lunar(2025, 7, 30).unwrap();
+        assert_eq!(leap_day.month, 6);
+        assert!(leap_day.leap_month);
+        // Just after the leap month → 七月 1, leap=false.
+        let after_leap = gregorian_to_lunar(2025, 8, 23).unwrap();
+        assert_eq!(after_leap.month, 7);
+        assert!(!after_leap.leap_month);
+        assert_eq!(after_leap.day, 1);
     }
 
     #[test]

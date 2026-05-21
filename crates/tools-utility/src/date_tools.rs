@@ -17,7 +17,7 @@ use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use serde_json::{Map, Value, json};
 
 use crate::date::{
-    self, DateError, SUPPORTED_YEAR_MAX, SUPPORTED_YEAR_MIN, SolarTerm, gregorian_to_lunar,
+    DateError, SUPPORTED_YEAR_MAX, SUPPORTED_YEAR_MIN, SolarTerm, gregorian_to_lunar,
     gregorian_to_roc, is_national_holiday, roc_to_gregorian, solar_term_for_date,
 };
 
@@ -158,24 +158,59 @@ fn parse_ymd(args: &Value, kind: &str) -> Result<(i32, u32, u32), ToolError> {
     let obj = args
         .as_object()
         .ok_or_else(|| ToolError::InvalidArguments("arguments must be a JSON object".into()))?;
-    let year = parse_i32(obj, "year").ok_or_else(|| {
-        ToolError::InvalidArguments(format!("`year` is required ({kind} year as integer)"))
+    let year = parse_integer_field(
+        obj,
+        "year",
+        &format!("{kind} year as integer"),
+        i64::MIN..=i64::MAX,
+    )?;
+    let month = parse_integer_field(obj, "month", "month (1-12)", 1..=12)?;
+    let day = parse_integer_field(obj, "day", "day (1-31)", 1..=31)?;
+    let year_i32 = i32::try_from(year)
+        .map_err(|_| ToolError::InvalidArguments(format!("`year` must fit in i32, got {year}")))?;
+    let month_u32 = u32::try_from(month).expect("month bounded 1..=12 fits in u32");
+    let day_u32 = u32::try_from(day).expect("day bounded 1..=31 fits in u32");
+    Ok((year_i32, month_u32, day_u32))
+}
+
+/// Parse a required integer field with explicit error-shape
+/// reporting: missing, wrong JSON type, or out-of-range all
+/// surface as separate `InvalidArguments` messages so an agent
+/// can tell what to fix.
+fn parse_integer_field(
+    obj: &Map<String, Value>,
+    key: &str,
+    description: &str,
+    range: std::ops::RangeInclusive<i64>,
+) -> Result<i64, ToolError> {
+    let value = obj.get(key).ok_or_else(|| {
+        ToolError::InvalidArguments(format!("`{key}` is required ({description})"))
     })?;
-    let month = parse_u32(obj, "month")
-        .ok_or_else(|| ToolError::InvalidArguments("`month` is required (1-12)".to_string()))?;
-    let day = parse_u32(obj, "day")
-        .ok_or_else(|| ToolError::InvalidArguments("`day` is required (1-31)".to_string()))?;
-    Ok((year, month, day))
+    let num = value.as_i64().ok_or_else(|| {
+        ToolError::InvalidArguments(format!(
+            "`{key}` must be an integer, got {} ({description})",
+            kind_of(value)
+        ))
+    })?;
+    if !range.contains(&num) {
+        return Err(ToolError::InvalidArguments(format!(
+            "`{key}` must be in range [{start}, {end}], got {num}",
+            start = range.start(),
+            end = range.end(),
+        )));
+    }
+    Ok(num)
 }
 
-fn parse_i32(obj: &Map<String, Value>, key: &str) -> Option<i32> {
-    let n = obj.get(key)?.as_i64()?;
-    i32::try_from(n).ok()
-}
-
-fn parse_u32(obj: &Map<String, Value>, key: &str) -> Option<u32> {
-    let n = obj.get(key)?.as_u64()?;
-    u32::try_from(n).ok()
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Map a `DateError` into the public `ToolError::InvalidArguments`
@@ -289,13 +324,6 @@ fn holiday_output_schema() -> Map<String, Value> {
     .cloned()
     .expect("hand-rolled output schema must be an object")
 }
-
-// Suppress unused-import for `date` since the consts come through
-// the named imports above. (Kept the module import for future
-// expansion symmetry.)
-const _: fn() = || {
-    let _ = date::SUPPORTED_YEAR_MIN;
-};
 
 #[cfg(test)]
 mod tests {
