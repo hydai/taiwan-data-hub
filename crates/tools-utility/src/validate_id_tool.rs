@@ -66,12 +66,19 @@ impl ToolHandler for ValidateIdTool {
     async fn call(&self, args: Value) -> Result<Value, ToolError> {
         let value = parse_value(&args)?;
         let requested_kind = parse_kind(&args)?;
+        let strict = parse_strict(&args)?;
+        // `strict` only affects the tax_id validator's 2023 leniency
+        // window. It's silently ignored for kinds that don't traverse
+        // tax_id (national_id / arc / passport) — that's the simplest
+        // contract for callers who always pass the same opts struct
+        // regardless of `kind`.
+        let tax_opts = tax_id::Options { strict };
 
         let response = match requested_kind.as_str() {
-            "auto" => dispatch_auto(&value),
+            "auto" => dispatch_auto(&value, tax_opts),
             "national_id" => dispatch_national_id(&value),
             "arc" => dispatch_arc(&value),
-            "tax_id" => dispatch_tax_id(&value),
+            "tax_id" => dispatch_tax_id(&value, tax_opts),
             "passport" => dispatch_passport(&value),
             other => {
                 return Err(ToolError::InvalidArguments(format!(
@@ -109,6 +116,21 @@ fn parse_kind(args: &Value) -> Result<String, ToolError> {
     }
 }
 
+/// Default is `false` (permissive — accept the legacy +1 alternative
+/// for tax IDs whose 7th digit is `7`). Set `true` to enforce the
+/// strict 2023 rule; see [`tax_id::Options`] for the underlying
+/// algorithm.
+fn parse_strict(args: &Value) -> Result<bool, ToolError> {
+    match args.get("strict") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(ToolError::InvalidArguments(format!(
+            "`strict` must be a boolean, got {}",
+            kind_of(other)
+        ))),
+    }
+}
+
 fn kind_of(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -131,7 +153,7 @@ fn kind_of(v: &Value) -> &'static str {
 /// should report `unknown` instead of `national_id` with an empty
 /// parse. Explicit `kind="national_id"` still surfaces the `kind`
 /// echo for direct callers.
-fn dispatch_auto(value: &str) -> Value {
+fn dispatch_auto(value: &str, tax_opts: tax_id::Options) -> Value {
     let trimmed = value.trim();
     if trimmed.len() == 10 {
         let (valid, parsed) = national_id::validate(value);
@@ -149,7 +171,7 @@ fn dispatch_auto(value: &str) -> Value {
         return dispatch_passport(value);
     }
     if trimmed.len() == 8 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
-        return dispatch_tax_id(value);
+        return dispatch_tax_id(value, tax_opts);
     }
     json!({
         "valid": false,
@@ -212,8 +234,8 @@ fn dispatch_arc(value: &str) -> Value {
     }
 }
 
-fn dispatch_tax_id(value: &str) -> Value {
-    let (valid, parsed) = tax_id::validate(value);
+fn dispatch_tax_id(value: &str, opts: tax_id::Options) -> Value {
+    let (valid, parsed) = tax_id::validate_with(value, opts);
     match parsed {
         Some(p) => json!({
             "valid": valid,
@@ -264,6 +286,16 @@ fn input_schema() -> Map<String, Value> {
                                  length+shape signature; explicit kinds force a \
                                  single validator and return valid=false when the \
                                  input doesn't match that family."
+            },
+            "strict": {
+                "type": "boolean",
+                "default": false,
+                "description": "Only affects the 統一編號 (tax_id) validator's \
+                                 2023 leniency window. Default false: accept the \
+                                 legacy `+1` alternative when the 7th digit is 7. \
+                                 Set true to reject the legacy form (modern \
+                                 issuance only). Silently ignored for kinds that \
+                                 don't traverse tax_id."
             }
         },
         "additionalProperties": false,
@@ -361,6 +393,45 @@ mod tests {
     fn unknown_kind_is_invalid_arguments() {
         let err = invoke_err(json!({"value": "A123456789", "kind": "passport2"}));
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn non_bool_strict_is_invalid_arguments() {
+        let err = invoke_err(json!({"value": "12345675", "strict": "yes"}));
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn strict_true_rejects_legacy_plus_one_alternative() {
+        // 00000078 only validates via the legacy +1 path (per
+        // tax_id::tests::legacy_alternative_is_accepted_in_default_and_rejected_in_strict).
+        // Permissive default ⇒ valid. strict=true ⇒ invalid.
+        let permissive = invoke(json!({"value": "00000078", "kind": "tax_id"}));
+        assert_eq!(permissive["valid"], true);
+        let strict = invoke(json!({"value": "00000078", "kind": "tax_id", "strict": true}));
+        assert_eq!(strict["valid"], false);
+        // Parsed metadata still surfaces the legacy diagnosis so the
+        // caller can present a meaningful "this is a legacy-format
+        // ID; verify with the issuer" message.
+        assert_eq!(strict["parsed"]["legacy_alternative"], true);
+    }
+
+    #[test]
+    fn strict_affects_auto_dispatch_to_tax_id() {
+        // Auto-dispatch routes 8-digit input through dispatch_tax_id.
+        // strict=true should propagate the option through.
+        let out = invoke(json!({"value": "00000078", "strict": true}));
+        assert_eq!(out["valid"], false);
+        assert_eq!(out["kind"], "tax_id");
+    }
+
+    #[test]
+    fn strict_is_silently_ignored_for_non_tax_id_kinds() {
+        // strict=true on a national_id input doesn't break validation
+        // — A123456789 stays valid.
+        let out = invoke(json!({"value": "A123456789", "strict": true}));
+        assert_eq!(out["valid"], true);
+        assert_eq!(out["kind"], "citizen");
     }
 
     #[test]
