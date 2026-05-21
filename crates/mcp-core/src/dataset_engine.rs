@@ -146,13 +146,21 @@ pub struct LoadOptions {
 /// ## Stable contract for `Polars` messages
 ///
 /// The engine wraps every [`PolarsError`] with an engine-owned
-/// prefix before exposing it: `<op>[ (<path>)]: <polars message>`.
-/// Callers and tests can assert on the engine-controlled prefix
-/// (`op` is one of `scan parquet`, `scan csv`, `scan ndjson`, or
-/// `collect`; `path` appears for scan ops only) without coupling
-/// to upstream Polars wording. The trailing `<polars message>`
-/// stays as Polars' raw `Display`, so logs keep the upstream
-/// detail — but it isn't a stable test target.
+/// prefix before exposing it. Two views matter:
+///
+/// - **Inner `String` payload** (what `EngineError::Polars(s)`
+///   destructures to): `<op>[ (<path>)]: <polars message>`.
+/// - **`Display` output** (what `format!("{err}")` produces, the
+///   form callers and tests usually compare against): adds the
+///   `thiserror` variant prefix on top, so the final wire shape is
+///   `polars: <op>[ (<path>)]: <polars message>`.
+///
+/// Either view exposes the same engine-controlled tokens. `op` is
+/// one of `scan parquet`, `scan csv`, `scan ndjson`, or `collect`;
+/// `path` is interpolated for scan ops only. The trailing
+/// `<polars message>` stays as Polars' raw `Display` so logs keep
+/// the upstream detail — but it isn't a stable test target across
+/// Polars patch releases.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// Polars reader / scan / lazy-plan failure, wrapped with the
