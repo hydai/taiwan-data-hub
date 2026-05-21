@@ -52,11 +52,16 @@ sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio
 uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
 testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
 tokio-cron-scheduler = "0.15.1"
-# `query_rows` SQL surface — versions per DESIGN.md §5.
-# Polars features: `lazy` for LazyFrame, `parquet` for scan_parquet,
-# `sql` for SQLContext, `new_streaming` to bound memory on large
-# scans (the old `streaming` feature was renamed in 0.53).
-polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming"] }
+# `query_rows` SQL surface + #3.1's `DatasetEngine` — versions per
+# DESIGN.md §5. Polars features:
+# - `lazy` for LazyFrame, `parquet` for scan_parquet, `sql` for
+#   SQLContext, `new_streaming` to bound memory on large scans (the
+#   old `streaming` feature was renamed in 0.53).
+# - `csv` + `json` for the rich-MCP DatasetEngine's CSV / NDJSON
+#   loaders (#3.1). Polars' `json` feature exposes
+#   `LazyJsonLineReader` for newline-delimited JSON; plain-object
+#   JSON files aren't a supported lazy source upstream.
+polars = { version = "0.53.0", default-features = false, features = ["lazy", "parquet", "sql", "new_streaming", "csv", "json"] }
 # Aligned with the version `polars-sql` 0.53 transitively pulls in.
 # Pinning a newer release would double-compile sqlparser; the API
 # surface we use (`Visit`/`Visitor`/`LimitClause`/`TableFactor`) is
