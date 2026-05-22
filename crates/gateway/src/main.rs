@@ -348,12 +348,19 @@ fn wire_db_tools_if_available(
 }
 
 /// Build the `/v1/api-keys` subrouter (session-gated). Returns
-/// `None` and logs a `warn!` when any of the required dependencies
-/// is missing:
+/// `None` when any required dependency is missing. The log level
+/// distinguishes "intentionally disabled" from "misconfigured":
 ///
-/// - `storage` is `None` (no `DATABASE_URL` or connection failure).
-/// - `SESSION_HMAC_KEY` env var is missing / blank / shorter than
-///   the auth crate's required minimum.
+/// - `info!` for the EXPECTED disabled states — `storage` is
+///   `None` because `DATABASE_URL` was deliberately unset, or
+///   `SESSION_HMAC_KEY` is also deliberately unset (personal-
+///   mode / dev). Operators running without auth see one
+///   informational line per boot and that's it.
+/// - `warn!` for MISCONFIGURATION — `SESSION_HMAC_KEY` was set
+///   but the bytes are invalid base64 or shorter than the auth
+///   crate's required minimum, or `SessionService::new` rejected
+///   the key. These need operator attention because the
+///   subrouter SHOULD have come up.
 ///
 /// In either case the rest of the gateway still serves — the
 /// account page just can't load. This matches the broader

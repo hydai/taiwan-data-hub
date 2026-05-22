@@ -150,9 +150,10 @@ async fn list_api_keys(
 async fn revoke_api_key(
     State(svc): State<Arc<ApiKeyService>>,
     session: Option<Extension<ValidatedSession>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
+    let id = parse_key_id(&id)?;
     let revoked = svc.revoke(id, session.user_id).await?;
     match revoked {
         // 204 No Content for the success case — REST idiom for
@@ -168,9 +169,10 @@ async fn revoke_api_key(
 async fn rotate_api_key(
     State(svc): State<Arc<ApiKeyService>>,
     session: Option<Extension<ValidatedSession>>,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
+    let id = parse_key_id(&id)?;
     let rotated = svc.rotate(id, session.user_id).await?;
     match rotated {
         Some(issued) => {
@@ -191,6 +193,26 @@ async fn rotate_api_key(
         }
         None => Err(ApiError::NotFound),
     }
+}
+
+/// Parse the `{id}` path segment into a [`Uuid`] and map a
+/// failure to [`ApiError::Validation`].
+///
+/// We extract the path as `Path<String>` (rather than
+/// `Path<Uuid>`) and parse here so a non-UUID id returns the
+/// gateway's structured `{error: "validation", message: ...}`
+/// JSON shape. Letting axum coerce `Path<Uuid>` directly would
+/// short-circuit with a plain-text `PathRejection` 400 that
+/// bypasses [`ApiError`]'s `IntoResponse` — clients then have
+/// to special-case "validation error in path" vs "validation
+/// error in body", which would be a leaky abstraction across
+/// the route surface.
+fn parse_key_id(raw: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(raw).map_err(|_| {
+        ApiError::Validation(format!(
+            "api key id `{raw}` is not a valid UUID"
+        ))
+    })
 }
 
 /// Internal error type for the api-keys subrouter. Maps to
@@ -321,5 +343,23 @@ mod tests {
         assert_eq!(req.name, "laptop");
         assert!(req.scopes.is_empty());
         assert!(req.rate_limit_tier.is_none());
+    }
+
+    #[test]
+    fn parse_key_id_accepts_a_valid_uuid() {
+        let u = Uuid::now_v7();
+        assert_eq!(parse_key_id(&u.to_string()).unwrap(), u);
+    }
+
+    #[test]
+    fn parse_key_id_rejects_non_uuid_with_validation_error() {
+        // Pure-text id (the case Copilot R10 flagged) — under
+        // `Path<Uuid>` this would short-circuit to a plain-text
+        // 400; now it surfaces as the gateway's structured
+        // `{error: "validation", message: ...}` JSON via
+        // `ApiError::Validation`.
+        let err = parse_key_id("not-a-uuid").unwrap_err();
+        assert!(matches!(err, ApiError::Validation(_)));
+        assert_eq!(err.into_response().status(), StatusCode::BAD_REQUEST);
     }
 }

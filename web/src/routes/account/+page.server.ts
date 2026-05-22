@@ -94,10 +94,19 @@ export const load: PageServerLoad = async ({
 		if (kind === 'unauthenticated') {
 			return { state: 'unauthenticated' };
 		}
+		// User-facing copy for the load-failure cases. The
+		// gateway's structured `{error, message}` body (when
+		// present) takes precedence so a `5xx` carrying a
+		// useful message still surfaces it; the fallbacks
+		// below cover the cases where the body is missing or
+		// unstructured. The raw `response.status` is logged
+		// (above, via console.error in the catch branch for
+		// network errors) but never bubbled into the UI by
+		// itself — "gateway returned 404" is opaque copy.
 		const body = parseGatewayErrorBody(await safeJson(response));
 		return {
 			state: kind,
-			message: body?.message ?? `gateway returned ${response.status}`
+			message: body?.message ?? friendlyLoadErrorMessage(response.status, kind)
 		};
 	}
 
@@ -285,4 +294,22 @@ async function safeJson(response: Response): Promise<unknown> {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Map a load-time HTTP failure to user-facing copy. The
+ * underlying status is logged but never bubbled into the UI
+ * by itself — "gateway returned 404" is opaque to an end
+ * user. 404 is the most common case (subrouter not mounted
+ * because `DATABASE_URL` or `SESSION_HMAC_KEY` is missing on
+ * the gateway), so it gets its own bespoke message.
+ */
+function friendlyLoadErrorMessage(status: number, kind: 'unavailable' | 'unexpected'): string {
+	if (status === 404) {
+		return 'API key management is not enabled on this deployment. Ask your operator to configure the gateway with DATABASE_URL and SESSION_HMAC_KEY.';
+	}
+	if (kind === 'unavailable') {
+		return GATEWAY_UNREACHABLE_MESSAGE;
+	}
+	return `Gateway error (${status}). Please try again or contact support.`;
 }
