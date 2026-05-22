@@ -61,8 +61,18 @@ const ACCEPTED_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.goo
 
 /// Minimum OIDC scopes for "log in with Google": `openid` enables
 /// the `id_token`, `email` puts the address + verified flag into
-/// the JWT, `profile` is intentionally OMITTED — we don't store
-/// the provider-supplied display name in v0.1.
+/// the JWT.
+///
+/// `profile` is intentionally OMITTED in v0.1. The `ProviderProfile`
+/// trait surface this auth crate ships carries `provider_user_id` +
+/// `email` only (matching `GitHubProvider` in #4.3); the `users`
+/// table has no `display_name` / `avatar_url` columns yet. The
+/// `name` / `picture` claims that Google would put in the
+/// `id_token` (given `profile`) have no plumbing target — issue
+/// #44 covers that as a cross-cutting follow-up that needs a
+/// storage migration + symmetric extraction in `GitHubProvider`.
+/// Do NOT silently change `SCOPES` here without expanding
+/// `ProviderProfile` first or the extra claim does no work.
 const SCOPES: &str = "openid email";
 
 /// JWKS cache TTL. Google rotates signing keys every few weeks
