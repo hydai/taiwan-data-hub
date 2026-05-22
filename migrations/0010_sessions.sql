@@ -60,16 +60,36 @@ CREATE TABLE sessions (
     user_agent        TEXT,
     ip_addr           INET,
 
-    CONSTRAINT sessions_id_sha256 CHECK (octet_length(id) = 32)
+    CONSTRAINT sessions_id_sha256 CHECK (octet_length(id) = 32),
+    -- Enforce the documented invariant "idle expiry never exceeds
+    -- the hard cap": the auth crate composes `expires_at` via
+    -- `LEAST(GREATEST($new, expires_at), absolute_expires_at)`,
+    -- but a future writer that bypasses that helper (manual SQL,
+    -- a migration backfill, a different language client) would
+    -- otherwise be free to insert an `expires_at >
+    -- absolute_expires_at` row. The CHECK pushes the invariant
+    -- down to the storage engine so the lookup predicate
+    -- `expires_at > $now AND absolute_expires_at > $now` can be
+    -- read as "expires_at > $now implies absolute_expires_at >
+    -- $now" without a database-wide audit.
+    CONSTRAINT sessions_idle_within_absolute
+        CHECK (expires_at <= absolute_expires_at)
 );
 
 -- "All sessions for user X" — used by logout-everywhere and by
 -- the "active sessions" UI in #4.6.
 CREATE INDEX sessions_user_id_idx ON sessions (user_id);
 
--- Sweep candidates for the eventual GC job (drop expired/revoked
--- rows). Partial index so the planner can do a direct range scan
--- without filtering rows whose lookup path already excludes them.
+-- Sweep candidates for the GC job over EXPIRED-BUT-UNREVOKED
+-- sessions. The partial predicate (`revoked_at IS NULL`)
+-- intentionally excludes revoked rows: they are
+-- comparatively low-volume (driven by explicit user action,
+-- not by traffic) and the existing `sessions_user_id_idx`
+-- already serves the "revoke all for user X" sweep without
+-- needing a second partial index. If revoked-row GC becomes a
+-- hotspot we can add `WHERE revoked_at IS NOT NULL` later; for
+-- now keeping a single narrow index minimises write
+-- amplification on every authenticated request.
 CREATE INDEX sessions_expired_active_idx
     ON sessions (expires_at)
     WHERE revoked_at IS NULL;

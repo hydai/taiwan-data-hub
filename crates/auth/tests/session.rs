@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -585,13 +586,16 @@ async fn with_idle_ttl_panics_on_sub_second() {
 async fn cookie_max_age_seconds_is_never_zero_for_valid_config() {
     // With the assert in `with_absolute_max`, the lowest legal
     // `absolute_max` is 1s, which maps to `Max-Age=1`. Confirms
-    // the gateway can never emit `Max-Age=0` via this path.
+    // the gateway can never emit `Max-Age=0` via this path —
+    // the return type itself is `NonZeroU64`, so the only way
+    // to reach 0 would be a constructor regression panicking
+    // at the `expect`.
     let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
     let svc = SessionService::new(repo as Arc<dyn SessionRepo>, vec![7u8; 32])
         .unwrap()
         .with_idle_ttl(Duration::from_secs(1))
         .with_absolute_max(Duration::from_secs(1));
-    assert_eq!(svc.cookie_max_age_seconds(), 1);
+    assert_eq!(svc.cookie_max_age_seconds(), NonZeroU64::new(1).unwrap());
 }
 
 #[tokio::test]

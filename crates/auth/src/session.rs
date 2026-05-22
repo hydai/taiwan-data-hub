@@ -36,6 +36,7 @@
 //! `absolute_max`; idle sessions die after `idle_ttl`.
 
 use std::net::IpAddr;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -243,9 +244,20 @@ impl SessionService {
     /// browser-side cookie lifetime tracks the hard cap so
     /// eviction happens at the same time the server stops
     /// accepting the session — never before.
+    ///
+    /// Returns [`NonZeroU64`] so a future caller cannot
+    /// accidentally pass `0` into [`build_session_cookie`] (which
+    /// browsers interpret as "delete this cookie immediately",
+    /// i.e. an instant silent logout). The `>= 1s` invariant is
+    /// already enforced by [`Self::with_absolute_max`] and by
+    /// [`DEFAULT_ABSOLUTE_MAX`]; the `expect` below would only
+    /// fire if a constructor regressed past those guards, in
+    /// which case panicking at startup beats serving a broken
+    /// Set-Cookie header.
     #[must_use]
-    pub fn cookie_max_age_seconds(&self) -> u64 {
-        self.absolute_max.as_secs()
+    pub fn cookie_max_age_seconds(&self) -> NonZeroU64 {
+        NonZeroU64::new(self.absolute_max.as_secs())
+            .expect("absolute_max >= 1s enforced by with_absolute_max / DEFAULT_ABSOLUTE_MAX")
     }
 
     /// Mint a fresh session for `user_id`. Generates the opaque

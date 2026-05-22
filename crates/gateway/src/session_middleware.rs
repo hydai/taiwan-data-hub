@@ -25,6 +25,7 @@
 
 #![allow(dead_code)]
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use auth::{SESSION_COOKIE_NAME, SessionService, ValidatedSession};
@@ -134,13 +135,21 @@ fn extract_session_cookie(headers: &HeaderMap) -> Option<&str> {
 /// `true` in production code matches the security-first posture;
 /// the dev override is opt-in.
 ///
-/// `max_age_seconds` is `u64` — RFC 6265 §5.2.2 defines
-/// `Max-Age` as a non-zero positive integer; a signed type
-/// would let a negative value through, which most browsers
-/// interpret as "delete the cookie immediately" and would
-/// silently log the user out the moment the cookie is set.
+/// `max_age_seconds` is [`NonZeroU64`] — RFC 6265 §5.2.2
+/// defines `Max-Age` as a non-zero positive integer, and browsers
+/// treat a `Max-Age=0` cookie as "delete this cookie
+/// immediately" (instant silent logout). Using [`NonZeroU64`]
+/// makes the bad value unrepresentable at the call site rather
+/// than relying on a runtime assert. The auth crate exposes a
+/// matching [`NonZeroU64`] via `SessionService::
+/// cookie_max_age_seconds`, so the gateway plumbs it through
+/// without ever unwrapping.
 #[must_use]
-pub fn build_session_cookie(cookie_value: &str, max_age_seconds: u64, secure: bool) -> String {
+pub fn build_session_cookie(
+    cookie_value: &str,
+    max_age_seconds: NonZeroU64,
+    secure: bool,
+) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
     format!(
         "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age={max_age_seconds}"
@@ -232,7 +241,8 @@ mod tests {
 
     #[test]
     fn build_session_cookie_has_required_attrs() {
-        let s = build_session_cookie("tok", 1_209_600, true);
+        let max_age = NonZeroU64::new(1_209_600).unwrap();
+        let s = build_session_cookie("tok", max_age, true);
         assert!(s.contains("HttpOnly"));
         assert!(s.contains("Secure"));
         assert!(s.contains("SameSite=Lax"));
@@ -246,7 +256,8 @@ mod tests {
         // Local dev / staging on plain HTTP needs the cookie to
         // ride over `http://` requests; that means dropping the
         // `Secure` attr. The other attrs must remain.
-        let s = build_session_cookie("tok", 60, false);
+        let max_age = NonZeroU64::new(60).unwrap();
+        let s = build_session_cookie("tok", max_age, false);
         assert!(s.contains("HttpOnly"));
         assert!(!s.contains("Secure"), "Secure must be absent: {s}");
         assert!(s.contains("SameSite=Lax"));
