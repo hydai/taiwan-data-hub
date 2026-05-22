@@ -276,10 +276,15 @@ pub trait CacheState: Send + Sync + 'static {
     ) -> Result<Vec<CacheCandidate>, StorageError>;
 
     /// Mark a dataset as no longer cached. Sets `cached = false`
-    /// and clears `cache_path`. Doesn't delete the parquet file
-    /// itself — the object-store layer's lifecycle policy handles
-    /// physical eviction.
-    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError>;
+    /// and clears `cache_path` *iff* the dataset is currently
+    /// cached and not editorially pinned. Returns whether the
+    /// row was actually changed (`true` = demoted; `false` = the
+    /// dataset was promoted to platinum/gold or already
+    /// uncached between the candidate scan and the UPDATE, so
+    /// the no-op is correct). Doesn't delete the parquet file
+    /// itself — the object-store layer's lifecycle policy
+    /// handles physical eviction.
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError>;
 
     /// Compute the cache hit ratio over the last `window_days` of
     /// `query_rows` usage. "Hit" = the dataset is `cached = true`
@@ -312,7 +317,7 @@ impl CacheState for Storage {
         Storage::cold_candidates(self, inactive_days).await
     }
 
-    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError> {
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
         Storage::demote_dataset(self, dataset_id).await
     }
 
@@ -997,8 +1002,14 @@ impl Storage {
         window_days: i32,
         hit_threshold: i64,
     ) -> Result<Vec<CacheCandidate>, StorageError> {
+        // Effective tier = COALESCE(tier_override, tier). The
+        // schema (migrations/0001_init.sql) makes tier_override
+        // win when an admin pins a dataset, so the candidate
+        // query has to look at that column or it'll miss
+        // editorial pins.
         let rows: Vec<CacheCandidate> = sqlx::query_as(
-            "SELECT d.id, d.slug, d.tier, \
+            "SELECT d.id, d.slug, \
+                    COALESCE(d.tier_override, d.tier) AS tier, \
                     COALESCE(u.hits, 0)::bigint AS query_hits \
              FROM datasets d \
              LEFT JOIN ( \
@@ -1010,11 +1021,11 @@ impl Storage {
              ) u ON u.dataset_id = d.id \
              WHERE NOT d.cached \
                AND ( \
-                 d.tier IN ('platinum', 'gold') \
+                 COALESCE(d.tier_override, d.tier) IN ('platinum', 'gold') \
                  OR COALESCE(u.hits, 0) >= $2 \
                ) \
              ORDER BY \
-               CASE d.tier \
+               CASE COALESCE(d.tier_override, d.tier) \
                  WHEN 'platinum' THEN 1 \
                  WHEN 'gold' THEN 2 \
                  WHEN 'silver' THEN 3 \
@@ -1040,8 +1051,11 @@ impl Storage {
         &self,
         inactive_days: i32,
     ) -> Result<Vec<CacheCandidate>, StorageError> {
+        // Same effective-tier rule as `hot_candidates` —
+        // tier_override wins.
         let rows: Vec<CacheCandidate> = sqlx::query_as(
-            "SELECT d.id, d.slug, d.tier, \
+            "SELECT d.id, d.slug, \
+                    COALESCE(d.tier_override, d.tier) AS tier, \
                     COALESCE(u.hits, 0)::bigint AS query_hits \
              FROM datasets d \
              LEFT JOIN ( \
@@ -1052,7 +1066,7 @@ impl Storage {
                 GROUP BY dataset_id \
              ) u ON u.dataset_id = d.id \
              WHERE d.cached \
-               AND d.tier NOT IN ('platinum', 'gold') \
+               AND COALESCE(d.tier_override, d.tier) NOT IN ('platinum', 'gold') \
                AND COALESCE(u.hits, 0) = 0 \
              ORDER BY d.slug ASC",
         )
@@ -1069,13 +1083,29 @@ impl Storage {
     /// parquet file in `SeaweedFS` is left for the object-store
     /// lifecycle policy to garbage-collect; tracking that here
     /// would be a layering violation.
-    pub async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError> {
-        sqlx::query("UPDATE datasets SET cached = false, cache_path = NULL WHERE id = $1")
-            .bind(dataset_id)
-            .execute(&self.pool)
-            .await
-            .map_err(StorageError::from)?;
-        Ok(())
+    ///
+    /// The UPDATE carries the same eligibility predicate as
+    /// `cold_candidates` (`cached = true` AND effective tier
+    /// not pinned to platinum/gold). This closes the race where
+    /// an admin promotes a dataset to platinum/gold *after*
+    /// `cold_candidates` runs but *before* the demote fires —
+    /// the predicate makes the UPDATE a no-op and the returned
+    /// `false` lets the caller distinguish "really demoted"
+    /// from "race lost". A missing `id` also returns `false`
+    /// rather than silently succeeding.
+    pub async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE datasets \
+             SET cached = false, cache_path = NULL \
+             WHERE id = $1 \
+               AND cached \
+               AND COALESCE(tier_override, tier) NOT IN ('platinum', 'gold')",
+        )
+        .bind(dataset_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// #3.6 hot-cache pipeline: aggregate cache hit ratio for a

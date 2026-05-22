@@ -9,16 +9,16 @@
 --
 -- The existing `usage_records_tool_requested_idx` (tool, requested_at
 -- DESC) covers the WHERE clause but forces a heap fetch per row to
--- read `dataset_id` for the GROUP BY. Adding a partial index that
--- includes `dataset_id` in the index tuple lets the planner do the
--- aggregation index-only, keeping the tick cheap as the
--- usage_records table grows (~10k rows/day at v0.1 traffic; the
--- partial index keeps the size small by only covering
--- tool='query_rows' rows).
+-- read `dataset_id` for the GROUP BY. We need an index whose leading
+-- column is `requested_at` (so the range scan `requested_at >=
+-- cutoff` is direct), with `dataset_id` available index-only for
+-- the aggregation. The partial-on-tool predicate keeps it small
+-- (matches the only query pattern that uses it).
 
-CREATE INDEX usage_records_query_rows_dataset_idx
-    ON usage_records (dataset_id, requested_at DESC)
+CREATE INDEX usage_records_query_rows_window_idx
+    ON usage_records (requested_at DESC)
+    INCLUDE (dataset_id)
     WHERE tool = 'query_rows';
 
-COMMENT ON INDEX usage_records_query_rows_dataset_idx IS
-    'Covering index for #3.6 hot-cache pipeline candidate scans. Partial on tool=query_rows so the index is small.';
+COMMENT ON INDEX usage_records_query_rows_window_idx IS
+    'Covering index for #3.6 hot-cache pipeline: requested_at-leading range scan with dataset_id INCLUDE-only for index-only aggregation; partial on tool=query_rows.';

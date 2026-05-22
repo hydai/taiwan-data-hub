@@ -137,15 +137,29 @@ pub async fn run_cache_tick(
         .await
         .map_err(CacheTickError::ColdQuery)?;
     let mut demoted = 0_usize;
+    let mut skipped_races = 0_usize;
     for candidate in &cold {
         match state.demote_dataset(candidate.id).await {
-            Ok(()) => {
+            Ok(true) => {
                 demoted += 1;
                 tracing::info!(
                     dataset_id = %candidate.id,
                     slug = %candidate.slug,
                     tier = %candidate.tier,
                     "demoted dataset from cache",
+                );
+            }
+            Ok(false) => {
+                // Race lost: the dataset was promoted to
+                // platinum/gold (or already-uncached) between
+                // the candidate scan and the UPDATE. Eligibility
+                // predicate on the UPDATE handled this safely;
+                // log so an operator can correlate.
+                skipped_races += 1;
+                tracing::info!(
+                    dataset_id = %candidate.id,
+                    slug = %candidate.slug,
+                    "demotion skipped: ineligible at UPDATE (race with promotion / already uncached)",
                 );
             }
             Err(e) => {
@@ -155,6 +169,12 @@ pub async fn run_cache_tick(
                 });
             }
         }
+    }
+    if skipped_races > 0 {
+        tracing::info!(
+            skipped_races,
+            "cache tick: some demotions skipped to honour editorial pin / race",
+        );
     }
 
     // 3. Compute the cache hit ratio. The Prometheus exporter
@@ -234,7 +254,7 @@ mod tests {
             Ok(self.cold.lock().unwrap().clone())
         }
 
-        async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError> {
+        async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
             if let Some(fail_id) = *self.demote_should_fail.lock().unwrap() {
                 if fail_id == dataset_id {
                     return Err(StorageError::InvalidArgument(
@@ -243,7 +263,7 @@ mod tests {
                 }
             }
             self.demoted.lock().unwrap().push(dataset_id);
-            Ok(())
+            Ok(true)
         }
 
         async fn cache_hit_ratio(&self, _window_days: i32) -> Result<CacheHitRatio, StorageError> {
@@ -306,6 +326,61 @@ mod tests {
         let demoted = state.demoted.lock().unwrap();
         assert!(demoted.contains(&Uuid::from_u128(10)));
         assert!(demoted.contains(&Uuid::from_u128(11)));
+    }
+
+    /// R3 fix: `demote_dataset` returning `Ok(false)` means the
+    /// row was no longer eligible at UPDATE time (race with a
+    /// concurrent promotion). The tick must treat that as a
+    /// skip — not count it as demoted — and continue with the
+    /// remaining candidates.
+    #[tokio::test]
+    async fn demote_returning_false_is_skipped_not_counted() {
+        #[derive(Default)]
+        struct RaceMock {
+            cold: Mutex<Vec<CacheCandidate>>,
+            // Returning Ok(false) for the first id, Ok(true) for
+            // the rest.
+            race_id: Mutex<Option<Uuid>>,
+            demoted: Mutex<Vec<Uuid>>,
+        }
+        #[async_trait]
+        impl CacheState for RaceMock {
+            async fn hot_candidates(
+                &self,
+                _w: i32,
+                _t: i64,
+            ) -> Result<Vec<CacheCandidate>, StorageError> {
+                Ok(vec![])
+            }
+            async fn cold_candidates(&self, _d: i32) -> Result<Vec<CacheCandidate>, StorageError> {
+                Ok(self.cold.lock().unwrap().clone())
+            }
+            async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
+                if Some(dataset_id) == *self.race_id.lock().unwrap() {
+                    return Ok(false);
+                }
+                self.demoted.lock().unwrap().push(dataset_id);
+                Ok(true)
+            }
+            async fn cache_hit_ratio(&self, _w: i32) -> Result<CacheHitRatio, StorageError> {
+                Ok(CacheHitRatio::default())
+            }
+        }
+        let state = RaceMock::default();
+        *state.cold.lock().unwrap() = vec![
+            candidate(30, "tw-race-a", "bronze", 0),
+            candidate(31, "tw-race-b", "bronze", 0),
+        ];
+        *state.race_id.lock().unwrap() = Some(Uuid::from_u128(30));
+        let state = Arc::new(state);
+        let report = run_cache_tick(state.clone(), CacheTickConfig::default())
+            .await
+            .unwrap();
+        // Only the un-raced candidate was demoted.
+        assert_eq!(report.demoted_count, 1);
+        let demoted = state.demoted.lock().unwrap();
+        assert_eq!(demoted.len(), 1);
+        assert_eq!(demoted[0], Uuid::from_u128(31));
     }
 
     #[tokio::test]

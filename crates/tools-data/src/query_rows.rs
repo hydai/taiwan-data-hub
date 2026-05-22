@@ -186,6 +186,16 @@ impl ToolHandler for QueryRowsTool {
         // a failure here is a telemetry loss, not a query
         // failure, so we log and continue with the rendered
         // response (same pattern as materialize_dataset).
+        //
+        // Principal threading note: v0.1 hard-codes
+        // `principal_kind = "anonymous"`. Personal-mode is the
+        // only auth surface that exists today (MODE=personal),
+        // so the audit row is correct as-is. When multi-user
+        // mode (#4) lands, query_rows' Request will gain an
+        // optional `principal` field (mirroring materialize_
+        // dataset's parser) and this site will read it; the
+        // shape change is the only thing blocking the v0.2
+        // upgrade.
         if let Some(recorder) = &self.recorder {
             if let Err(e) = recorder
                 .record_usage(&NewUsageRecord {
