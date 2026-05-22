@@ -20,6 +20,7 @@ mod error;
 mod mailer;
 mod oauth;
 mod password;
+mod rate_limit;
 mod redact;
 mod service;
 mod session;
@@ -37,6 +38,10 @@ pub use oauth::{
     generate_pkce, generate_state, hash_state,
 };
 pub use password::{hash_password, verify_password};
+pub use rate_limit::{
+    DEFAULT_IP_RPM, DEFAULT_QUERY_ROWS_RPM, InMemoryRateLimiter, PgRateLimiter, RateLimitOutcome,
+    RateLimiter, WINDOW_SECONDS, tier_rpm,
+};
 pub use service::{
     AuthService, AuthenticatedUser, DEFAULT_MAX_INFLIGHT_SENDS, DEFAULT_RESET_TTL,
     DEFAULT_VERIFY_TTL, into_arc,
