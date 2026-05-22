@@ -312,7 +312,14 @@ async fn connect_storage_if_available() -> Option<Storage> {
     let url = non_empty_env("DATABASE_URL")?;
     match Storage::connect(&url).await {
         Ok(storage) => {
-            tracing::info!("DATABASE_URL connected; DB-backed tools + api-keys subrouter enabled");
+            // Logged narrowly: only the DB-tools side is enabled
+            // unconditionally once Storage opens. The api-keys
+            // subrouter has a second gate (`SESSION_HMAC_KEY`)
+            // that this layer can't see; let
+            // `build_auth_router_if_available` log its own
+            // enable / disable line so the boot log never claims
+            // api-keys is wired up when it isn't.
+            tracing::info!("DATABASE_URL connected; DB-backed tools enabled");
             Some(storage)
         }
         Err(e) => {
@@ -404,6 +411,11 @@ fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
             session_service,
             session_middleware::session_middleware,
         ));
+    // Positive enable log — counterpart to the four
+    // disabled-reason lines above. Operators grepping for
+    // "api-keys" in the boot log see exactly one of these
+    // five outcomes.
+    tracing::info!("api-keys subrouter enabled at /v1/api-keys");
     Some(Router::new().nest("/v1/api-keys", router))
 }
 

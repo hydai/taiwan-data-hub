@@ -186,6 +186,7 @@
 						<th class="px-4 py-2">Name</th>
 						<th class="px-4 py-2">Prefix</th>
 						<th class="px-4 py-2">Tier</th>
+						<th class="px-4 py-2">Scopes</th>
 						<th class="px-4 py-2">Created</th>
 						<th class="px-4 py-2">Last used</th>
 						<th class="px-4 py-2">State</th>
@@ -195,7 +196,7 @@
 				<tbody>
 					{#if data.keys.length === 0}
 						<tr>
-							<td colspan="7" class="text-muted-foreground px-4 py-6 text-center">
+							<td colspan="8" class="text-muted-foreground px-4 py-6 text-center">
 								No API keys yet — create one above.
 							</td>
 						</tr>
@@ -205,6 +206,17 @@
 								<td class="px-4 py-2 font-medium">{key.name}</td>
 								<td class="px-4 py-2 font-mono text-xs">{key.key_prefix}…</td>
 								<td class="px-4 py-2">{key.rate_limit_tier}</td>
+								<td class="px-4 py-2 text-xs">
+									{#if key.scopes.length === 0}
+										<span class="text-muted-foreground">—</span>
+									{:else}
+										<!-- Pre-join with `,` rather than CSS spacing so the
+										     comma stays inside the truncate boundary on narrow
+										     viewports; the cell wraps onto a second line
+										     before it hides any individual scope. -->
+										{key.scopes.join(', ')}
+									{/if}
+								</td>
 								<td class="px-4 py-2">{formatDate(key.created_at)}</td>
 								<td class="px-4 py-2">{formatDate(key.last_used_at)}</td>
 								<td class="px-4 py-2">
