@@ -167,6 +167,13 @@ impl OAuthProvider for GitHubProvider {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_in: token.expires_in.map(std::time::Duration::from_secs),
+            // `name` + `avatar_url` are present on the GitHub
+            // `/user` payload but unused in v0.1 — `GitHubUser`
+            // doesn't deserialise them yet. Tracked alongside the
+            // `users`-table storage work; setting None here keeps
+            // the `ProviderProfile` shape uniform with Google.
+            display_name: None,
+            avatar_url: None,
         })
     }
 }

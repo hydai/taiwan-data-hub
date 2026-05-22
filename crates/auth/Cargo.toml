@@ -16,6 +16,7 @@ workspace = true
 storage = { path = "../storage" }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
+jsonwebtoken = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
@@ -38,3 +39,14 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+# #4.4 tests sign a synthetic Google id_token with a freshly-
+# generated RSA-2048 key and verify the auth crate decodes it
+# against a matching JWKS. Test-only — production never builds
+# this dependency.
+rsa = { version = "0.9", features = ["sha2"] }
+# `rsa` 0.9 takes a `rand_core` 0.6 `CryptoRngCore`, which is a
+# different trait than the `rand` 0.9 we use elsewhere. Pull in
+# the matching `rand_core` for the test RNG.
+rand_core = { version = "0.6", features = ["std"] }
+# `serde_json` + `base64` are already in `[dependencies]`; tests
+# inherit them automatically. No dev-only re-listing needed.

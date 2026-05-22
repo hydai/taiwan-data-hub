@@ -22,6 +22,7 @@
 
 pub mod crypto;
 pub mod github;
+pub mod google;
 pub mod pkce;
 pub mod provider;
 pub mod service;
@@ -29,6 +30,7 @@ pub mod state;
 
 pub use crypto::{TokenCipher, TokenCipherError, account_aad};
 pub use github::GitHubProvider;
+pub use google::{GoogleProvider, JwksCache};
 pub use pkce::{PkcePair, generate_pkce};
 pub use provider::{OAuthProvider, ProviderProfile};
 pub use service::{OAuthService, StartLogin};

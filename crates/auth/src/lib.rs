@@ -26,8 +26,9 @@ mod token;
 pub use error::AuthError;
 pub use mailer::{LogMailer, MailFrom, MailKind, Mailer, MemoryMailer, SentMessage, SmtpMailer};
 pub use oauth::{
-    GitHubProvider, OAuthProvider, OAuthService, PkcePair, ProviderProfile, StartLogin, StateToken,
-    TokenCipher, TokenCipherError, account_aad, generate_pkce, generate_state, hash_state,
+    GitHubProvider, GoogleProvider, JwksCache, OAuthProvider, OAuthService, PkcePair,
+    ProviderProfile, StartLogin, StateToken, TokenCipher, TokenCipherError, account_aad,
+    generate_pkce, generate_state, hash_state,
 };
 pub use password::{hash_password, verify_password};
 pub use service::{
