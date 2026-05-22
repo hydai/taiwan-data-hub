@@ -15,8 +15,8 @@
 mod dataset_repo;
 
 pub use dataset_repo::{
-    CacheRef, DatasetCacheLookup, DatasetFileRow, DatasetFull, DatasetKey, DatasetLatestFiles,
-    DatasetReader, DatasetRow, DatasetSearcher, DatasetVersionRow, DatasetWriter, MaterializeView,
-    NewUsageRecord, SearchHit, SearchPage, SearchParams, SourceHttpState, Storage, StorageError,
-    UsageRecorder, VersionWithFiles,
+    CacheCandidate, CacheHitRatio, CacheRef, CacheState, DatasetCacheLookup, DatasetFileRow,
+    DatasetFull, DatasetKey, DatasetLatestFiles, DatasetReader, DatasetRow, DatasetSearcher,
+    DatasetVersionRow, DatasetWriter, MaterializeView, NewUsageRecord, SearchHit, SearchPage,
+    SearchParams, SourceHttpState, Storage, StorageError, UsageRecorder, VersionWithFiles,
 };

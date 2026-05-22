@@ -199,6 +199,117 @@ pub struct DatasetLatestFiles {
     pub files: Vec<DatasetFileRow>,
 }
 
+/// Bare-minimum dataset identification for the hot-cache pipeline
+/// (#3.6) — id + slug, enough to log what's being promoted/demoted
+/// without re-loading the full row.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct CacheCandidate {
+    pub id: Uuid,
+    pub slug: String,
+    pub tier: String,
+    /// Number of `query_rows` hits in the lookback window. Always
+    /// populated for the candidate-finding query so the worker can
+    /// log the actual hit count alongside the slug.
+    pub query_hits: i64,
+}
+
+/// Cache hit / total ratio for a window — read once per tick by the
+/// telemetry exporter. `hits` counts `query_rows` invocations
+/// against datasets that were already `cached = true` at the time
+/// of the call; `total` is `query_rows` total. Both are i64 to
+/// match Postgres COUNT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::FromRow)]
+pub struct CacheHitRatio {
+    pub hits: i64,
+    pub total: i64,
+}
+
+impl CacheHitRatio {
+    /// Ratio as a fraction in `[0.0, 1.0]`, or `None` when there
+    /// were no queries (so the gauge stays at the prior value or
+    /// is reported as missing rather than 0/0).
+    ///
+    /// Cast precision: hits / total are bounded by Postgres COUNT
+    /// over the lookback window — even at a million queries/day
+    /// they fit in f64's 2^53 mantissa precisely, so the cast is
+    /// lossless in practice. The clippy lint is suppressed
+    /// locally rather than at the workspace level.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn ratio(&self) -> Option<f64> {
+        if self.total == 0 {
+            None
+        } else {
+            Some(self.hits as f64 / self.total as f64)
+        }
+    }
+}
+
+/// Object-safe surface for the #3.6 cache pipeline. Decoupled from
+/// the materialisation traits so the etl-worker can hold a
+/// minimal Arc<dyn CacheState> instead of the full Storage.
+#[async_trait]
+pub trait CacheState: Send + Sync + 'static {
+    /// Datasets that should be promoted to the parquet cache.
+    /// Selection: tier IN ('platinum', 'gold') OR
+    /// `query_rows` hits in the last `window_days` ≥ `hit_threshold`.
+    /// Already-cached datasets are excluded — promotion is a no-op
+    /// when the parquet already exists.
+    async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError>;
+
+    /// Datasets currently `cached = true` whose last query is
+    /// older than `inactive_days`. These are candidates for cache
+    /// demotion — the worker calls [`demote_dataset`] on each.
+    /// Platinum / gold tiers are excluded so editorially-pinned
+    /// datasets don't churn out.
+    async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError>;
+
+    /// Mark a dataset as no longer cached. Sets `cached = false`
+    /// and clears `cache_path`. Doesn't delete the parquet file
+    /// itself — the object-store layer's lifecycle policy handles
+    /// physical eviction.
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError>;
+
+    /// Compute the cache hit ratio over the last `window_days` of
+    /// `query_rows` usage. "Hit" = the dataset was `cached = true`
+    /// when the call was recorded. Surfaces as a Prometheus
+    /// gauge once #2.10 telemetry lands.
+    async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError>;
+}
+
+#[async_trait]
+impl CacheState for Storage {
+    async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        Storage::hot_candidates(self, window_days, hit_threshold).await
+    }
+
+    async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        Storage::cold_candidates(self, inactive_days).await
+    }
+
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError> {
+        Storage::demote_dataset(self, dataset_id).await
+    }
+
+    async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
+        Storage::cache_hit_ratio(self, window_days).await
+    }
+}
+
 /// Object-safe writer for `usage_records`. Decoupled from
 /// [`DatasetWriter`] so tools that only need to log usage don't drag
 /// in the catalog-mutating surface.
@@ -857,6 +968,130 @@ impl Storage {
         .await
         .map_err(StorageError::from)?;
         Ok(row.0)
+    }
+
+    /// #3.6 hot-cache pipeline: candidates for promotion.
+    ///
+    /// Selection rule: tier IN ('platinum', 'gold') OR the dataset
+    /// received ≥ `hit_threshold` `query_rows` calls in the last
+    /// `window_days`. Already-cached datasets are excluded — re-
+    /// materialisation is a separate operation.
+    ///
+    /// Returned in deterministic order (tier rank desc, then hit
+    /// count desc, then slug asc) so a worker can checkpoint
+    /// progress within the candidate list.
+    pub async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        let rows: Vec<CacheCandidate> = sqlx::query_as(
+            "SELECT d.id, d.slug, d.tier, \
+                    COALESCE(u.hits, 0)::bigint AS query_hits \
+             FROM datasets d \
+             LEFT JOIN ( \
+                SELECT dataset_id, COUNT(*)::bigint AS hits \
+                FROM usage_records \
+                WHERE tool = 'query_rows' \
+                  AND requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                GROUP BY dataset_id \
+             ) u ON u.dataset_id = d.id \
+             WHERE NOT d.cached \
+               AND ( \
+                 d.tier IN ('platinum', 'gold') \
+                 OR COALESCE(u.hits, 0) >= $2 \
+               ) \
+             ORDER BY \
+               CASE d.tier \
+                 WHEN 'platinum' THEN 1 \
+                 WHEN 'gold' THEN 2 \
+                 WHEN 'silver' THEN 3 \
+                 ELSE 4 \
+               END, \
+               COALESCE(u.hits, 0) DESC, \
+               d.slug ASC",
+        )
+        .bind(window_days)
+        .bind(hit_threshold)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows)
+    }
+
+    /// #3.6 hot-cache pipeline: candidates for demotion.
+    ///
+    /// Selection rule: currently `cached = true`, tier NOT IN
+    /// ('platinum', 'gold') (editorial pins stay), AND no
+    /// `query_rows` hit in the last `inactive_days`.
+    pub async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        let rows: Vec<CacheCandidate> = sqlx::query_as(
+            "SELECT d.id, d.slug, d.tier, \
+                    COALESCE(u.hits, 0)::bigint AS query_hits \
+             FROM datasets d \
+             LEFT JOIN ( \
+                SELECT dataset_id, COUNT(*)::bigint AS hits \
+                FROM usage_records \
+                WHERE tool = 'query_rows' \
+                  AND requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                GROUP BY dataset_id \
+             ) u ON u.dataset_id = d.id \
+             WHERE d.cached \
+               AND d.tier NOT IN ('platinum', 'gold') \
+               AND COALESCE(u.hits, 0) = 0 \
+             ORDER BY d.slug ASC",
+        )
+        .bind(inactive_days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows)
+    }
+
+    /// #3.6 hot-cache pipeline: clear a dataset's cached state.
+    ///
+    /// Sets `cached = false` and `cache_path = NULL`. The actual
+    /// parquet file in `SeaweedFS` is left for the object-store
+    /// lifecycle policy to garbage-collect; tracking that here
+    /// would be a layering violation.
+    pub async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE datasets SET cached = false, cache_path = NULL WHERE id = $1")
+            .bind(dataset_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    /// #3.6 hot-cache pipeline: aggregate cache hit ratio for a
+    /// `query_rows` window. A "hit" is a `query_rows` invocation
+    /// against a dataset that was `cached = true` at the time of
+    /// the call.
+    ///
+    /// The join is against the *current* `datasets.cached` flag —
+    /// in practice a dataset's cache state only changes via this
+    /// pipeline, so the join is correct on average. A perfectly
+    /// historical hit ratio would need a separate `cached_at_call`
+    /// column on `usage_records`; v0.2 enhancement if telemetry
+    /// drift becomes a concern.
+    pub async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
+        let row: CacheHitRatio = sqlx::query_as(
+            "SELECT \
+                COALESCE(SUM(CASE WHEN d.cached THEN 1 ELSE 0 END), 0)::bigint AS hits, \
+                COUNT(*)::bigint AS total \
+             FROM usage_records u \
+             JOIN datasets d ON d.id = u.dataset_id \
+             WHERE u.tool = 'query_rows' \
+               AND u.requested_at >= now() - ($1::int * INTERVAL '1 day')",
+        )
+        .bind(window_days)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(row)
     }
 }
 

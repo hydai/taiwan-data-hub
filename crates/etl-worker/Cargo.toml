@@ -33,6 +33,8 @@ tokio = { workspace = true }
 tokio-cron-scheduler = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# #3.6: cache_pipeline takes dataset Uuids in its public surface.
+uuid = { workspace = true }
 
 [dev-dependencies]
 # `sqlx` is already a normal dep so integration tests inherit it
