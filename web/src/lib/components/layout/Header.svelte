@@ -16,6 +16,8 @@
 	import { page } from '$app/state';
 	import { navLinks } from '$lib/components/layout/nav-links';
 	import { cn } from '$lib/utils';
+	import type { MeUser } from '$lib/gateway/config';
+	import type { GatewayMode } from '$lib/gateway/types';
 
 	export type Locale = 'zh-TW' | 'en';
 
@@ -25,14 +27,26 @@
 		/** Toggle the overlay open ↔ closed. */
 		onToggleMenu: () => void;
 		/** Operating mode from the gateway; "personal" hides auth UI. */
-		mode: 'personal' | 'multi-user';
+		mode: GatewayMode;
+		/** Active session's user identity, or `null` for anonymous /
+		 * personal-mode requests. When non-null and `mode === 'multi-user'`
+		 * the header renders the signed-in cluster (user id chip +
+		 * sign-out); when null and `mode === 'multi-user'` it renders
+		 * the sign-in / sign-up CTAs. Personal mode ignores this prop. */
+		user: MeUser | null;
 		/** Currently selected locale — owned by +layout.svelte so the
 		 * mobile-menu language picker stays in sync with the desktop one. */
 		locale: Locale;
 		onLocaleChange: (next: Locale) => void;
 	};
 
-	let { isMenuOpen, onToggleMenu, mode, locale, onLocaleChange }: Props = $props();
+	let { isMenuOpen, onToggleMenu, mode, user, locale, onLocaleChange }: Props = $props();
+
+	/** Short, low-information surface for the user id chip — enough
+	 * to disambiguate accounts on a shared device without leaking
+	 * the full UUID into the DOM. The first 8 hex chars × 2^32 is
+	 * plenty for visual disambiguation. */
+	const shortUserId = $derived(user ? user.user_id.slice(0, 8) : '');
 </script>
 
 <header
@@ -75,14 +89,72 @@
 				<option value="en">EN</option>
 			</select>
 
-			<span
-				class="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600"
-				title={mode === 'personal'
-					? 'Set MODE=multi-user on the gateway to enable auth'
-					: 'Auth UI lands in M4'}
-			>
-				{mode === 'personal' ? 'Personal mode' : 'Multi-user mode'}
-			</span>
+			{#if mode === 'personal'}
+				<!-- Personal mode: no auth surface at all. The
+				     badge labels the deploy posture for ops /
+				     contributors who arrived here from a multi-
+				     user link and would otherwise be confused
+				     by the missing sign-in button. -->
+				<span
+					class="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600"
+					title="Set MODE=multi-user on the gateway to enable auth"
+				>
+					Personal mode
+				</span>
+			{:else if user}
+				<!-- Multi-user, signed in: user-id chip + Account
+				     link (to manage API keys) + sign-out form
+				     (POSTs to a logout endpoint). The routes are
+				     placeholders today — the gateway-side login /
+				     logout endpoints ship in a follow-up — but
+				     the header surface lands here per the #4.8
+				     DoD so the multi-user deploy posture looks
+				     complete from the UI. -->
+				<a
+					href={resolve('/account')}
+					class="text-sm font-medium text-neutral-700 hover:text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+				>
+					Account
+				</a>
+				<!-- Both the visible chip AND the tooltip use the
+				     shortened id — the tooltip used to spell the
+				     full UUID, which defeated the "don't leak the
+				     full id into the DOM" intent of the chip
+				     itself. The 8-char prefix is enough for SR
+				     users / shared-device disambiguation. -->
+				<span
+					class="rounded-full bg-primary-50 px-2.5 py-1 font-mono text-xs font-medium text-primary-700"
+					title={`Signed in as user ${shortUserId}…`}
+					data-testid="header-user-chip"
+				>
+					{shortUserId}…
+				</span>
+				<form method="POST" action={resolve('/signout')} class="inline">
+					<button
+						type="submit"
+						class="text-sm font-medium text-neutral-600 hover:text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+					>
+						Sign out
+					</button>
+				</form>
+			{:else}
+				<!-- Multi-user, anonymous: sign-in / sign-up CTAs.
+				     Same caveat as above — the routes are
+				     placeholder pages until the gateway login
+				     flow lands. -->
+				<a
+					href={resolve('/signin')}
+					class="text-sm font-medium text-neutral-700 hover:text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+				>
+					Sign in
+				</a>
+				<a
+					href={resolve('/signup')}
+					class="inline-flex items-center rounded-md bg-primary-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+				>
+					Sign up
+				</a>
+			{/if}
 		</div>
 
 		<button

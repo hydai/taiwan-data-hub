@@ -14,6 +14,7 @@
 //!   error so operators can catch typos before a redeploy.
 
 mod api_keys_routes;
+mod api_routes;
 mod rate_limit_middleware;
 mod session_middleware;
 
@@ -180,6 +181,7 @@ fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
     rate_limiter: Arc<dyn auth::RateLimiter>,
+    mode: Mode,
     cancel: CancellationToken,
 ) -> Router {
     let mcp_service = StreamableHttpService::new(
@@ -197,7 +199,13 @@ fn build_router(
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest_service("/mcp", mcp_with_cors);
+        .nest_service("/mcp", mcp_with_cors)
+        // `/api/v1/config` is always mounted — the SvelteKit
+        // layout reads this on every page to decide between
+        // personal-mode badge and multi-user auth UI. No DB
+        // or auth dependency, so it serves in personal mode
+        // too.
+        .merge(api_routes::config_router(mode));
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -270,7 +278,13 @@ async fn serve() -> anyhow::Result<()> {
 
     let cancel = CancellationToken::new();
     let auth_router = build_auth_router_if_available(storage, rate_limiter.clone());
-    let app = build_router(server, auth_router, rate_limiter, cancel.child_token());
+    let app = build_router(
+        server,
+        auth_router,
+        rate_limiter,
+        mode,
+        cancel.child_token(),
+    );
 
     let listener = TcpListener::bind(addr)
         .await
@@ -472,7 +486,17 @@ fn build_auth_router_if_available(
     // The api-keys handlers run after both layers and see the
     // session extension + the `X-RateLimit-*` headers added by
     // the rate-limit middleware on the outgoing response.
-    let router = api_keys_routes::router(api_key_service)
+    let api_keys = api_keys_routes::router(api_key_service);
+    // `/api/v1/me` mounts here too — it needs the session
+    // middleware to read the cookie. Anonymous traffic still
+    // gets a 200 with `{ user: null }` because the handler
+    // extracts via `Option<Extension<…>>`. We mount it as a
+    // sibling route on a fresh `Router` (not nested under
+    // api-keys) so its path is `/api/v1/me` rather than
+    // `/v1/api-keys/api/v1/me`.
+    let authed = axum::Router::new()
+        .merge(Router::new().nest("/v1/api-keys", api_keys))
+        .route("/api/v1/me", api_routes::me_handler())
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter,
             rate_limit_middleware::session_rate_limit_middleware,
@@ -485,8 +509,15 @@ fn build_auth_router_if_available(
     // disabled-reason lines above. Operators grepping for
     // "api-keys" in the boot log see exactly one of these
     // five outcomes.
-    tracing::info!("api-keys subrouter enabled at /v1/api-keys");
-    Some(Router::new().nest("/v1/api-keys", router))
+    // `/api/v1/me` is session-AWARE (returns `{ user: null }`
+    // for anonymous requests via `Option<Extension<…>>` —
+    // see `api_routes::get_me`), not session-REQUIRED. The
+    // log line uses "session middleware mounted" so operators
+    // don't misread this as a 401-on-anonymous endpoint.
+    tracing::info!(
+        "api-keys subrouter enabled at /v1/api-keys; /api/v1/me has session middleware mounted"
+    );
+    Some(authed)
 }
 
 /// Build the rate-limiter the IP and per-key middleware share.
@@ -1020,6 +1051,7 @@ mod tests {
             test_server(),
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
+            Mode::Personal,
             CancellationToken::new(),
         );
         let resp = app
@@ -1063,6 +1095,7 @@ mod tests {
             test_server(),
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
+            Mode::Personal,
             CancellationToken::new(),
         );
 
@@ -1117,6 +1150,7 @@ mod tests {
             test_server(),
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
+            Mode::Personal,
             CancellationToken::new(),
         );
 
