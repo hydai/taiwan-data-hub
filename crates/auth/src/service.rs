@@ -216,10 +216,11 @@ where
     }
 
     async fn send_verification_link(&self, user: &User) -> Result<(), AuthError> {
-        // Acquire the send permit BEFORE persisting the token so we
-        // never end up with a row that has no corresponding spawned
-        // delivery. If the cap is full, the caller decides whether to
-        // bubble the error (register) or swallow it (resend).
+        // Every fallible step that is purely local (permit acquire,
+        // chrono::Duration conversion, magic_link build) runs BEFORE
+        // the DB insert. That way a misconfigured `public_base_url`
+        // or full mail-send cap can't leave behind a persisted token
+        // that will never be delivered.
         let permit = self
             .acquire_send_permit("verification", &user.email)
             .ok_or_else(|| {
@@ -232,17 +233,17 @@ where
             + chrono::Duration::from_std(self.verify_ttl).map_err(|e| {
                 AuthError::InvalidConfig(format!("verify_ttl out of chrono range: {e}"))
             })?;
+        let link = magic_link(&self.public_base_url, "/auth/verify", &token.cleartext)?;
         self.tokens
             .insert_auth_token(user.id, AuthTokenKind::EmailVerify, &token.digest, expires)
             .await?;
-        let link = magic_link(&self.public_base_url, "/auth/verify", &token.cleartext)?;
         self.spawn_send_verification(user.email.clone(), link, permit);
         Ok(())
     }
 
     async fn send_password_reset_link(&self, user: &User) -> Result<(), AuthError> {
-        // Same acquire-then-insert ordering as verification so a full
-        // semaphore can't leave an orphaned reset token in the DB.
+        // Same fail-fast ordering as verification: every local
+        // fallible step runs before the DB insert.
         let permit = self
             .acquire_send_permit("password-reset", &user.email)
             .ok_or_else(|| {
@@ -255,6 +256,7 @@ where
             + chrono::Duration::from_std(self.reset_ttl).map_err(|e| {
                 AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
             })?;
+        let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
         self.tokens
             .insert_auth_token(
                 user.id,
@@ -263,7 +265,6 @@ where
                 expires,
             )
             .await?;
-        let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
         self.spawn_send_password_reset(user.email.clone(), link, permit);
         Ok(())
     }

@@ -262,10 +262,15 @@ fn map_insert_user_error(err: sqlx::Error) -> StorageError {
     // `Error::Database(_)` with SQLSTATE `23505`. We map that to a
     // typed variant so the auth crate doesn't have to know about
     // SQLSTATE values.
+    //
+    // The payload is the constraint name (e.g. `users_email_key`)
+    // rather than `db_err.message()`. The full Postgres message
+    // can echo the conflicting `email` value — that would leak
+    // a registered address into logs / telemetry / error responses.
     if let sqlx::Error::Database(db_err) = &err
         && db_err.code().as_deref() == Some("23505")
     {
-        return StorageError::UniqueViolation(db_err.message().to_owned());
+        return StorageError::UniqueViolation(db_err.constraint().unwrap_or("unknown").to_owned());
     }
     StorageError::from(err)
 }

@@ -50,7 +50,13 @@ CREATE TABLE auth_tokens (
     expires_at  TIMESTAMPTZ  NOT NULL,
     consumed_at TIMESTAMPTZ,
     created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    CONSTRAINT auth_tokens_kind_known CHECK (kind IN ('email_verify', 'password_reset'))
+    CONSTRAINT auth_tokens_kind_known CHECK (kind IN ('email_verify', 'password_reset')),
+    -- The application always writes a SHA-256 digest of the cleartext
+    -- token (see `auth::token::generate_token`). Enforce the length
+    -- at the DB so a future code path that accidentally writes a
+    -- different-shape hash is rejected at INSERT instead of silently
+    -- producing unverifiable rows.
+    CONSTRAINT auth_tokens_token_hash_sha256 CHECK (octet_length(token_hash) = 32)
 );
 
 CREATE INDEX auth_tokens_user_kind_idx

@@ -141,6 +141,14 @@ impl AuthTokenRepo for InMemoryAuthTokenRepo {
         expires_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.contains_key(token_hash) {
+            // Match Postgres `auth_tokens.token_hash UNIQUE` so a
+            // bug that re-uses a hash surfaces in tests instead of
+            // silently overwriting state.
+            return Err(StorageError::UniqueViolation(
+                "auth_tokens_token_hash_key".to_owned(),
+            ));
+        }
         inner.insert(
             token_hash.to_vec(),
             TokenRow {
