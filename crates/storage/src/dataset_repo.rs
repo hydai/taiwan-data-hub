@@ -215,9 +215,12 @@ pub struct CacheCandidate {
 
 /// Cache hit / total ratio for a window — read once per tick by the
 /// telemetry exporter. `hits` counts `query_rows` invocations
-/// against datasets that were already `cached = true` at the time
-/// of the call; `total` is `query_rows` total. Both are i64 to
-/// match Postgres COUNT.
+/// against datasets whose `cached` flag is `true` **at the time
+/// the ratio is computed** (when [`CacheState::cache_hit_ratio`]
+/// runs) — not at the original call time, since
+/// `usage_records` has no per-row cache-state snapshot. `total`
+/// is the `query_rows` invocation total over the same window.
+/// Both are `i64` to match Postgres `COUNT`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::FromRow)]
 pub struct CacheHitRatio {
     pub hits: i64,
