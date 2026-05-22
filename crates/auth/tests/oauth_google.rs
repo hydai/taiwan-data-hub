@@ -220,6 +220,25 @@ fn jwks_cache() -> Arc<JwksCache> {
     JwksCache::with_preseeded_keys(&test_jwks_json()).expect("preseed JWKS")
 }
 
+/// Build a JWKS JSON listing the shared RSA key under each
+/// supplied `kid`. Used by the JWKS-refresh tests so the same
+/// signing key can pretend to be multiple keys across responses.
+fn test_jwks_json_with_kids(kids: &[&str]) -> String {
+    let pub_key = RsaPublicKey::from(test_signing_key());
+    let n = URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be());
+    let e = URL_SAFE_NO_PAD.encode(pub_key.e().to_bytes_be());
+    let keys: Vec<_> = kids
+        .iter()
+        .map(|kid| {
+            json!({
+                "kid": kid, "kty": "RSA", "alg": "RS256",
+                "use": "sig", "n": n, "e": e
+            })
+        })
+        .collect();
+    json!({ "keys": keys }).to_string()
+}
+
 #[derive(Serialize)]
 struct IdTokenClaims<'a> {
     iss: &'a str,
@@ -245,9 +264,16 @@ fn test_signing_der() -> Vec<u8> {
 /// Sign a Google-shaped `id_token` with the shared test RSA key
 /// and `kid = "test-key"` so the JWKS lookup finds it.
 fn sign_id_token(claims: &IdTokenClaims<'_>) -> String {
+    sign_id_token_with_kid(claims, "test-key")
+}
+
+/// Sign a Google-shaped `id_token` with the shared test RSA key
+/// and a caller-supplied `kid`. Used by JWKS-refresh tests that
+/// need to advertise multiple `kid`s for the same underlying key.
+fn sign_id_token_with_kid(claims: &IdTokenClaims<'_>, kid: &str) -> String {
     let key = EncodingKey::from_rsa_der(&test_signing_der());
     let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("test-key".to_owned());
+    header.kid = Some(kid.to_owned());
     jsonwebtoken::encode(&header, claims, &key).expect("sign id_token")
 }
 
@@ -283,6 +309,22 @@ fn build_service(
     Arc<InMemoryOAuthAccountRepo>,
     Arc<InMemoryOAuthStateRepo>,
 ) {
+    build_service_with_jwks(token_url_base, jwks_cache())
+}
+
+/// Service built with a caller-supplied [`JwksCache`]. Use
+/// [`build_service`] for the default frozen-cache shape; use
+/// this overload to exercise the production fetch path with a
+/// wiremock-backed JWKS endpoint.
+fn build_service_with_jwks(
+    token_url_base: &str,
+    jwks: Arc<JwksCache>,
+) -> (
+    OAuthService<GoogleProvider>,
+    Arc<InMemoryUserRepo>,
+    Arc<InMemoryOAuthAccountRepo>,
+    Arc<InMemoryOAuthStateRepo>,
+) {
     let users: Arc<InMemoryUserRepo> = Arc::new(InMemoryUserRepo::default());
     let states: Arc<InMemoryOAuthStateRepo> = Arc::new(InMemoryOAuthStateRepo::default());
     let accounts: Arc<InMemoryOAuthAccountRepo> = Arc::new(InMemoryOAuthAccountRepo::default());
@@ -292,7 +334,7 @@ fn build_service(
         Client::new(),
         format!("{token_url_base}/o/oauth2/v2/auth"),
         format!("{token_url_base}/token"),
-        jwks_cache(),
+        jwks,
     );
     let svc = OAuthService::new(
         provider,
@@ -870,4 +912,171 @@ async fn finish_login_rejects_id_token_with_array_audience() {
         .await
         .unwrap_err();
     assert!(matches!(&err, AuthError::OAuthExchange(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn finish_login_fetches_jwks_from_live_endpoint_on_first_use() {
+    // Exercise the PRODUCTION JWKS path that the frozen-cache
+    // tests bypass: `JwksCache::new(client, url)` starts empty,
+    // the first lookup hits the mock JWKS endpoint, the result
+    // is cached, and verification proceeds.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/oauth2/v3/certs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(test_jwks_json()))
+        .mount(&server)
+        .await;
+    let id_token = sign_id_token(&google_claims(
+        "google-sub-live-jwks",
+        "live@example.com",
+        true,
+        "test-client-id",
+    ));
+    install_google_token_mock(&server, &id_token).await;
+
+    let jwks = Arc::new(JwksCache::new(
+        Client::new(),
+        format!("{}/oauth2/v3/certs", server.uri()),
+    ));
+    let (svc, users, _, _) = build_service_with_jwks(&server.uri(), jwks);
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    svc.finish_login("test-code", &state, "https://hub.example/cb")
+        .await
+        .unwrap();
+
+    // Confirm the production fetch path actually ran.
+    assert!(
+        users
+            .find_user_by_email("live@example.com")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let cert_hits = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/oauth2/v3/certs")
+        .count();
+    assert!(
+        cert_hits >= 1,
+        "expected at least one GET /oauth2/v3/certs, got {cert_hits}"
+    );
+}
+
+#[tokio::test]
+async fn finish_login_force_refreshes_jwks_on_kid_miss_within_ttl() {
+    // Exercise the resilient kid-miss-refresh path. The cache
+    // is FRESH (we just populated it via a successful first
+    // login) but the new login presents a `kid` that wasn't in
+    // the cached JWKS. The auth crate must force ONE refresh
+    // (still inside the TTL window) and retry. Without that
+    // logic, every login post-Google-rotation would stall until
+    // JWKS_TTL elapsed.
+    //
+    // Both `kid`s use the SAME underlying RSA public key (the
+    // shared test signing key), so the JWKS difference is purely
+    // in which `kid` is advertised. That keeps the test focused
+    // on the cache-refresh path, not on signature verification.
+    let server = MockServer::start().await;
+
+    // First /certs call: JWKS that lists only `warm-key`.
+    Mock::given(method("GET"))
+        .and(path("/oauth2/v3/certs"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(test_jwks_json_with_kids(&["warm-key"])),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Subsequent /certs calls: JWKS that includes the new
+    // `test-key` (Google added a kid mid-TTL).
+    Mock::given(method("GET"))
+        .and(path("/oauth2/v3/certs"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(test_jwks_json_with_kids(&["warm-key", "test-key"])),
+        )
+        .mount(&server)
+        .await;
+
+    // First login signs with `warm-key`. The cache is empty, so
+    // `decoding_key_for` does its initial stale-path fetch and
+    // gets the first JWKS. Verification succeeds and the cache
+    // is now marked fresh.
+    let warm_token = sign_id_token_with_kid(
+        &google_claims(
+            "google-sub-warm",
+            "warm@example.com",
+            true,
+            "test-client-id",
+        ),
+        "warm-key",
+    );
+    let warm_mock = Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ya29.warm",
+            "token_type": "Bearer",
+            "id_token": warm_token,
+            "refresh_token": "1//warm",
+            "expires_in": 3599
+        })))
+        .up_to_n_times(1)
+        .mount_as_scoped(&server)
+        .await;
+
+    let jwks = Arc::new(JwksCache::new(
+        Client::new(),
+        format!("{}/oauth2/v3/certs", server.uri()),
+    ));
+    let (svc, users, _, _) = build_service_with_jwks(&server.uri(), jwks);
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    svc.finish_login("c-warm", &state, "https://hub.example/cb")
+        .await
+        .unwrap();
+    drop(warm_mock); // remove the one-shot /token mock
+
+    // Second login signs with `test-key`, which was NOT in the
+    // cached JWKS. The cache is fresh (within TTL), so the
+    // kid-miss branch must force one refresh; the second /certs
+    // response includes `test-key`; verification succeeds.
+    let miss_token = sign_id_token_with_kid(
+        &google_claims(
+            "google-sub-miss",
+            "miss@example.com",
+            true,
+            "test-client-id",
+        ),
+        "test-key",
+    );
+    install_google_token_mock(&server, &miss_token).await;
+
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    svc.finish_login("c-miss", &state, "https://hub.example/cb")
+        .await
+        .unwrap();
+
+    assert!(
+        users
+            .find_user_by_email("miss@example.com")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let cert_hits = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.url.path() == "/oauth2/v3/certs")
+        .count();
+    assert_eq!(
+        cert_hits, 2,
+        "expected exactly 2 GET /certs (initial warm + kid-miss refresh), got {cert_hits}"
+    );
 }
