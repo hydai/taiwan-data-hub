@@ -213,14 +213,17 @@ fn is_valid_phone(s: &str) -> bool {
 // ============================================================
 //  車牌 (TW license plates) — multiple formats over the years.
 //
-//  Modern formats:
-//   - 4 字: NNN-NN or AA-NNNN     (pre-2014 motorcycle / car)
-//   - 6 字: AAA-NNNN or NNNN-AA   (2014+ cars)
-//   - 7 字: AAA-NNNN (post-2018 car). Accepted by all three
-//     branches of the regex below.
+//  Accepted shapes (the regex below is the source of truth;
+//  these bullets summarise it for readers):
+//   - 5-char "4 字": NNN-NN              (pre-2014 motorcycle)
+//   - 6-char "4 字" cars: AA-NNNN        (pre-2014 car)
+//   - 6-char "6 字" 2014+ cars: AAA-NNN, NNN-AAA, NNNN-AA
+//   - 7-char "7 字" 2018+ cars: AAA-NNNN
 //
 //  We accept the canonical hyphenated form and also the
-//  unhyphenated compact form. Letters are uppercase Latin only.
+//  unhyphenated compact form. The validator is
+//  case-insensitive (input is uppercased before regex match);
+//  letters are restricted to ASCII A-Z only.
 // ============================================================
 
 static PLATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
