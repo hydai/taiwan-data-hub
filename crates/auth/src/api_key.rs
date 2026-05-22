@@ -163,6 +163,16 @@ impl ApiKeyService {
             ));
         }
 
+        // Normalise scopes IN THE SERVICE (not just at the
+        // SvelteKit form layer) so every caller — current web
+        // form, future MCP / CLI clients, batch importers —
+        // gets the same row shape: trim each entry, drop
+        // empties, sort + dedup. Without this, callers can
+        // persist `["", "  ", "read"]` and the "empty scopes
+        // means no elevated capabilities" invariant fails to
+        // hold downstream.
+        let scopes = normalise_scopes(scopes);
+
         for attempt in 1..=ISSUE_MAX_ATTEMPTS {
             match self
                 .try_issue_once(user_id, &name, &scopes, &rate_limit_tier)
@@ -373,6 +383,28 @@ impl ApiKeyService {
     }
 }
 
+/// Trim each scope, drop empty entries, sort, and dedup. The
+/// storage layer treats the scope set as a set (insertion
+/// order isn't meaningful and downstream authorisation will
+/// `contains`-check), so canonicalising the input here gives
+/// every caller — web form, future MCP / CLI, batch importers —
+/// the same row shape. Without this, `["read", "read", " ",
+/// ""]` would persist verbatim and downstream "empty scopes
+/// means no elevated capabilities" checks would silently
+/// accept rows that don't actually express no capabilities.
+fn normalise_scopes(scopes: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = scopes
+        .into_iter()
+        .filter_map(|s| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Cheap shape pre-validation: literal `tdh_` prefix + exact
 /// total length + every body char in the base64url alphabet.
 /// Done in-Rust so a malformed key (random string, JWT, etc.)
@@ -427,5 +459,31 @@ mod tests {
         body.replace_range(5..6, "+"); // `+` is base64 but NOT base64url
         let bad = format!("{API_KEY_HUMAN_PREFIX}{body}");
         assert!(!is_well_shaped(&bad));
+    }
+
+    #[test]
+    fn normalise_scopes_trims_drops_empties_dedups_sorts() {
+        let input = vec![
+            "  read  ".to_owned(),
+            "write".to_owned(),
+            String::new(),
+            "   ".to_owned(),
+            "read".to_owned(),
+            " write ".to_owned(),
+        ];
+        let out = normalise_scopes(input);
+        assert_eq!(out, vec!["read".to_owned(), "write".to_owned()]);
+    }
+
+    #[test]
+    fn normalise_scopes_returns_empty_for_all_blank() {
+        let input = vec![String::new(), "   ".to_owned(), "\t".to_owned()];
+        assert!(normalise_scopes(input).is_empty());
+    }
+
+    #[test]
+    fn normalise_scopes_preserves_distinct_entries() {
+        let out = normalise_scopes(vec!["admin".into(), "read".into(), "write".into()]);
+        assert_eq!(out, vec!["admin", "read", "write"]); // sorted
     }
 }

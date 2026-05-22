@@ -389,6 +389,41 @@ async fn rotate_returns_none_for_unknown_or_already_revoked() {
 }
 
 #[tokio::test]
+async fn issue_normalises_scopes_at_the_service_layer() {
+    // The web form already trims + drops empties before
+    // POSTing, but the auth service is the canonical caller-
+    // agnostic surface. `issue` MUST normalise so future MCP
+    // / CLI / batch clients (which don't run the web's form
+    // logic) get the same row shape: trimmed, no empties,
+    // sorted, no duplicates.
+    let (svc, _) = build_service();
+    let user = fresh_user_id();
+    let issued = svc
+        .issue(
+            user,
+            "messy".into(),
+            vec![
+                "  read  ".into(),
+                "write".into(),
+                String::new(),
+                "   ".into(),
+                "read".into(), // duplicate, will be deduped
+            ],
+            "free".into(),
+        )
+        .await
+        .expect("issue ok");
+
+    let rows = svc.list_for_user(user).await.unwrap();
+    let persisted = rows.iter().find(|r| r.id == issued.id).unwrap();
+    assert_eq!(
+        persisted.scopes,
+        vec!["read".to_owned(), "write".to_owned()],
+        "normalisation should trim, drop empties, dedup, and sort"
+    );
+}
+
+#[tokio::test]
 async fn verify_touches_last_used_at_monotonically() {
     let (svc, repo) = build_service();
     let user = fresh_user_id();
