@@ -56,7 +56,6 @@ const PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "taiwan-data-hub",
     version = PKG_VERSION,
     about = "Taiwan Data Hub HTTP + MCP gateway",
     long_about = None,
@@ -458,12 +457,26 @@ enum DoctorStatus {
 
 impl DoctorReport {
     fn collect() -> Self {
+        let env = EnvSnapshot::from_process_env();
+        Self::from_snapshot(&env)
+    }
+
+    fn from_snapshot(env: &EnvSnapshot) -> Self {
         let mut report = Self::default();
-        report.check_mode();
-        report.check_gateway_addr();
-        report.check_database_url();
-        report.check_object_store();
-        report.check_s3();
+        report.push_entry(validate_mode(env.mode.as_deref()));
+        report.push_entry(validate_gateway_addr(env.gateway_addr.as_deref()));
+        report.push_entry(validate_database_url(env.database_url.as_deref()));
+        report.push_entry(validate_object_store(
+            env.object_store_base_url.as_deref(),
+            env.object_store_signing_secret.as_deref(),
+        ));
+        report.push_entry(validate_s3(
+            env.s3_endpoint.as_deref(),
+            env.s3_region.as_deref(),
+            env.s3_access_key_id.as_deref(),
+            env.s3_secret_access_key.as_deref(),
+            env.s3_session_token.as_deref(),
+        ));
         report
     }
 
@@ -479,119 +492,178 @@ impl DoctorReport {
         self.error_count() > 0
     }
 
+    #[cfg(test)]
     fn push(&mut self, label: &str, status: DoctorStatus, detail: impl Into<String>) {
-        self.entries.push(DoctorEntry {
+        self.push_entry(DoctorEntry {
             label: label.to_owned(),
             status,
             detail: detail.into(),
         });
     }
 
-    fn check_mode(&mut self) {
-        match Mode::from_env() {
-            Ok(mode) => self.push(
-                "MODE",
-                DoctorStatus::Ok,
-                format!(
-                    "{mode} (public: {}; gated: {})",
-                    PUBLIC_ROUTES.join(","),
-                    gated_route_list(mode),
-                ),
+    fn push_entry(&mut self, entry: DoctorEntry) {
+        self.entries.push(entry);
+    }
+}
+
+/// Snapshot of every env var the doctor inspects. Held as data so
+/// the pure validators below can be unit-tested without touching
+/// process env (which would require the forbidden
+/// `unsafe { std::env::set_var }`).
+#[derive(Debug, Default, Clone)]
+struct EnvSnapshot {
+    mode: Option<String>,
+    gateway_addr: Option<String>,
+    database_url: Option<String>,
+    object_store_base_url: Option<String>,
+    object_store_signing_secret: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_region: Option<String>,
+    s3_access_key_id: Option<String>,
+    s3_secret_access_key: Option<String>,
+    s3_session_token: Option<String>,
+}
+
+impl EnvSnapshot {
+    fn from_process_env() -> Self {
+        Self {
+            // MODE keeps the env var raw (incl. blanks) — Mode::from_env_value
+            // does its own "set but blank == unset" normalisation.
+            mode: std::env::var(shared::MODE_ENV).ok(),
+            gateway_addr: std::env::var("GATEWAY_ADDR").ok(),
+            database_url: non_empty_env("DATABASE_URL"),
+            object_store_base_url: non_empty_env("OBJECT_STORE_BASE_URL"),
+            object_store_signing_secret: non_empty_env("OBJECT_STORE_SIGNING_SECRET"),
+            s3_endpoint: non_empty_env("S3_ENDPOINT"),
+            s3_region: non_empty_env("S3_REGION"),
+            s3_access_key_id: non_empty_env("S3_ACCESS_KEY_ID"),
+            s3_secret_access_key: non_empty_env("S3_SECRET_ACCESS_KEY"),
+            s3_session_token: non_empty_env("S3_SESSION_TOKEN"),
+        }
+    }
+}
+
+fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) -> DoctorEntry {
+    DoctorEntry {
+        label: label.to_owned(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+fn validate_mode(raw: Option<&str>) -> DoctorEntry {
+    match Mode::from_env_value(raw) {
+        Ok(mode) => doctor_entry(
+            "MODE",
+            DoctorStatus::Ok,
+            format!(
+                "{mode} (public: {}; gated: {})",
+                PUBLIC_ROUTES.join(","),
+                gated_route_list(mode),
             ),
-            Err(e) => self.push("MODE", DoctorStatus::Error, e.to_string()),
-        }
+        ),
+        Err(e) => doctor_entry("MODE", DoctorStatus::Error, e.to_string()),
     }
+}
 
-    fn check_gateway_addr(&mut self) {
-        match read_gateway_addr() {
-            Ok(addr) => self.push("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
-            Err(e) => self.push("GATEWAY_ADDR", DoctorStatus::Error, format!("{e:#}")),
-        }
+fn validate_gateway_addr(raw: Option<&str>) -> DoctorEntry {
+    let raw = raw.unwrap_or(DEFAULT_ADDR);
+    match raw.parse::<SocketAddr>() {
+        Ok(addr) => doctor_entry("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
+        Err(e) => doctor_entry(
+            "GATEWAY_ADDR",
+            DoctorStatus::Error,
+            format!("{raw:?}: GATEWAY_ADDR must be a valid socket address (host:port): {e}"),
+        ),
     }
+}
 
-    fn check_database_url(&mut self) {
-        match non_empty_env("DATABASE_URL") {
-            None => self.push(
+fn validate_database_url(raw: Option<&str>) -> DoctorEntry {
+    match raw {
+        None => doctor_entry(
+            "DATABASE_URL",
+            DoctorStatus::Info,
+            "unset — DB-backed tools will be disabled",
+        ),
+        Some(raw) => match Url::parse(raw) {
+            Ok(_) => doctor_entry(
                 "DATABASE_URL",
-                DoctorStatus::Info,
-                "unset — DB-backed tools will be disabled".to_owned(),
+                DoctorStatus::Ok,
+                "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)",
             ),
-            Some(raw) => match Url::parse(&raw) {
-                Ok(_) => self.push(
-                    "DATABASE_URL",
-                    DoctorStatus::Ok,
-                    "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)".to_owned(),
-                ),
-                Err(e) => self.push(
-                    "DATABASE_URL",
-                    DoctorStatus::Error,
-                    format!("not a valid URL: {e}"),
-                ),
-            },
-        }
-    }
-
-    fn check_object_store(&mut self) {
-        let base = non_empty_env("OBJECT_STORE_BASE_URL");
-        let secret = non_empty_env("OBJECT_STORE_SIGNING_SECRET");
-        match (base, secret) {
-            (None, None) => self.push(
-                "OBJECT_STORE_*",
-                DoctorStatus::Info,
-                "unset — file:// URIs unavailable".to_owned(),
-            ),
-            (Some(_), None) | (None, Some(_)) => self.push(
-                "OBJECT_STORE_*",
-                DoctorStatus::Error,
-                "partial config: both OBJECT_STORE_BASE_URL and OBJECT_STORE_SIGNING_SECRET must be set together".to_owned(),
-            ),
-            (Some(b), Some(_)) => match Url::parse(&b) {
-                Ok(_) => self.push(
-                    "OBJECT_STORE_*",
-                    DoctorStatus::Ok,
-                    format!("base={b}"),
-                ),
-                Err(e) => self.push(
-                    "OBJECT_STORE_BASE_URL",
-                    DoctorStatus::Error,
-                    format!("not a valid URL: {e}"),
-                ),
-            },
-        }
-    }
-
-    fn check_s3(&mut self) {
-        let endpoint = non_empty_env("S3_ENDPOINT");
-        let region = non_empty_env("S3_REGION");
-        let key = non_empty_env("S3_ACCESS_KEY_ID");
-        let secret = non_empty_env("S3_SECRET_ACCESS_KEY");
-        let any = endpoint.is_some() || region.is_some() || key.is_some() || secret.is_some();
-        let all = endpoint.is_some() && region.is_some() && key.is_some() && secret.is_some();
-        if !any {
-            self.push(
-                "S3_*",
-                DoctorStatus::Info,
-                "unset — s3:// URIs unavailable".to_owned(),
-            );
-            return;
-        }
-        if !all {
-            self.push(
-                "S3_*",
-                DoctorStatus::Error,
-                "partial config: S3_ENDPOINT, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY must be set together".to_owned(),
-            );
-            return;
-        }
-        let endpoint = endpoint.expect("checked above");
-        match Url::parse(&endpoint) {
-            Ok(_) => self.push("S3_*", DoctorStatus::Ok, format!("endpoint={endpoint}")),
-            Err(e) => self.push(
-                "S3_ENDPOINT",
+            Err(e) => doctor_entry(
+                "DATABASE_URL",
                 DoctorStatus::Error,
                 format!("not a valid URL: {e}"),
             ),
-        }
+        },
+    }
+}
+
+fn validate_object_store(base: Option<&str>, secret: Option<&str>) -> DoctorEntry {
+    match (base, secret) {
+        (None, None) => doctor_entry(
+            "OBJECT_STORE_*",
+            DoctorStatus::Info,
+            "unset — file:// URIs unavailable",
+        ),
+        (Some(_), None) | (None, Some(_)) => doctor_entry(
+            "OBJECT_STORE_*",
+            DoctorStatus::Error,
+            "partial config: both OBJECT_STORE_BASE_URL and OBJECT_STORE_SIGNING_SECRET must be set together",
+        ),
+        (Some(b), Some(_)) => match Url::parse(b) {
+            Ok(_) => doctor_entry("OBJECT_STORE_*", DoctorStatus::Ok, format!("base={b}")),
+            Err(e) => doctor_entry(
+                "OBJECT_STORE_BASE_URL",
+                DoctorStatus::Error,
+                format!("not a valid URL: {e}"),
+            ),
+        },
+    }
+}
+
+fn validate_s3(
+    endpoint: Option<&str>,
+    region: Option<&str>,
+    key: Option<&str>,
+    secret: Option<&str>,
+    session_token: Option<&str>,
+) -> DoctorEntry {
+    let required = [endpoint, region, key, secret];
+    let required_any = required.iter().any(Option::is_some);
+    let required_all = required.iter().all(Option::is_some);
+    let token_set = session_token.is_some();
+
+    if !required_any && !token_set {
+        return doctor_entry("S3_*", DoctorStatus::Info, "unset — s3:// URIs unavailable");
+    }
+    if !required_all {
+        // Either a required field is missing, or only S3_SESSION_TOKEN
+        // was set — both are partial configs the runtime can't wire.
+        return doctor_entry(
+            "S3_*",
+            DoctorStatus::Error,
+            "partial config: S3_ENDPOINT, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY must be set together (S3_SESSION_TOKEN is optional)",
+        );
+    }
+    let endpoint = endpoint.expect("checked above");
+    let token_note = if token_set {
+        " (with session token)"
+    } else {
+        ""
+    };
+    match Url::parse(endpoint) {
+        Ok(_) => doctor_entry(
+            "S3_*",
+            DoctorStatus::Ok,
+            format!("endpoint={endpoint}{token_note}"),
+        ),
+        Err(e) => doctor_entry(
+            "S3_ENDPOINT",
+            DoctorStatus::Error,
+            format!("not a valid URL: {e}"),
+        ),
     }
 }
 
@@ -824,5 +896,149 @@ mod tests {
         assert!(rendered.contains("[info] X: unset"));
         assert!(rendered.contains("[error] Y: boom"));
         assert!(rendered.contains("1 error"));
+    }
+
+    #[test]
+    fn validate_mode_renders_resolved_routes() {
+        let entry = validate_mode(None);
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(entry.detail.starts_with("personal "));
+        assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        assert!(entry.detail.contains("gated: <none>"));
+
+        let entry = validate_mode(Some("multi-user"));
+        assert!(entry.detail.contains("gated: <pending #4.5>"));
+    }
+
+    #[test]
+    fn validate_mode_flags_unknown_value() {
+        let entry = validate_mode(Some("garbage"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("invalid MODE value"));
+    }
+
+    #[test]
+    fn validate_gateway_addr_uses_default_when_unset() {
+        let entry = validate_gateway_addr(None);
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert_eq!(entry.detail, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn validate_gateway_addr_rejects_malformed() {
+        let entry = validate_gateway_addr(Some("not-an-addr"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("\"not-an-addr\""));
+    }
+
+    #[test]
+    fn validate_database_url_distinguishes_unset_set_and_bad() {
+        assert_eq!(validate_database_url(None).status, DoctorStatus::Info);
+        assert_eq!(
+            validate_database_url(Some("postgres://x:y@h/db")).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(
+            validate_database_url(Some("not a url")).status,
+            DoctorStatus::Error,
+        );
+    }
+
+    #[test]
+    fn validate_object_store_partial_is_error() {
+        assert_eq!(
+            validate_object_store(Some("file:///tmp"), None).status,
+            DoctorStatus::Error,
+        );
+        assert_eq!(
+            validate_object_store(None, Some("secret")).status,
+            DoctorStatus::Error,
+        );
+        assert_eq!(
+            validate_object_store(Some("file:///tmp"), Some("secret")).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(validate_object_store(None, None).status, DoctorStatus::Info);
+    }
+
+    #[test]
+    fn validate_object_store_rejects_malformed_url() {
+        let entry = validate_object_store(Some("not-a-url"), Some("secret"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert_eq!(entry.label, "OBJECT_STORE_BASE_URL");
+    }
+
+    #[test]
+    fn validate_s3_unset_is_info() {
+        let entry = validate_s3(None, None, None, None, None);
+        assert_eq!(entry.status, DoctorStatus::Info);
+    }
+
+    #[test]
+    fn validate_s3_partial_required_is_error() {
+        let entry = validate_s3(Some("https://s3.example"), None, None, None, None);
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("partial config"));
+    }
+
+    #[test]
+    fn validate_s3_session_token_alone_is_partial_error() {
+        let entry = validate_s3(None, None, None, None, Some("tok"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+    }
+
+    #[test]
+    fn validate_s3_complete_required_is_ok_and_notes_token() {
+        let entry = validate_s3(
+            Some("https://s3.example"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(!entry.detail.contains("session token"));
+
+        let entry = validate_s3(
+            Some("https://s3.example"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            Some("tok"),
+        );
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(entry.detail.contains("with session token"));
+    }
+
+    #[test]
+    fn validate_s3_rejects_malformed_endpoint() {
+        let entry = validate_s3(
+            Some("not-a-url"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert_eq!(entry.label, "S3_ENDPOINT");
+    }
+
+    #[test]
+    fn doctor_report_from_snapshot_threads_through_all_validators() {
+        let env = EnvSnapshot::default();
+        let report = DoctorReport::from_snapshot(&env);
+        assert_eq!(report.entries.len(), 5);
+        assert_eq!(report.error_count(), 0);
+        let labels: Vec<&str> = report.entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "MODE",
+                "GATEWAY_ADDR",
+                "DATABASE_URL",
+                "OBJECT_STORE_*",
+                "S3_*"
+            ],
+        );
     }
 }

@@ -47,16 +47,25 @@ impl Mode {
     /// `.env` file does not bypass the default.
     pub fn from_env() -> Result<Self, ModeParseError> {
         match env::var(MODE_ENV) {
-            Ok(raw) => {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    Ok(Self::default())
-                } else {
-                    trimmed.parse()
-                }
-            }
-            Err(env::VarError::NotPresent) => Ok(Self::default()),
+            Ok(raw) => Self::from_env_value(Some(raw.as_str())),
+            Err(env::VarError::NotPresent) => Self::from_env_value(None),
             Err(env::VarError::NotUnicode(_)) => Err(ModeParseError::NonUnicode),
+        }
+    }
+
+    /// Pure variant of [`Mode::from_env`] for callers that already
+    /// hold the env value (or want to feed test fixtures). Same
+    /// "set but blank == unset" semantics; does NOT model the
+    /// non-Unicode case because the input here is already `&str`.
+    pub fn from_env_value(raw: Option<&str>) -> Result<Self, ModeParseError> {
+        let Some(raw) = raw else {
+            return Ok(Self::default());
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            Ok(Self::default())
+        } else {
+            trimmed.parse()
         }
     }
 
@@ -159,6 +168,25 @@ mod tests {
                 value: "single-user".to_owned(),
             }
         );
+    }
+
+    #[test]
+    fn from_env_value_handles_unset_and_blank() {
+        assert_eq!(Mode::from_env_value(None).unwrap(), Mode::Personal);
+        assert_eq!(Mode::from_env_value(Some("")).unwrap(), Mode::Personal);
+        assert_eq!(Mode::from_env_value(Some("   ")).unwrap(), Mode::Personal);
+    }
+
+    #[test]
+    fn from_env_value_parses_values() {
+        assert_eq!(
+            Mode::from_env_value(Some("multi-user")).unwrap(),
+            Mode::MultiUser,
+        );
+        assert!(matches!(
+            Mode::from_env_value(Some("nope")),
+            Err(ModeParseError::Invalid { .. })
+        ));
     }
 
     #[test]
