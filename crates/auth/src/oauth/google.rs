@@ -329,21 +329,23 @@ struct Jwk {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct JwkSet {
+struct JwkSet {
     keys: Vec<Jwk>,
 }
 
 /// Mutable JWKS cache shared across logins.
 ///
-/// Two operating modes:
+/// Two operating modes, distinguished by [`JwksCacheInner::frozen`]:
 ///
 /// - **Production**: built with [`JwksCache::new`] — empty until
 ///   the first lookup, then fetched + refreshed every
-///   [`JWKS_TTL`].
+///   [`JWKS_TTL`]. Also force-refreshed on a `kid` miss inside
+///   the TTL window so Google can introduce new signing keys
+///   without taking the service down for an hour.
 /// - **Tests**: built with [`JwksCache::with_preseeded_keys`] —
 ///   the cache starts populated with caller-supplied keys and
-///   `last_fetched_at = Instant::now()`, so tests don't need a
-///   wiremock mock for the JWKS endpoint.
+///   marked `frozen`, so the refresh path is never reached and
+///   the (deliberately empty) `jwks_url` is never dialled.
 pub struct JwksCache {
     http: Client,
     jwks_url: String,
@@ -353,6 +355,10 @@ pub struct JwksCache {
 struct JwksCacheInner {
     keys: Vec<Jwk>,
     last_fetched_at: Option<Instant>,
+    /// `true` when the cache was preseeded (tests). Refreshes are
+    /// suppressed so a stale TTL or an unknown `kid` doesn't try
+    /// to dial the empty `jwks_url`.
+    frozen: bool,
 }
 
 impl JwksCache {
@@ -366,28 +372,28 @@ impl JwksCache {
             inner: Mutex::new(JwksCacheInner {
                 keys: Vec::new(),
                 last_fetched_at: None,
+                frozen: false,
             }),
         }
     }
 
     /// Test helper: pre-seed the cache with caller-supplied JWKs.
-    /// The cache is marked freshly-fetched so the TTL check is
-    /// satisfied without any HTTP round trip — useful when tests
-    /// sign with a locally-generated RSA key and want decode-time
-    /// verification to pick up the matching `n`/`e` pair.
+    /// The cache is marked `frozen` so lookups never trigger a
+    /// refresh — the HTTP client + URL are unused and tests
+    /// don't have to mock the JWKS endpoint.
     #[doc(hidden)]
     pub fn with_preseeded_keys(jwks_json: &str) -> Result<Arc<Self>, AuthError> {
         let JwkSet { keys } = serde_json::from_str(jwks_json)
             .map_err(|e| AuthError::OAuthExchange(format!("preseeded JWKS not valid JSON: {e}")))?;
         Ok(Arc::new(Self {
-            // The HTTP client + URL are only ever consulted when
-            // the cache decides to refresh, which a preseeded
-            // cache with a recent `last_fetched_at` won't.
+            // Both fields are unreachable while `frozen = true`;
+            // they exist only to satisfy the struct shape.
             http: Client::new(),
             jwks_url: String::new(),
             inner: Mutex::new(JwksCacheInner {
                 keys,
                 last_fetched_at: Some(Instant::now()),
+                frozen: true,
             }),
         }))
     }
@@ -397,22 +403,31 @@ impl JwksCache {
         // age, and refresh INSIDE the lock so concurrent callers
         // don't all stampede the JWKS endpoint.
         let mut guard = self.inner.lock().await;
-        let stale = guard
-            .last_fetched_at
-            .is_none_or(|t| t.elapsed() >= JWKS_TTL);
+        let stale = !guard.frozen
+            && guard
+                .last_fetched_at
+                .is_none_or(|t| t.elapsed() >= JWKS_TTL);
         if stale {
             let fetched = self.fetch_jwks().await?;
             guard.keys = fetched.keys;
             guard.last_fetched_at = Some(Instant::now());
         }
-        let jwk = guard
-            .keys
-            .iter()
-            .find(|k| k.kid == kid)
-            .cloned()
-            .ok_or_else(|| {
-                AuthError::OAuthExchange(format!("no JWK matches kid={kid} in Google's JWKS"))
-            })?;
+        // Resilient kid-miss path: if Google rotates a signing key
+        // inside the TTL window the cache won't have it yet, so a
+        // miss is allowed to force ONE refresh + retry (still under
+        // the mutex so concurrent callers don't stampede). Without
+        // this every login fails for up to JWKS_TTL after a Google
+        // key rotation. A frozen test cache skips this branch.
+        let mut jwk = guard.keys.iter().find(|k| k.kid == kid).cloned();
+        if jwk.is_none() && !guard.frozen && !stale {
+            let fetched = self.fetch_jwks().await?;
+            guard.keys = fetched.keys;
+            guard.last_fetched_at = Some(Instant::now());
+            jwk = guard.keys.iter().find(|k| k.kid == kid).cloned();
+        }
+        let jwk = jwk.ok_or_else(|| {
+            AuthError::OAuthExchange(format!("no JWK matches kid={kid} in Google's JWKS"))
+        })?;
         if let Some(alg) = jwk.alg.as_deref()
             && alg != "RS256"
         {

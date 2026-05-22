@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use auth::{AuthError, GoogleProvider, JwksCache, OAuthService, TokenCipher};
+use auth::{AuthError, GoogleProvider, JwksCache, OAuthService, TokenCipher, account_aad};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
@@ -693,15 +693,19 @@ async fn finish_login_persists_refresh_token_when_rotated() {
     svc.finish_login("c1", &s1, "https://hub.example/cb")
         .await
         .unwrap();
-    let first_ct = accounts
-        .inner
-        .lock()
-        .unwrap()
-        .get(&("google".to_owned(), "google-sub-rot".to_owned()))
-        .unwrap()
-        .refresh_token_ciphertext
-        .clone()
-        .expect("first refresh CT");
+    let (first_ct, first_nonce) = {
+        let row = accounts
+            .inner
+            .lock()
+            .unwrap()
+            .get(&("google".to_owned(), "google-sub-rot".to_owned()))
+            .cloned()
+            .expect("first row");
+        (
+            row.refresh_token_ciphertext.expect("first refresh CT"),
+            row.refresh_token_nonce.expect("first refresh nonce"),
+        )
+    };
 
     // Second authorization with the SAME google sub but a new
     // refresh token (Google's documented "prompt=consent" path).
@@ -710,18 +714,32 @@ async fn finish_login_persists_refresh_token_when_rotated() {
     svc.finish_login("c2", &s2, "https://hub.example/cb")
         .await
         .unwrap();
-    let second_ct = accounts
-        .inner
-        .lock()
-        .unwrap()
-        .get(&("google".to_owned(), "google-sub-rot".to_owned()))
-        .unwrap()
-        .refresh_token_ciphertext
-        .clone()
-        .expect("second refresh CT");
+    let (second_ct, second_nonce) = {
+        let row = accounts
+            .inner
+            .lock()
+            .unwrap()
+            .get(&("google".to_owned(), "google-sub-rot".to_owned()))
+            .cloned()
+            .expect("second row");
+        (
+            row.refresh_token_ciphertext.expect("second refresh CT"),
+            row.refresh_token_nonce.expect("second refresh nonce"),
+        )
+    };
 
+    // Comparing ciphertexts alone is meaningless — AES-GCM uses a
+    // fresh random nonce per encrypt, so two encryptions of the
+    // SAME plaintext also differ. Decrypt with the AAD bound to
+    // the row identity and compare plaintexts instead.
+    let cipher = TokenCipher::new(&test_kek()).unwrap();
+    let aad = account_aad("google", "google-sub-rot");
+    let first_plain = cipher.decrypt(&first_ct, &first_nonce, &aad).unwrap();
+    let second_plain = cipher.decrypt(&second_ct, &second_nonce, &aad).unwrap();
+    assert_eq!(first_plain, b"1//first-refresh".to_vec());
+    assert_eq!(second_plain, b"1//second-refresh".to_vec());
     assert_ne!(
-        first_ct, second_ct,
-        "refresh_token ciphertext must rotate on re-authorize"
+        first_plain, second_plain,
+        "refresh_token plaintext must rotate on re-authorize"
     );
 }
