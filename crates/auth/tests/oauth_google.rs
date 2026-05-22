@@ -779,6 +779,52 @@ async fn finish_login_surfaces_oauth_error_json_from_4xx() {
 }
 
 #[tokio::test]
+async fn finish_login_never_leaks_tokens_on_2xx_malformed_body() {
+    // Regression for Copilot R5: if Google returns 200 with a
+    // body that contains `access_token` / `id_token` /
+    // `refresh_token` fields but in a shape our deserialize
+    // can't handle, the resulting error message MUST NOT include
+    // the body snippet — that would leak tokens into logs.
+    let server = MockServer::start().await;
+    // 200 OK with tokens present but `expires_in` as a string
+    // instead of a u64. serde_json will fail to deserialise.
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"access_token":"ya29.SECRET-ACCESS-TOKEN","id_token":"JWT-WITH-SECRETS","refresh_token":"1//SECRET-REFRESH","expires_in":"three thousand five hundred ninety nine"}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let (svc, _, _, _) = build_service(&server.uri());
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    let err = svc
+        .finish_login("test-code", &state, "https://hub.example/cb")
+        .await
+        .unwrap_err();
+    let msg = match &err {
+        AuthError::OAuthExchange(m) => m.clone(),
+        other => panic!("expected OAuthExchange, got {other:?}"),
+    };
+    assert!(
+        !msg.contains("ya29.SECRET-ACCESS-TOKEN"),
+        "access_token leaked: {msg}"
+    );
+    assert!(!msg.contains("JWT-WITH-SECRETS"), "id_token leaked: {msg}");
+    assert!(
+        !msg.contains("1//SECRET-REFRESH"),
+        "refresh_token leaked: {msg}"
+    );
+    // Sanity: the error should still convey the status + serde
+    // detail so ops know something happened.
+    assert!(
+        msg.contains("status=200"),
+        "status missing from error: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn finish_login_rejects_id_token_with_array_audience() {
     // Regression for Copilot R4 (strict OIDC `aud`): an attacker
     // who can mint a token for some other client where Google

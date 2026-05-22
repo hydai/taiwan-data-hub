@@ -265,14 +265,25 @@ impl GoogleProvider {
         let body: GoogleTokenResponse = match serde_json::from_str(&body_text) {
             Ok(body) => body,
             Err(e) => {
-                // Non-JSON body: most informative thing we can do
-                // is include the status + a short body snippet so
-                // ops can diagnose. Truncate to keep the log line
-                // bounded if Google ever responds with HTML.
-                let snippet: String = body_text.chars().take(256).collect();
-                return Err(AuthError::OAuthExchange(format!(
-                    "token JSON decode failed: {e} (status={status}, body={snippet:?})"
-                )));
+                // 2xx with a body that fails our schema: the body
+                // MAY contain `access_token` / `id_token` /
+                // `refresh_token` fields (e.g. Google shifts a key
+                // shape and our deserialize chokes on something
+                // else). Logging the snippet would leak the
+                // tokens. Skip it on success; include only the
+                // status + serde error.
+                //
+                // For non-2xx responses Google's body is expected
+                // to be an OAuth-shaped error (`{"error": ...}`)
+                // with no tokens, so the snippet is safe to log
+                // and useful for ops debugging.
+                let detail = if status.is_success() {
+                    format!("token JSON decode failed: {e} (status={status})")
+                } else {
+                    let snippet: String = body_text.chars().take(256).collect();
+                    format!("token JSON decode failed: {e} (status={status}, body={snippet:?})")
+                };
+                return Err(AuthError::OAuthExchange(detail));
             }
         };
         if let Some(err) = body.error.as_deref() {
