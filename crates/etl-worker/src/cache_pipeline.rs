@@ -119,13 +119,32 @@ pub async fn run_cache_tick(
         .hot_candidates(config.hot_window_days, config.hot_hit_threshold)
         .await
         .map_err(CacheTickError::HotQuery)?;
+    // Per-candidate detail at debug level only — a busy deployment
+    // could otherwise emit hundreds of info events every 6 hours.
+    // The summary line below carries the top-N for at-a-glance ops.
     for candidate in &hot {
-        tracing::info!(
+        tracing::debug!(
             dataset_id = %candidate.id,
             slug = %candidate.slug,
             tier = %candidate.tier,
             query_hits = candidate.query_hits,
             "cache promotion candidate (v0.1: log only; v0.2 will materialise)",
+        );
+    }
+    if !hot.is_empty() {
+        // Top-5 by tier rank then hit count (the storage layer
+        // already ordered them that way). Operators see what the
+        // most prominent candidates were without scanning the
+        // full debug log.
+        let top: Vec<String> = hot
+            .iter()
+            .take(5)
+            .map(|c| format!("{} (tier={}, hits={})", c.slug, c.tier, c.query_hits))
+            .collect();
+        tracing::info!(
+            count = hot.len(),
+            top = top.join(", "),
+            "cache promotion candidates (v0.1: log only; v0.2 materialise)",
         );
     }
 
