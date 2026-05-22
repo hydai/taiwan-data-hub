@@ -85,9 +85,21 @@ impl From<ApiKeyRow> for ApiKeySummary {
 /// Build the `/v1/api-keys` subrouter. The caller mounts this
 /// behind the session middleware so every handler sees the
 /// optional `ValidatedSession` extension.
+///
+/// The collection route is registered on BOTH `""` and `"/"`
+/// so callers reach the same handler whether they hit
+/// `/v1/api-keys` (the `SvelteKit` frontend's chosen URL) or
+/// `/v1/api-keys/` (a path that some HTTP clients add a
+/// trailing slash to automatically). Without the dual
+/// registration axum would 404 the non-trailing form when
+/// nested under `/v1/api-keys`; the duplication is the
+/// no-runtime-dependency alternative to a normalisation
+/// layer.
 pub fn router(service: Arc<ApiKeyService>) -> axum::Router {
+    let collection = post(create_api_key).get(list_api_keys);
     axum::Router::new()
-        .route("/", post(create_api_key).get(list_api_keys))
+        .route("/", collection.clone())
+        .route("", collection)
         .route("/{id}", axum::routing::delete(revoke_api_key))
         .route("/{id}/rotate", post(rotate_api_key))
         .with_state(service)

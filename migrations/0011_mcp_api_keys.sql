@@ -80,11 +80,23 @@ CREATE TABLE mcp_api_keys (
 -- flow.
 CREATE INDEX mcp_api_keys_user_id_idx ON mcp_api_keys (user_id);
 
--- Lookup-by-hash for the authenticated-request hot path. Partial
--- on `revoked_at IS NULL` because revoked keys never need to be
--- found by hash again — the only access path for a revoked row
--- is the Account UI ("you revoked this key on …"), which goes
--- through `mcp_api_keys_user_id_idx`.
-CREATE INDEX mcp_api_keys_key_hash_active_idx
-    ON mcp_api_keys (key_hash)
-    WHERE revoked_at IS NULL;
+-- Lookup-by-hash for the authenticated-request hot path. UNIQUE
+-- across ALL rows (revoked or not) — not just unrevoked —
+-- because the storage layer's PK-collision retry logic only
+-- fires on SQLSTATE 23505, and the `touch_and_verify` SQL uses
+-- `fetch_optional` which would silently return *one of N* rows
+-- if duplicates were ever allowed. Two stronger consequences
+-- follow from the broader UNIQUE scope:
+--
+--   * A 256-bit `OsRng` collision (astronomically rare) cannot
+--     produce two rows that coexist — the second insert
+--     surfaces as `UniqueViolation` and triggers a retry with
+--     fresh entropy.
+--   * A revoked key's hash value can NEVER be re-issued, even
+--     if `OsRng` ever produced the same bytes a second time.
+--     Reusing a revoked key's bytes would let an attacker who
+--     captured the cleartext at an earlier moment regain
+--     access; the unique index makes that re-mint impossible
+--     at the storage layer.
+CREATE UNIQUE INDEX mcp_api_keys_key_hash_idx
+    ON mcp_api_keys (key_hash);

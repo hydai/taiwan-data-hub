@@ -9,13 +9,21 @@
 //!   * `key_prefix` = `tdh_<first KEY_PREFIX_VISIBLE_CHARS of
 //!     entropy>` (display-only identifier, never the secret)
 //!
-//! `verify` is constant-time at the hash compare so an attacker
-//! that gets to time the response cannot binary-search the hash
-//! byte-by-byte. The `tdh_` literal prefix is checked first as a
-//! cheap pre-validation (rejects obviously-not-our keys without
-//! a DB round trip), but the rest of the verification path
-//! treats both branches the same to avoid leaking shape via
-//! timing.
+//! `verify`'s comparison happens server-side via the DB equality
+//! predicate `WHERE key_hash = $1` on the SHA-256 hash, NOT via
+//! a Rust constant-time compare — the partial-index hot path
+//! makes the lookup a single btree probe and the surrounding
+//! request latency dwarfs any per-byte timing signal. A
+//! malformed cleartext (wrong prefix, length, or base64url
+//! alphabet) is rejected by [`is_well_shaped`] BEFORE hashing,
+//! so attacker-controlled bytes never reach `Sha256::digest`
+//! and never trigger a DB round trip. The trade-off is
+//! explicit: timing leaks the well-shaped/malformed distinction
+//! (microseconds for the in-process reject vs. milliseconds for
+//! the DB miss), which is acceptable because the cleartext
+//! format is public knowledge (`tdh_` prefix + base64url
+//! alphabet + 43 chars) and shape doesn't narrow the search
+//! space.
 
 use std::sync::Arc;
 
@@ -228,11 +236,14 @@ impl ApiKeyService {
     ///
     /// Malformed values do NOT surface as errors — the caller
     /// treats "no key" and "bad key" identically (anonymous
-    /// request). The shape pre-validation is intentionally
-    /// cheap (length + literal prefix); deeper format checks
-    /// happen in the DB lookup so a malformed key still costs
-    /// one DB round trip, matching the cost of a well-shaped
-    /// but unknown key.
+    /// request). [`is_well_shaped`] short-circuits malformed
+    /// input before any DB round trip; a well-shaped but
+    /// unknown key still pays one btree probe through the
+    /// partial-unique index on `key_hash`. The timing
+    /// difference between the two reject paths leaks the
+    /// well-shaped / malformed distinction, which is
+    /// acceptable because the cleartext format is publicly
+    /// documented (see module-level docs).
     pub async fn verify(&self, cleartext: &str) -> Result<Option<VerifiedApiKey>, AuthError> {
         if !is_well_shaped(cleartext) {
             return Ok(None);

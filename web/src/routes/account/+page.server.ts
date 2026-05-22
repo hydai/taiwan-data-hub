@@ -26,6 +26,16 @@ import {
 	withCookieHeader
 } from '$lib/account/gateway';
 
+/**
+ * Single source of truth for the "gateway is down" message
+ * shown to end users. Used by both the load function and every
+ * action handler so a future copy edit hits one place. Low-level
+ * fetch errors (DNS / TLS / hostnames) are logged to the server
+ * console instead of being echoed into the UI.
+ */
+const GATEWAY_UNREACHABLE_MESSAGE =
+	'Gateway temporarily unreachable. Please try again in a moment.';
+
 type LoadOk = {
 	state: 'ok';
 	keys: ApiKeySummary[];
@@ -67,11 +77,15 @@ export const load: PageServerLoad = async ({
 		});
 	} catch (e) {
 		// Connection refused / DNS failure / TLS error — the
-		// gateway is unreachable. Treat as "unavailable" so the
-		// page shell still renders.
+		// gateway is unreachable. Log the low-level detail
+		// server-side (hostnames / ports / TLS chain text live
+		// here, not in the UI) and return a generic message so
+		// the page shell renders without echoing operational
+		// noise to end users.
+		console.error('api-keys load: gateway fetch failed', e);
 		return {
 			state: 'unavailable',
-			message: e instanceof Error ? e.message : 'gateway unreachable'
+			message: GATEWAY_UNREACHABLE_MESSAGE
 		};
 	}
 
@@ -123,14 +137,24 @@ export const actions: Actions = {
 			.filter((s) => s.length > 0);
 
 		const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-		const response = await fetch(apiKeysUrl(base), {
-			method: 'POST',
-			headers: withCookieHeader(
-				new Headers({ accept: 'application/json', 'content-type': 'application/json' }),
-				request.headers.get('cookie')
-			),
-			body: JSON.stringify({ name, rate_limit_tier: tier, scopes })
-		});
+		let response: Response;
+		try {
+			response = await fetch(apiKeysUrl(base), {
+				method: 'POST',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json', 'content-type': 'application/json' }),
+					request.headers.get('cookie')
+				),
+				body: JSON.stringify({ name, rate_limit_tier: tier, scopes })
+			});
+		} catch (e) {
+			// Network-layer failure (connection refused / DNS /
+			// TLS). Log the low-level detail server-side and
+			// surface a controlled `fail` so the page can render
+			// a friendly message instead of a generic 500.
+			console.error('api-keys create: gateway fetch failed', e);
+			return fail(503, { create: { error: GATEWAY_UNREACHABLE_MESSAGE } });
+		}
 
 		if (response.status === 401) {
 			throw redirect(303, '/account');
@@ -162,13 +186,19 @@ export const actions: Actions = {
 			return fail(400, { revoke: { error: 'id is required' } });
 		}
 		const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-		const response = await fetch(apiKeyByIdUrl(base, id), {
-			method: 'DELETE',
-			headers: withCookieHeader(
-				new Headers({ accept: 'application/json' }),
-				request.headers.get('cookie')
-			)
-		});
+		let response: Response;
+		try {
+			response = await fetch(apiKeyByIdUrl(base, id), {
+				method: 'DELETE',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+		} catch (e) {
+			console.error('api-keys revoke: gateway fetch failed', e);
+			return fail(503, { revoke: { id, error: GATEWAY_UNREACHABLE_MESSAGE } });
+		}
 		if (response.status === 401) {
 			throw redirect(303, '/account');
 		}
@@ -195,13 +225,19 @@ export const actions: Actions = {
 			return fail(400, { rotate: { error: 'id is required' } });
 		}
 		const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-		const response = await fetch(rotateApiKeyUrl(base, id), {
-			method: 'POST',
-			headers: withCookieHeader(
-				new Headers({ accept: 'application/json' }),
-				request.headers.get('cookie')
-			)
-		});
+		let response: Response;
+		try {
+			response = await fetch(rotateApiKeyUrl(base, id), {
+				method: 'POST',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+		} catch (e) {
+			console.error('api-keys rotate: gateway fetch failed', e);
+			return fail(503, { rotate: { id, error: GATEWAY_UNREACHABLE_MESSAGE } });
+		}
 		if (response.status === 401) {
 			throw redirect(303, '/account');
 		}

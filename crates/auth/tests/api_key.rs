@@ -3,7 +3,7 @@
 //! Uses an in-memory [`storage::ApiKeyRepo`] fake that mirrors
 //! the production SQL semantics exactly: PK-collision raises
 //! `UniqueViolation`, `touch_and_verify` filters revoked rows
-//! and clamps `last_seen_at` via `max`, `revoke` is idempotent
+//! and clamps `last_used_at` via `max`, `revoke` is idempotent
 //! and ownership-scoped. Anything that drifts from this fake
 //! would let a regression hide between the SQL and the auth
 //! crate — so the fake is the spec.
