@@ -98,8 +98,9 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # `Argon2`/`PasswordHash` API rather than the raw KDF.
 argon2 = "0.5"
 # Auth (#4.2): random bytes for verification + password-reset tokens.
-# `getrandom` is pulled in by default; we use the `Rng::fill_bytes`
-# entry point so the type is explicit at call sites.
+# `getrandom` is pulled in by default; we call `OsRng::try_fill_bytes`
+# (the `rand::TryRngCore` entry point) so the failure mode is
+# explicit at the call site.
 rand = "0.9"
 # Auth (#4.2): URL-safe base64 for the verification / reset tokens that
 # travel in magic-link query strings.

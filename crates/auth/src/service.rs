@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use storage::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
+use tokio::sync::Semaphore;
 use url::Url;
 use uuid::Uuid;
 
@@ -80,6 +81,10 @@ impl AuthenticatedUser {
 pub const DEFAULT_VERIFY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Default lifetime for password-reset links (1 hour).
 pub const DEFAULT_RESET_TTL: Duration = Duration::from_secs(60 * 60);
+/// Default cap on in-flight background mail sends. Above this,
+/// further `spawn_send_*` calls log a warning and drop the send
+/// rather than letting unbounded SMTP futures accumulate.
+pub const DEFAULT_MAX_INFLIGHT_SENDS: usize = 32;
 
 /// Composition root that performs the six v0.1 auth flows
 /// enumerated in the module docs.
@@ -99,6 +104,10 @@ pub struct AuthService<R, T, M> {
     public_base_url: Url,
     verify_ttl: Duration,
     reset_ttl: Duration,
+    /// Cap on in-flight background mail sends. The spawn helpers
+    /// `try_acquire_owned` a permit before spawning so an SMTP
+    /// outage can't accumulate unbounded futures.
+    send_permits: Arc<Semaphore>,
 }
 
 impl<R, T, M> AuthService<R, T, M>
@@ -119,6 +128,7 @@ where
             public_base_url,
             verify_ttl: DEFAULT_VERIFY_TTL,
             reset_ttl: DEFAULT_RESET_TTL,
+            send_permits: Arc::new(Semaphore::new(DEFAULT_MAX_INFLIGHT_SENDS)),
         }
     }
 
@@ -136,13 +146,24 @@ where
         self
     }
 
+    /// Override the maximum number of concurrent background mail
+    /// sends (default [`DEFAULT_MAX_INFLIGHT_SENDS`]). Above the
+    /// cap, further sends are dropped and a `tracing::warn!`
+    /// records the drop — the spawned task takes an owned permit
+    /// that releases on drop, so capacity recovers naturally.
+    #[must_use]
+    pub fn with_max_inflight_sends(mut self, n: usize) -> Self {
+        self.send_permits = Arc::new(Semaphore::new(n));
+        self
+    }
+
     /// Register a new account + email a verification link.
     ///
     /// Returns `AuthError::EmailTaken` only to internal callers;
     /// the HTTP boundary maps that to the same uniform response
     /// as success so address presence cannot be probed.
     pub async fn register(&self, email: &str, password: &str) -> Result<(), AuthError> {
-        let hash = hash_password(password)?;
+        let hash = hash_password(password.to_owned()).await?;
         let user = match self.users.insert_user(email, &hash).await {
             Ok(user) => user,
             Err(storage::StorageError::UniqueViolation(_)) => return Err(AuthError::EmailTaken),
@@ -200,9 +221,13 @@ where
     }
 
     fn spawn_send_verification(&self, to: String, link: Url) {
+        let Some(permit) = self.acquire_send_permit("verification", &to) else {
+            return;
+        };
         let mailer = Arc::clone(&self.mailer);
         let ttl = self.verify_ttl;
         tokio::spawn(async move {
+            let _permit = permit; // released on drop, freeing semaphore capacity
             if let Err(err) = mailer.send_verification(&to, &link, ttl).await {
                 tracing::error!(
                     error = %err,
@@ -213,9 +238,13 @@ where
     }
 
     fn spawn_send_password_reset(&self, to: String, link: Url) {
+        let Some(permit) = self.acquire_send_permit("password-reset", &to) else {
+            return;
+        };
         let mailer = Arc::clone(&self.mailer);
         let ttl = self.reset_ttl;
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(err) = mailer.send_password_reset(&to, &link, ttl).await {
                 tracing::error!(
                     error = %err,
@@ -223,6 +252,26 @@ where
                 );
             }
         });
+    }
+
+    /// Try to reserve a slot in the in-flight mail-send cap. Returns
+    /// the owned permit on success; logs + returns `None` when the
+    /// cap is full so the caller skips the spawn.
+    fn acquire_send_permit(
+        &self,
+        kind: &str,
+        to: &str,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if let Ok(permit) = Arc::clone(&self.send_permits).try_acquire_owned() {
+            Some(permit)
+        } else {
+            tracing::warn!(
+                kind,
+                recipient = to,
+                "in-flight mail-send cap reached; dropping send",
+            );
+            None
+        }
     }
 
     /// Redeem a verification token. Sets `email_verified_at = now()`
@@ -253,21 +302,25 @@ where
             // password" via HTTP status + timing, defeating the
             // enumeration-safety guarantee. Log loudly, return
             // InvalidCredentials.
-            let matched = verify_password(password, &user.password_hash).unwrap_or_else(|err| {
-                tracing::error!(
-                    user_id = %user.id,
-                    error = %err,
-                    "stored password_hash is unparseable; treating login as a mismatch",
-                );
-                false
-            });
+            let matched =
+                match verify_password(password.to_owned(), user.password_hash.clone()).await {
+                    Ok(b) => b,
+                    Err(err) => {
+                        tracing::error!(
+                            user_id = %user.id,
+                            error = %err,
+                            "stored password_hash is unparseable; treating login as a mismatch",
+                        );
+                        false
+                    }
+                };
             if matched {
                 Ok(AuthenticatedUser::from_row(user))
             } else {
                 Err(AuthError::InvalidCredentials)
             }
         } else {
-            verify_dummy(password);
+            verify_dummy(password.to_owned()).await;
             Err(AuthError::InvalidCredentials)
         }
     }
@@ -311,7 +364,7 @@ where
             .consume_auth_token(AuthTokenKind::PasswordReset, &digest, Utc::now())
             .await?
             .ok_or(AuthError::InvalidToken)?;
-        let new_hash = hash_password(new_password)?;
+        let new_hash = hash_password(new_password.to_owned()).await?;
         // A consumed token implies the owning user existed at
         // consume time. If the row is gone by now (admin delete
         // racing the reset, or a manual DB intervention), the
@@ -344,12 +397,18 @@ fn magic_link(base: &Url, path: &str, cleartext_token: &str) -> Result<Url, Auth
 
 /// Wrap an [`AuthService`] in `Arc` for sharing across async
 /// handlers. Convenience for the gateway wiring in #4.5.
+///
+/// The bounds match the `impl AuthService<R, T, M>` block — `M:
+/// 'static` is required because the service spawns background
+/// mail tasks. Mirroring the bound here means a type that can't
+/// be used through the API also can't be wrapped through this
+/// helper.
 #[must_use]
 pub fn into_arc<R, T, M>(svc: AuthService<R, T, M>) -> Arc<AuthService<R, T, M>>
 where
     R: UserRepo,
     T: AuthTokenRepo,
-    M: Mailer,
+    M: Mailer + 'static,
 {
     Arc::new(svc)
 }

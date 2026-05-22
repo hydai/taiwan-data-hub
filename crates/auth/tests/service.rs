@@ -24,7 +24,10 @@ struct InMemoryUserRepo {
 impl UserRepo for InMemoryUserRepo {
     async fn insert_user(&self, email: &str, password_hash: &str) -> Result<User, StorageError> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.values().any(|u| u.email.eq_ignore_ascii_case(email)) {
+        if inner
+            .values()
+            .any(|u| u.email.to_lowercase().eq(&email.to_lowercase()))
+        {
             return Err(StorageError::UniqueViolation(format!(
                 "users_email_key on {email}"
             )));
@@ -46,7 +49,7 @@ impl UserRepo for InMemoryUserRepo {
         let inner = self.inner.lock().unwrap();
         Ok(inner
             .values()
-            .find(|u| u.email.eq_ignore_ascii_case(email))
+            .find(|u| u.email.to_lowercase().eq(&email.to_lowercase()))
             .cloned())
     }
 
