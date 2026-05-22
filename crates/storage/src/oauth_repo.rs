@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::sqlx_errors::map_unique_violation;
 use crate::{Storage, StorageError};
 
 /// One row of `oauth_states` — the short-lived ledger that
@@ -110,7 +111,11 @@ impl OAuthStateRepo for Storage {
         .bind(&pending.redirect_uri)
         .bind(pending.expires_at)
         .execute(self.pool())
-        .await?;
+        .await
+        // Maps SQLSTATE 23505 (e.g. a colliding `state_hash` PK)
+        // to the typed `UniqueViolation` so callers can match on
+        // the constraint without parsing Postgres detail strings.
+        .map_err(map_unique_violation)?;
         Ok(())
     }
 
@@ -186,7 +191,15 @@ impl OAuthAccountRepo for Storage {
         .bind(new.refresh_token_nonce.as_deref())
         .bind(new.expires_at)
         .execute(self.pool())
-        .await?;
+        .await
+        // The primary (`provider`, `provider_user_id`) collision
+        // is absorbed by `ON CONFLICT … DO UPDATE` above, so the
+        // SQLSTATE 23505 we care about here is the
+        // `oauth_accounts_user_id_provider_key` UNIQUE — i.e. the
+        // attempt to link a SECOND provider identity to the same
+        // user. Map it so the auth crate can surface a typed
+        // "already-linked" error.
+        .map_err(map_unique_violation)?;
         Ok(())
     }
 
