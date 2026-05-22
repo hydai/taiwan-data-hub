@@ -18,6 +18,8 @@ pub mod date;
 pub mod date_tools;
 pub mod dictionaries;
 pub mod dictionary_tools;
+pub mod formats;
+pub mod formats_tool;
 pub mod json_helpers;
 pub mod national_id;
 pub mod normalize_address_tool;
@@ -48,6 +50,7 @@ pub use dictionary_tools::{
     TOOL_POSTAL_LOOKUP as TW_LOOKUP_POSTAL_CODE_TOOL_NAME,
     TOOL_POSTAL_SEARCH as TW_SEARCH_POSTAL_CODE_TOOL_NAME,
 };
+pub use formats_tool::{TOOL_NAME as TW_VALIDATE_FORMAT_TOOL_NAME, ValidateFormatTool};
 pub use normalize_address_tool::{
     NormalizeAddressTool, TOOL_NAME as TW_NORMALIZE_ADDRESS_TOOL_NAME,
 };
@@ -80,4 +83,5 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(dictionary_tools::POSTAL_CODE_SEARCH_TOOL)
         .register(dictionary_tools::COUNTY_CODE_GET_TOOL)
         .register(dictionary_tools::COUNTY_CODE_SEARCH_TOOL)
+        .register(ValidateFormatTool)
 }
