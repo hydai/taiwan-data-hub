@@ -208,10 +208,17 @@ impl GitHubProvider {
         // no `access_token` at all (which is why the field is
         // modeled as `Option`).
         if let Some(err) = body.error.as_deref() {
-            return Err(AuthError::OAuthExchange(format!(
-                "GitHub rejected token exchange: {err} ({})",
-                body.error_description.as_deref().unwrap_or(""),
-            )));
+            // Only include `(<desc>)` when the description is
+            // populated — otherwise `GitHub rejected token
+            // exchange: bad_verification_code ()` lands in logs
+            // with a confusing empty paren.
+            let msg = match body.error_description.as_deref() {
+                Some(desc) if !desc.is_empty() => {
+                    format!("GitHub rejected token exchange: {err} ({desc})")
+                }
+                _ => format!("GitHub rejected token exchange: {err}"),
+            };
+            return Err(AuthError::OAuthExchange(msg));
         }
         if !matches!(body.token_type.as_deref(), Some("bearer" | "Bearer") | None) {
             return Err(AuthError::OAuthExchange(format!(

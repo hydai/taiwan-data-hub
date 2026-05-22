@@ -55,11 +55,19 @@ pub trait OAuthStateRepo: Send + Sync {
     /// row is removed in the same statement so a replay returns
     /// `Ok(None)`.
     ///
+    /// `provider` + `redirect_uri` are part of the predicate so
+    /// a callback that arrived on the wrong service or with the
+    /// wrong callback URL cannot consume someone else's pending
+    /// state — an attacker who saw a state token can't force
+    /// the legitimate user to restart.
+    ///
     /// `now` is taken as a parameter so the expiry cutoff is
     /// stable across test + production wall clocks.
     async fn consume_oauth_state(
         &self,
         state_hash: &[u8],
+        provider: &str,
+        redirect_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<OAuthPendingState>, StorageError>;
 }
@@ -109,17 +117,28 @@ impl OAuthStateRepo for Storage {
     async fn consume_oauth_state(
         &self,
         state_hash: &[u8],
+        provider: &str,
+        redirect_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<OAuthPendingState>, StorageError> {
         // `DELETE … RETURNING` does the consume in a single
         // statement so a race between two concurrent callbacks
-        // for the same state can't both win.
+        // for the same state can't both win. `provider` and
+        // `redirect_uri` are part of the predicate (not just
+        // checked by the caller) so a callback on the wrong
+        // service or with the wrong callback URL leaves the
+        // row in place for the legitimate caller.
         let row = sqlx::query_as::<_, (Vec<u8>, String, String, String, DateTime<Utc>)>(
             "DELETE FROM oauth_states
-              WHERE state_hash = $1 AND expires_at > $2
+              WHERE state_hash = $1
+                AND provider = $2
+                AND redirect_uri = $3
+                AND expires_at > $4
               RETURNING state_hash, code_verifier, provider, redirect_uri, expires_at",
         )
         .bind(state_hash)
+        .bind(provider)
+        .bind(redirect_uri)
         .bind(now)
         .fetch_optional(self.pool())
         .await?;

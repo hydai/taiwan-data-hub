@@ -85,6 +85,11 @@ where
 
     /// Begin a login. Mints PKCE + CSRF state, persists, returns
     /// the redirect URL.
+    ///
+    /// Every fallible local step (TTL conversion, `authorize_url`
+    /// build) runs BEFORE the DB insert so a misconfigured
+    /// `authorize_url` doesn't accumulate orphaned `oauth_states`
+    /// rows on each failed call.
     pub async fn start_login(&self, redirect_uri: &str) -> Result<StartLogin, AuthError> {
         let pkce = generate_pkce();
         let state = generate_state();
@@ -92,6 +97,9 @@ where
             + chrono::Duration::from_std(self.state_ttl).map_err(|e| {
                 AuthError::InvalidConfig(format!("oauth state_ttl out of chrono range: {e}"))
             })?;
+        let redirect_to =
+            self.provider
+                .authorize_url(&state.cleartext, &pkce.code_challenge, redirect_uri)?;
         self.states
             .insert_oauth_state(OAuthPendingState {
                 state_hash: state.digest,
@@ -101,9 +109,6 @@ where
                 expires_at,
             })
             .await?;
-        let redirect_to =
-            self.provider
-                .authorize_url(&state.cleartext, &pkce.code_challenge, redirect_uri)?;
         Ok(StartLogin { redirect_to })
     }
 
@@ -125,21 +130,16 @@ where
     ) -> Result<AuthenticatedUser, AuthError> {
         let now = Utc::now();
         let state_hash = hash_state(state_cleartext);
+        // `provider` + `redirect_uri` are part of the consume
+        // predicate, not a post-fetch equality check. A callback
+        // with the wrong provider or callback URL therefore
+        // leaves the row in place — a legitimate later callback
+        // can still consume it.
         let pending = self
             .states
-            .consume_oauth_state(&state_hash, now)
+            .consume_oauth_state(&state_hash, self.provider.name(), redirect_uri, now)
             .await?
             .ok_or(AuthError::InvalidState)?;
-        if pending.provider != self.provider.name() {
-            return Err(AuthError::InvalidState);
-        }
-        if pending.redirect_uri != redirect_uri {
-            // The redirect_uri the callback was invoked with must
-            // match the one we asked the provider to call back —
-            // otherwise an attacker who can pin a victim to a
-            // hostile callback URL could replay the code.
-            return Err(AuthError::InvalidState);
-        }
         let profile = self
             .provider
             .exchange_and_fetch_profile(code, &pending.code_verifier, redirect_uri)

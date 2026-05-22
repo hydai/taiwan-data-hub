@@ -103,18 +103,22 @@ impl OAuthStateRepo for InMemoryOAuthStateRepo {
     async fn consume_oauth_state(
         &self,
         state_hash: &[u8],
+        provider: &str,
+        redirect_uri: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<OAuthPendingState>, StorageError> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(row) = inner.remove(state_hash) else {
-            return Ok(None);
-        };
-        if row.expires_at <= now {
-            // Expired — drop it but report `None` to the caller
-            // (matches the production DELETE … WHERE expires_at > now).
+        // Peek before removing so a wrong-provider / wrong-
+        // redirect_uri callback can't consume the legitimate
+        // user's row. Matches the production
+        // DELETE … WHERE provider = $2 AND redirect_uri = $3.
+        let matches = inner.get(state_hash).is_some_and(|row| {
+            row.provider == provider && row.redirect_uri == redirect_uri && row.expires_at > now
+        });
+        if !matches {
             return Ok(None);
         }
-        Ok(Some(row))
+        Ok(inner.remove(state_hash))
     }
 }
 
