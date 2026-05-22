@@ -65,4 +65,17 @@ pub enum AuthError {
     /// maps to 500.
     #[error("auth invariant violated: {0}")]
     Internal(String),
+    /// OAuth callback (#4.3, #4.4) received a `state` that didn't
+    /// match a known pending row, came back for a different
+    /// provider than the one that issued it, or carried a
+    /// mismatched `redirect_uri`. Almost always the user
+    /// abandoned the redirect or an attacker swapped the URL.
+    #[error("oauth state is invalid or expired")]
+    InvalidState,
+    /// OAuth token-exchange or profile-fetch HTTP round-trip
+    /// failed. Wraps the upstream error text without leaking the
+    /// access token (the token-exchange path never has the
+    /// access token cleartext yet on the failure branch).
+    #[error("oauth exchange failed: {0}")]
+    OAuthExchange(String),
 }

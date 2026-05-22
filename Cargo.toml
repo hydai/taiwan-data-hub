@@ -111,6 +111,11 @@ base64 = "0.22"
 # workspace's TLS stack. Default features (file-transport, native-tls)
 # stay off to keep the dep graph lean.
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname", "pool"] }
+# Auth (#4.3): AES-256-GCM for the at-rest encryption of provider
+# access + refresh tokens stored in `oauth_accounts`. RustCrypto's
+# aes-gcm crate; we use the `Aead` trait + `AeadCore::generate_nonce`
+# at the call sites.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
