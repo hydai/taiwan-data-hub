@@ -102,8 +102,27 @@
 			</aside>
 		{/if}
 		{#if issued}
-			<aside role="alert" class="border-primary/30 bg-primary/5 mb-6 rounded-md border p-4 text-sm">
-				<p class="font-medium">
+			<!--
+				Polite sr-only announcement carrying ONLY the event,
+				NOT the key bytes. Putting the cleartext in any live
+				region (role="alert" / role="status" / aria-live) makes
+				screen readers speak the secret aloud — the previous
+				`role="alert"` on the visible aside did exactly that.
+				The cleartext now lives below in a labelled region the
+				SR user navigates to deliberately, so they can still
+				read or copy it, just not have it auto-spoken in
+				whatever room they happen to be in.
+			-->
+			<div role="status" aria-live="polite" class="sr-only">
+				{wasRotation
+					? 'Key rotated. The new key is shown on screen below.'
+					: 'Key created. The new key is shown on screen below.'}
+			</div>
+			<section
+				aria-labelledby="issued-key-heading"
+				class="border-primary/30 bg-primary/5 mb-6 rounded-md border p-4 text-sm"
+			>
+				<p id="issued-key-heading" class="font-medium">
 					{wasRotation ? 'Key rotated — copy the new value below' : 'Key created — copy it now'}
 				</p>
 				<p class="text-muted-foreground mt-1">
@@ -111,6 +130,7 @@
 					before dismissing this notice.
 				</p>
 				<code
+					aria-label="Generated API key"
 					class="bg-background/80 mt-3 block w-full overflow-x-auto rounded px-3 py-2 font-mono text-xs"
 					data-testid="issued-cleartext">{issued.cleartext}</code
 				>
@@ -121,7 +141,7 @@
 				>
 					I have copied it — dismiss
 				</button>
-			</aside>
+			</section>
 		{/if}
 
 		<form
