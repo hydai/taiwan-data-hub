@@ -87,6 +87,25 @@ const COOKIE_TAG_SEPARATOR: char = '.';
 /// an infinite loop in that pathological case.
 const ISSUE_MAX_ATTEMPTS: u32 = 3;
 
+/// Expected length of the base64url-no-pad encoded token: 32
+/// bytes → ceil(32 * 4 / 3) = 43 chars.
+const TOKEN_BASE64_LEN: usize = 43;
+
+/// Expected length of the base64url-no-pad encoded HMAC-SHA256
+/// tag: 32 bytes → 43 chars (same as the token).
+const TAG_BASE64_LEN: usize = 43;
+
+/// SHA-256 / HMAC-SHA-256 output is always 32 bytes. Used to
+/// reject a tag that decoded to the wrong length without
+/// allocating the comparison buffer.
+const TAG_DECODED_LEN: usize = 32;
+
+/// Minimum acceptable session duration. `Max-Age=0` collides
+/// with the cookie-clear semantics ([`build_clear_session_cookie`]
+/// in the gateway crate), so we require both `idle_ttl` and
+/// `absolute_max` to be at least one second.
+const MIN_SESSION_DURATION: Duration = Duration::from_secs(1);
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Result of [`SessionService::issue`] — what the gateway puts
@@ -192,14 +211,30 @@ impl SessionService {
         })
     }
 
+    /// Override `idle_ttl`. Panics if `ttl < 1s` — sub-second
+    /// idle windows are nonsensical and would round to
+    /// `Max-Age=0` (immediate cookie deletion). Builder method,
+    /// so panic vs Result is a wash; we pick panic for chain
+    /// ergonomics and because a misconfigured TTL is a startup
+    /// programming error.
     #[must_use]
     pub fn with_idle_ttl(mut self, ttl: Duration) -> Self {
+        assert!(
+            ttl >= MIN_SESSION_DURATION,
+            "idle_ttl must be >= 1s, got {ttl:?}"
+        );
         self.idle_ttl = ttl;
         self
     }
 
+    /// Override `absolute_max`. Same `>= 1s` requirement as
+    /// [`Self::with_idle_ttl`].
     #[must_use]
     pub fn with_absolute_max(mut self, max: Duration) -> Self {
+        assert!(
+            max >= MIN_SESSION_DURATION,
+            "absolute_max must be >= 1s, got {max:?}"
+        );
         self.absolute_max = max;
         self
     }
@@ -357,13 +392,26 @@ impl SessionService {
     /// the raw 32-byte token on success, `None` on any
     /// malformation (wrong shape, bad base64, wrong length,
     /// invalid tag).
+    ///
+    /// Cheap pre-validation rejects oversized / malformed
+    /// cookies BEFORE base64-decoding so an attacker can't
+    /// burn server CPU by sending a megabyte of "cookie": the
+    /// token part is exactly 43 chars, the tag part is exactly
+    /// 43 chars, both checks happen on the byte counts before
+    /// any allocation.
     fn verify_cookie(&self, cookie_value: &str) -> Option<[u8; TOKEN_ENTROPY_BYTES]> {
         let (token_b64, tag_b64) = cookie_value.split_once(COOKIE_TAG_SEPARATOR)?;
+        if token_b64.len() != TOKEN_BASE64_LEN || tag_b64.len() != TAG_BASE64_LEN {
+            return None;
+        }
         let token_bytes = URL_SAFE_NO_PAD.decode(token_b64).ok()?;
         if token_bytes.len() != TOKEN_ENTROPY_BYTES {
             return None;
         }
         let supplied_tag = URL_SAFE_NO_PAD.decode(tag_b64).ok()?;
+        if supplied_tag.len() != TAG_DECODED_LEN {
+            return None;
+        }
         let expected_tag = {
             let mut mac = HmacSha256::new_from_slice(&self.hmac_key).expect("hmac key valid");
             mac.update(&token_bytes);

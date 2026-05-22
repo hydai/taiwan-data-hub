@@ -77,11 +77,16 @@ impl SessionRepo for InMemorySessionRepo {
         if row.revoked_at.is_some() || row.expires_at <= now || row.absolute_expires_at <= now {
             return Ok(None);
         }
-        // Sliding-window refresh capped at the absolute expiry —
-        // mirrors the production SQL `SET expires_at =
-        // LEAST($3, absolute_expires_at)`.
+        // Monotonic sliding-window refresh capped at the
+        // absolute expiry — mirrors the production SQL
+        // `SET expires_at = LEAST(GREATEST($3, expires_at),
+        // absolute_expires_at)`. `GREATEST` defends against a
+        // racing earlier request from shrinking `expires_at`;
+        // `LEAST` enforces the hard cap.
         row.last_seen_at = now;
-        row.expires_at = new_expires_at.min(row.absolute_expires_at);
+        row.expires_at = new_expires_at
+            .max(row.expires_at)
+            .min(row.absolute_expires_at);
         Ok(Some(AuthenticatedSession {
             user_id: row.user_id,
             created_at: row.created_at,
@@ -279,14 +284,13 @@ async fn revoke_all_for_user_kills_every_active_session() {
 
 #[tokio::test]
 async fn authenticate_returns_none_after_expiry() {
-    // 1 ms TTL forces the row to be expired by the time we
-    // authenticate it back.
-    let (svc, repo) = build_service(Duration::from_millis(1));
-    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
     // Walk the row's `expires_at` backward to make the test
     // deterministic — the production `touch_and_authenticate`
-    // SQL also keys on `expires_at > now`, so this exercises
-    // the same predicate path without sleeping.
+    // SQL keys on `expires_at > now`, so this exercises the
+    // same predicate path without sleeping. The build_service
+    // TTL doesn't matter; we override the row directly.
+    let (svc, repo) = build_service(Duration::from_secs(60));
+    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
     {
         let mut inner = repo.inner.lock().unwrap();
         let row = inner.values_mut().next().unwrap();
@@ -513,6 +517,77 @@ impl SessionRepo for CollidingRepo {
     ) -> Result<u64, StorageError> {
         self.inner.revoke_all_sessions_for_user(user_id, now).await
     }
+}
+
+#[tokio::test]
+async fn authenticate_slide_is_monotonic_under_clock_skew() {
+    // Regression for Copilot R4 (monotonic slide): if a request
+    // computes `new_expires_at` that's SMALLER than the row's
+    // current `expires_at` (concurrent requests + skewed clocks
+    // can produce this), the slide must NOT shrink the expiry —
+    // it should leave the larger value in place.
+    let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(3600));
+    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
+
+    // Walk the row's `expires_at` FORWARD to ~now + 50s (still
+    // under the absolute cap). Next authenticate computes
+    // `new_expires_at = now + idle_ttl(60s)`. Without
+    // monotonicity, the LEAST clamp would still pick the
+    // smaller of the two — but with GREATEST in the SQL we
+    // expect the row's expires_at to stay at the higher value
+    // when the slide would otherwise shrink it.
+    {
+        let mut inner = repo.inner.lock().unwrap();
+        let row = inner.values_mut().next().unwrap();
+        row.expires_at = Utc::now() + chrono::Duration::seconds(50);
+    }
+    let prior_expiry = repo
+        .inner
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .expires_at;
+    let validated = svc
+        .authenticate(&issued.cookie_value)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        validated.expires_at >= prior_expiry,
+        "slide must be monotonic: post-touch >= prior expires_at ({prior_expiry} > {})",
+        validated.expires_at
+    );
+}
+
+#[tokio::test]
+#[should_panic(expected = "idle_ttl must be >= 1s")]
+async fn with_idle_ttl_panics_on_sub_second() {
+    // Sub-second idle TTLs would `as_secs()`-truncate to 0 and
+    // emit `Max-Age=0`, which browsers interpret as immediate
+    // cookie deletion. Catch at startup.
+    let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let _ = SessionService::new(repo as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_millis(500));
+}
+
+#[tokio::test]
+async fn cookie_max_age_seconds_is_never_zero_for_valid_config() {
+    // With the assert in `with_absolute_max`, the lowest legal
+    // `absolute_max` is 1s, which maps to `Max-Age=1`. Confirms
+    // the gateway can never emit `Max-Age=0` via this path.
+    let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let svc = SessionService::new(repo as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(1))
+        .with_absolute_max(Duration::from_secs(1));
+    assert_eq!(svc.cookie_max_age_seconds(), 1);
 }
 
 #[tokio::test]

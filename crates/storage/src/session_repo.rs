@@ -134,15 +134,20 @@ impl SessionRepo for Storage {
         //   * `expires_at > $now`   — idle window hasn't expired.
         //   * `absolute_expires_at > $now` — hard cap not exceeded.
         //
-        // The SLIDE is `LEAST($new_expires_at, absolute_expires_at)`
-        // so the idle window never extends past the hard cap.
+        // The SLIDE is `LEAST(GREATEST($3, expires_at),
+        // absolute_expires_at)` — monotonic and capped. The
+        // `GREATEST` defends against concurrent requests with
+        // mildly-skewed clocks: a request whose `$3` is slightly
+        // smaller than the row's current `expires_at` would
+        // otherwise SHRINK the expiry and log the user out
+        // early. With `GREATEST`, the slide can only advance.
+        // The `LEAST(..., absolute_expires_at)` cap stops the
+        // slide from ever exceeding the hard ceiling.
         // `absolute_expires_at` itself is never touched here.
-        // The RETURNING reads the post-slide value so the caller
-        // can mirror it on the cookie if desired.
         let row = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
             "UPDATE sessions
                 SET last_seen_at = $2,
-                    expires_at   = LEAST($3, absolute_expires_at)
+                    expires_at   = LEAST(GREATEST($3, expires_at), absolute_expires_at)
               WHERE id = $1
                 AND revoked_at IS NULL
                 AND expires_at > $2
