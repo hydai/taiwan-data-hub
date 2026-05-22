@@ -12,8 +12,10 @@
 //! Parquet IO and the remaining repositories (`dataset_versions`,
 //! `dataset_files`, search) layer on top of this in later PRs.
 
+mod auth_repo;
 mod dataset_repo;
 
+pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
 pub use dataset_repo::{
     CacheCandidate, CacheHitRatio, CacheRef, CacheState, DatasetCacheLookup, DatasetFileRow,
     DatasetFull, DatasetKey, DatasetLatestFiles, DatasetReader, DatasetRow, DatasetSearcher,

@@ -1,0 +1,327 @@
+//! End-to-end tests for [`AuthService`] against in-memory repo
+//! fakes + the [`MemoryMailer`]. No Postgres / SMTP required, so
+//! the suite runs in plain `cargo test` and exercises the real
+//! token + hashing code paths.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+use auth::{AuthError, AuthService, MailKind, MemoryMailer, verify_password};
+use chrono::{DateTime, Utc};
+use storage::{AuthTokenKind, AuthTokenRepo, StorageError, User, UserRepo};
+use url::Url;
+use uuid::Uuid;
+
+// --- in-memory repos -------------------------------------------------
+
+#[derive(Default)]
+struct InMemoryUserRepo {
+    inner: Mutex<HashMap<Uuid, User>>,
+}
+
+#[async_trait]
+impl UserRepo for InMemoryUserRepo {
+    async fn insert_user(&self, email: &str, password_hash: &str) -> Result<User, StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.values().any(|u| u.email.eq_ignore_ascii_case(email)) {
+            return Err(StorageError::UniqueViolation(format!(
+                "users_email_key on {email}"
+            )));
+        }
+        let now = Utc::now();
+        let user = User {
+            id: Uuid::now_v7(),
+            email: email.to_owned(),
+            password_hash: password_hash.to_owned(),
+            email_verified_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        inner.insert(user.id, user.clone());
+        Ok(user)
+    }
+
+    async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, StorageError> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .values()
+            .find(|u| u.email.eq_ignore_ascii_case(email))
+            .cloned())
+    }
+
+    async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner.get(&id).cloned())
+    }
+
+    async fn mark_email_verified(&self, id: Uuid) -> Result<bool, StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(user) = inner.get_mut(&id) else {
+            return Ok(false);
+        };
+        if user.email_verified_at.is_some() {
+            return Ok(false);
+        }
+        user.email_verified_at = Some(Utc::now());
+        Ok(true)
+    }
+
+    async fn update_password_hash(
+        &self,
+        id: Uuid,
+        password_hash: &str,
+    ) -> Result<bool, StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(user) = inner.get_mut(&id) else {
+            return Ok(false);
+        };
+        password_hash.clone_into(&mut user.password_hash);
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct InMemoryAuthTokenRepo {
+    /// Keyed by `token_hash` so the consume path is O(1).
+    inner: Mutex<HashMap<Vec<u8>, TokenRow>>,
+}
+
+#[derive(Clone)]
+struct TokenRow {
+    user_id: Uuid,
+    kind: AuthTokenKind,
+    expires_at: DateTime<Utc>,
+    consumed_at: Option<DateTime<Utc>>,
+}
+
+#[async_trait]
+impl AuthTokenRepo for InMemoryAuthTokenRepo {
+    async fn insert_auth_token(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        token_hash: &[u8],
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.insert(
+            token_hash.to_vec(),
+            TokenRow {
+                user_id,
+                kind,
+                expires_at,
+                consumed_at: None,
+            },
+        );
+        Ok(())
+    }
+
+    async fn consume_auth_token(
+        &self,
+        kind: AuthTokenKind,
+        token_hash: &[u8],
+        now: DateTime<Utc>,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(row) = inner.get_mut(token_hash) else {
+            return Ok(None);
+        };
+        if row.kind != kind || row.consumed_at.is_some() || row.expires_at <= now {
+            return Ok(None);
+        }
+        row.consumed_at = Some(now);
+        Ok(Some(row.user_id))
+    }
+}
+
+// --- helpers ---------------------------------------------------------
+
+type Svc = AuthService<InMemoryUserRepo, InMemoryAuthTokenRepo, MemoryMailer>;
+
+fn build_service() -> (Svc, MemoryMailer) {
+    let users = InMemoryUserRepo::default();
+    let tokens = InMemoryAuthTokenRepo::default();
+    let mailer = MemoryMailer::new();
+    let base = Url::parse("https://hub.example").unwrap();
+    let svc = AuthService::new(users, tokens, mailer.clone(), base);
+    (svc, mailer)
+}
+
+fn token_from_link(link: &Url) -> String {
+    link.query_pairs()
+        .find(|(k, _)| k == "token")
+        .map(|(_, v)| v.into_owned())
+        .expect("magic link carries ?token=…")
+}
+
+// --- tests -----------------------------------------------------------
+
+#[tokio::test]
+async fn register_creates_user_and_sends_verification_link() {
+    let (svc, mailer) = build_service();
+    svc.register("alice@example.com", "very-long-passphrase")
+        .await
+        .unwrap();
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, "alice@example.com");
+    assert_eq!(sent[0].kind, MailKind::Verification);
+    assert!(
+        sent[0]
+            .link
+            .as_str()
+            .starts_with("https://hub.example/auth/verify?token=")
+    );
+}
+
+#[tokio::test]
+async fn register_with_taken_email_surfaces_email_taken() {
+    let (svc, _) = build_service();
+    svc.register("alice@example.com", "first-passphrase")
+        .await
+        .unwrap();
+    let err = svc
+        .register("ALICE@example.com", "second-passphrase")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::EmailTaken));
+}
+
+#[tokio::test]
+async fn verify_email_consumes_token_and_marks_user_verified() {
+    let (svc, mailer) = build_service();
+    svc.register("bob@example.com", "passphrase").await.unwrap();
+    let token = token_from_link(&mailer.sent()[0].link);
+
+    svc.verify_email(&token).await.unwrap();
+
+    // Replay must fail — single-use.
+    let err = svc.verify_email(&token).await.unwrap_err();
+    assert!(matches!(err, AuthError::InvalidToken));
+}
+
+#[tokio::test]
+async fn verify_email_rejects_unknown_token() {
+    let (svc, _) = build_service();
+    let err = svc.verify_email("not-a-real-token").await.unwrap_err();
+    assert!(matches!(err, AuthError::InvalidToken));
+}
+
+#[tokio::test]
+async fn login_returns_user_on_correct_password() {
+    let (svc, _) = build_service();
+    svc.register("carol@example.com", "passphrase")
+        .await
+        .unwrap();
+    let user = svc.login("carol@example.com", "passphrase").await.unwrap();
+    assert_eq!(user.email, "carol@example.com");
+    assert!(verify_password("passphrase", &user.password_hash).unwrap());
+}
+
+#[tokio::test]
+async fn login_rejects_wrong_password_with_invalid_credentials() {
+    let (svc, _) = build_service();
+    svc.register("dan@example.com", "passphrase").await.unwrap();
+    let err = svc.login("dan@example.com", "WRONG").await.unwrap_err();
+    assert!(matches!(err, AuthError::InvalidCredentials));
+}
+
+#[tokio::test]
+async fn login_with_unknown_email_returns_invalid_credentials_not_email_taken() {
+    let (svc, _) = build_service();
+    let err = svc
+        .login("ghost@example.com", "anything")
+        .await
+        .unwrap_err();
+    // The variant must be InvalidCredentials, NOT EmailTaken — the
+    // public response cannot distinguish "user unknown" from "wrong
+    // password" or enumeration is trivial.
+    assert!(matches!(err, AuthError::InvalidCredentials));
+}
+
+#[tokio::test]
+async fn request_password_reset_sends_link_for_known_user() {
+    let (svc, mailer) = build_service();
+    svc.register("eve@example.com", "passphrase").await.unwrap();
+    // Drop the verification mail so we only see the reset.
+    let pre = mailer.sent().len();
+    svc.request_password_reset("eve@example.com").await.unwrap();
+    let sent = mailer.sent();
+    assert_eq!(sent.len() - pre, 1);
+    let last = sent.last().unwrap();
+    assert_eq!(last.kind, MailKind::PasswordReset);
+    assert!(
+        last.link
+            .as_str()
+            .starts_with("https://hub.example/auth/reset?token=")
+    );
+}
+
+#[tokio::test]
+async fn request_password_reset_returns_ok_for_unknown_user() {
+    let (svc, mailer) = build_service();
+    // Unknown email — must return Ok and NOT send mail.
+    svc.request_password_reset("nobody@example.com")
+        .await
+        .unwrap();
+    assert!(mailer.sent().is_empty());
+}
+
+#[tokio::test]
+async fn reset_password_consumes_token_and_updates_hash() {
+    let (svc, mailer) = build_service();
+    svc.register("frank@example.com", "old-passphrase")
+        .await
+        .unwrap();
+    svc.request_password_reset("frank@example.com")
+        .await
+        .unwrap();
+    let reset_link = mailer
+        .sent()
+        .into_iter()
+        .find(|m| m.kind == MailKind::PasswordReset)
+        .unwrap()
+        .link;
+    let token = token_from_link(&reset_link);
+
+    svc.reset_password(&token, "new-passphrase").await.unwrap();
+
+    // Old password no longer logs in; new password does.
+    let err = svc
+        .login("frank@example.com", "old-passphrase")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidCredentials));
+    svc.login("frank@example.com", "new-passphrase")
+        .await
+        .unwrap();
+
+    // Replay of the reset link is rejected — single-use.
+    let err = svc
+        .reset_password(&token, "yet-another-passphrase")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidToken));
+}
+
+#[tokio::test]
+async fn resend_verification_is_silent_for_unknown_or_verified_users() {
+    let (svc, mailer) = build_service();
+    svc.resend_verification("ghost@example.com").await.unwrap();
+    assert!(mailer.sent().is_empty(), "no mail for unknown user");
+
+    svc.register("grace@example.com", "passphrase")
+        .await
+        .unwrap();
+    let token = token_from_link(&mailer.sent()[0].link);
+    svc.verify_email(&token).await.unwrap();
+    let before = mailer.sent().len();
+    svc.resend_verification("grace@example.com").await.unwrap();
+    assert_eq!(
+        mailer.sent().len(),
+        before,
+        "no resend after the address is verified"
+    );
+}

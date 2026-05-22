@@ -1263,6 +1263,12 @@ pub enum StorageError {
     /// callers can map invariant failures to a 4xx instead of a 5xx.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+    /// Insert collided with a `UNIQUE` constraint. Distinct from
+    /// [`Self::Database`] so callers (e.g. the auth crate's
+    /// "email taken" path) can pattern-match without parsing
+    /// SQLSTATE codes themselves.
+    #[error("unique constraint violated: {0}")]
+    UniqueViolation(String),
 }
 
 // Read-side SQL — column lists are explicit (rather than `SELECT *`)

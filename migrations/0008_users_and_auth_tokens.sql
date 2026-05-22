@@ -1,0 +1,65 @@
+-- #4.2 email + password authentication.
+--
+-- Stores users + the single-use tokens that back email verification
+-- and password-reset magic links. OAuth (#4.3 GitHub / #4.4 Google)
+-- and sessions (#4.5) extend the schema in later migrations; the
+-- columns this migration adds stay stable across those changes.
+
+-- CITEXT folds case for the email lookup so the UNIQUE constraint
+-- catches `Alice@example.com` vs `alice@example.com` collisions at
+-- INSERT time instead of letting two accounts share a recovery
+-- mailbox. Postgres 18 ships this in contrib but the extension
+-- still needs to be loaded once.
+CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TABLE users (
+    id                UUID         PRIMARY KEY DEFAULT uuidv7(),
+    email             CITEXT       NOT NULL UNIQUE,
+    -- argon2id encoded hash (PHC string format: `$argon2id$v=19$m=...`).
+    -- Holds salt + parameters, so we don't need a separate column.
+    password_hash     TEXT         NOT NULL,
+    -- NULL until the user clicks the verification magic link.
+    -- Tools that gate on a verified mailbox compare IS NOT NULL.
+    email_verified_at TIMESTAMPTZ,
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+-- Single-use tokens backing email-verification and password-reset
+-- links. We store ONLY a SHA-256 of the token so a DB leak doesn't
+-- yield working magic links; the cleartext token only ever lives
+-- in the recipient's mailbox.
+--
+-- `kind` is a free-form text discriminator instead of an enum so
+-- adding new flows (e.g. OAuth-link-account) is a no-migration
+-- change. Indexed alongside `user_id` for the "do they already
+-- have a pending verification?" lookup.
+CREATE TABLE auth_tokens (
+    id          UUID         PRIMARY KEY DEFAULT uuidv7(),
+    user_id     UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind        TEXT         NOT NULL,
+    token_hash  BYTEA        NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ  NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT auth_tokens_kind_known CHECK (kind IN ('email_verify', 'password_reset'))
+);
+
+CREATE INDEX auth_tokens_user_kind_idx
+    ON auth_tokens (user_id, kind)
+    WHERE consumed_at IS NULL;
+
+-- Touch `updated_at` on every UPDATE so the rest of the codebase
+-- can rely on it (e.g. "most recent password change wins" later).
+CREATE OR REPLACE FUNCTION users_set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER users_set_updated_at_trg
+    BEFORE UPDATE ON users
+    FOR EACH ROW
+    EXECUTE FUNCTION users_set_updated_at();
