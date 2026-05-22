@@ -32,10 +32,20 @@ pub enum AuthError {
     /// the column is hand-edited or a future migration corrupts it.
     #[error("password hashing failed: {0}")]
     PasswordHash(String),
-    /// SMTP delivery failed. The HTTP boundary still returns a
-    /// uniform 202 so the response shape does not reveal whether
-    /// the recipient address exists.
-    #[error("could not send email: {0}")]
+    /// Mailer-side failure surfaced to the caller. Covers two
+    /// distinct shapes:
+    ///
+    /// 1. **Mailer construction / parse errors** — invalid SMTP
+    ///    URL, malformed `From:` address, or a body the builder
+    ///    rejects. These reach the caller because they happen
+    ///    before the background send is spawned.
+    /// 2. **Background SMTP delivery failures** — typically
+    ///    logged via `tracing::error!` inside the spawned task
+    ///    and NOT returned to the caller (the response shape
+    ///    needs to stay uniform regardless of whether the
+    ///    recipient exists). This variant is the type the
+    ///    spawned task constructs before deciding to log+swallow.
+    #[error("mailer error: {0}")]
     Mailer(String),
     /// A database call failed. Wrapped so callers don't depend on
     /// sqlx directly.

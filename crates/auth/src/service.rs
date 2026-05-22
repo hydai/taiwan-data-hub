@@ -81,7 +81,8 @@ pub const DEFAULT_VERIFY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Default lifetime for password-reset links (1 hour).
 pub const DEFAULT_RESET_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Composition root that performs the five v0.1 auth flows.
+/// Composition root that performs the six v0.1 auth flows
+/// enumerated in the module docs.
 ///
 /// Generic over the repo + mailer traits so unit tests can swap
 /// in `InMemoryUserRepo` etc. without a real Postgres. Wrapped in
