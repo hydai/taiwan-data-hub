@@ -260,17 +260,30 @@ fn canonicalise_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// Paths that bypass the IP rate-limit middleware. Kubelet's
-/// liveness / readiness checks and load-balancer health
-/// probes both hammer the gateway from a single source IP at
-/// a cadence that would trip the per-IP cap (one probe per
-/// second × N replicas / N seconds = well over 60/min through
-/// the same `ip:<lb_ip>` counter). The probe paths also need
-/// to return 200 unconditionally per the #0.4 spec — a
-/// `429` from `/healthz` would tell kubelet the pod is sick
-/// when it isn't.
+/// Paths that bypass the IP rate-limit middleware:
+///
+///   * `/healthz` / `/readyz` — kubelet's liveness /
+///     readiness checks + load-balancer health probes hammer
+///     these from a single source IP at a cadence that would
+///     trip the per-IP cap (one probe per second × N replicas
+///     / N seconds = well over 60/min through the same
+///     `ip:<lb_ip>` counter). They also need to return 200
+///     unconditionally per the #0.4 spec — a `429` from
+///     `/healthz` would tell kubelet the pod is sick when it
+///     isn't.
+///   * `/api/v1/config` — fetched by the `SvelteKit` layout
+///     load on EVERY page render to drive auth-conditional
+///     rendering. Under shared-IP environments (office NAT,
+///     mobile carrier NAT, CI preview crawlers) dozens of
+///     users behind the same egress IP would otherwise burn
+///     through the 60/min budget on layout fetches alone,
+///     and the layout's fail-safe would kick in and hide
+///     auth UI on a working multi-user deploy. The endpoint
+///     itself returns only the operating mode — no per-user
+///     data, no security surface — so exempting it doesn't
+///     widen the attack surface.
 fn is_unthrottled_probe(path: &str) -> bool {
-    matches!(path, "/healthz" | "/readyz")
+    matches!(path, "/healthz" | "/readyz" | "/api/v1/config")
 }
 
 /// Read the `TRUST_PROXY_HEADERS` env var ONCE on first
@@ -497,17 +510,28 @@ mod tests {
     }
 
     #[test]
-    fn is_unthrottled_probe_matches_health_endpoints() {
-        // R3 fix — kubelet probes and load-balancer health
+    fn is_unthrottled_probe_matches_exempt_endpoints() {
+        // R3 fix: kubelet probes and load-balancer health
         // checks must bypass the per-IP cap.
         assert!(is_unthrottled_probe("/healthz"));
         assert!(is_unthrottled_probe("/readyz"));
+        // R4 fix: /api/v1/config is fetched per page render
+        // by the SvelteKit layout — under NAT it would burn
+        // through the 60/min budget on layout fetches alone.
+        assert!(is_unthrottled_probe("/api/v1/config"));
         assert!(!is_unthrottled_probe("/"));
         assert!(!is_unthrottled_probe("/mcp"));
         assert!(!is_unthrottled_probe("/v1/api-keys"));
+        // /api/v1/me is intentionally NOT exempt — it carries
+        // session-bearing auth signal and gets per-session
+        // throttling at a layer above. The IP throttle on /me
+        // remains a useful defence against anonymous probes.
+        assert!(!is_unthrottled_probe("/api/v1/me"));
         // Trailing slash / nested form must NOT match — those
         // aren't the probe endpoints and need throttling.
         assert!(!is_unthrottled_probe("/healthz/"));
         assert!(!is_unthrottled_probe("/healthz/subpath"));
+        assert!(!is_unthrottled_probe("/api/v1/config/"));
+        assert!(!is_unthrottled_probe("/api/v1/config/extra"));
     }
 }
