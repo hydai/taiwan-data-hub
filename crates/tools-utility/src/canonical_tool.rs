@@ -120,9 +120,11 @@ fn input_schema() -> Map<String, Value> {
             "county": {
                 "type": "string",
                 "minLength": 1,
-                // \\S+ requires at least one non-whitespace char so
-                // schema validation matches the runtime trim+empty
-                // check.
+                // `\S` requires at least one non-whitespace char
+                // somewhere in the string (regexes are unanchored
+                // by default, so a single non-whitespace char
+                // anywhere satisfies the match). Matches the
+                // runtime trim+empty check.
                 "pattern": "\\S",
                 "description": "Free-form county name (post-改制, pre-改制 alias, or 臺 form). Must contain at least one non-whitespace character. Examples: \"台北市\", \"新北市\", \"台中縣\", \"臺北縣\".",
             },
