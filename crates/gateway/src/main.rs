@@ -116,7 +116,7 @@ async fn healthz() -> impl IntoResponse {
 /// check is stubbed until M0 #0.3 + #0.8 wire up the real sqlx pool —
 /// see `dependency_ready`.
 async fn readyz() -> impl IntoResponse {
-    let database = dependency_ready(std::env::var("DATABASE_URL").ok().as_deref());
+    let database = dependency_ready(non_empty_env("DATABASE_URL").as_deref());
     let all_ready = database.unwrap_or(false);
 
     let body = ReadyBody {
@@ -282,7 +282,11 @@ fn doctor() -> anyhow::Result<()> {
 /// for ops, and personal-mode installs without Postgres still get a
 /// working MCP server with `list_domains`.
 async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBuilder {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    // Use the same blank==unset normalisation as `readyz` and the
+    // doctor so all three observers report the same configuration
+    // state instead of disagreeing on whether `DATABASE_URL=` (set
+    // but empty) means "configured".
+    let Some(url) = non_empty_env("DATABASE_URL") else {
         tracing::info!("DATABASE_URL unset; DB-backed tools disabled (list_domains still works)");
         return builder;
     };
