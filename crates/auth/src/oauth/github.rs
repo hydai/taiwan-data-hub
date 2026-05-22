@@ -73,22 +73,38 @@ impl GitHubProvider {
     }
 }
 
+/// Raw shape of GitHub's `/login/oauth/access_token` response.
+///
+/// `access_token` is `Option` because GitHub omits it on error
+/// responses (and includes `error` instead). Modeling it as
+/// `Option` lets `serde_json` deserialize both shapes; the
+/// success-path code in [`GitHubProvider::exchange_token`]
+/// explicitly checks `error` first, then unwraps.
 #[derive(Debug, Deserialize)]
 struct GitHubTokenResponse {
-    access_token: String,
+    #[serde(default)]
+    access_token: Option<String>,
     #[serde(default)]
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
     #[serde(default)]
     token_type: Option<String>,
-    /// Present in the error shape. The success shape never sets
-    /// it, so a populated `error` overrides `access_token` even
-    /// if the response is otherwise ambiguous.
+    /// Present in the error shape.
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
     error_description: Option<String>,
+}
+
+/// Resolved + validated token payload — populated by
+/// `exchange_token` after it confirms `error` is absent and the
+/// `access_token` field was present. Downstream code works with
+/// concrete `String`s rather than re-checking the `Option`.
+struct ExchangedToken {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,7 +177,7 @@ impl GitHubProvider {
         code: &str,
         code_verifier: &str,
         redirect_uri: &str,
-    ) -> Result<GitHubTokenResponse, AuthError> {
+    ) -> Result<ExchangedToken, AuthError> {
         let resp = self
             .http
             .post(&self.token_url)
@@ -187,6 +203,10 @@ impl GitHubProvider {
             .json()
             .await
             .map_err(|e| AuthError::OAuthExchange(format!("token JSON decode failed: {e}")))?;
+        // Check `error` BEFORE touching `access_token` — a real
+        // OAuth error response from GitHub has `error` set and
+        // no `access_token` at all (which is why the field is
+        // modeled as `Option`).
         if let Some(err) = body.error.as_deref() {
             return Err(AuthError::OAuthExchange(format!(
                 "GitHub rejected token exchange: {err} ({})",
@@ -199,7 +219,16 @@ impl GitHubProvider {
                 body.token_type
             )));
         }
-        Ok(body)
+        let access_token = body.access_token.ok_or_else(|| {
+            AuthError::OAuthExchange(
+                "token endpoint returned 200 with no access_token and no error".to_owned(),
+            )
+        })?;
+        Ok(ExchangedToken {
+            access_token,
+            refresh_token: body.refresh_token,
+            expires_in: body.expires_in,
+        })
     }
 
     async fn fetch_user(&self, access_token: &str) -> Result<GitHubUser, AuthError> {

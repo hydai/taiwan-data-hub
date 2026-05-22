@@ -404,20 +404,22 @@ async fn provider_identity_stays_bound_to_original_user_when_email_changes() {
         .await
         .unwrap();
 
-    // After Alice owns user_id X, ANOTHER user with email
-    // "alice@example.com" should never get the GitHub identity
-    // even if the second login claims that email. We can't
-    // re-mount different responses on the same wiremock server,
-    // so the test asserts the simpler invariant: a second login
-    // with the same provider_user_id but a different email
-    // string still lands on Alice's user_id. We do this by
-    // mutating the seed user's email directly (simulating a
-    // local user that registered with the same address) and
-    // then re-running the OAuth login — the GitHub-side mock
-    // still returns the same provider_user_id.
+    // Free Alice's email at the local-user layer (simulating
+    // a rename), then seed a second local user with the
+    // original `alice@example.com`. The GitHub mock STILL
+    // returns alice@example.com + provider_user_id=9999 on
+    // the second login — exactly the attack shape: the
+    // provider claims the collision-target email, but
+    // identity-stability must still land on the original
+    // Alice row.
+    {
+        let mut inner = users.inner.lock().unwrap();
+        let row = inner.get_mut(&alice.id).unwrap();
+        row.email = "alice-renamed@example.com".to_owned();
+    }
     let snitch_id = users
         .insert_user(
-            "alice@example.com.spoof",
+            "alice@example.com",
             "$argon2id$v=19$m=19456,t=2,p=1$Zm9v$Zm9v",
         )
         .await
