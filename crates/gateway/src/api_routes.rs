@@ -81,11 +81,15 @@ pub fn config_router(mode: Mode) -> axum::Router {
 }
 
 /// `MethodRouter` for the session-gated `/api/v1/me` handler.
-/// Returned uncomposed so the caller can wrap it with the
-/// session middleware before mounting on the router — that
-/// way `axum::Router::with_state` (for the `MeService`) and
-/// `from_fn_with_state` (for the session layer) don't have
-/// to share a single composed state type.
+/// Returned uncomposed (rather than as a full `Router`) so
+/// the caller can wrap it with the session middleware before
+/// mounting — the handler itself extracts via
+/// `Option<Extension<ValidatedSession>>` so it needs no
+/// router-level state, just the extension the session
+/// middleware injects upstream. Exposing it as a bare
+/// `MethodRouter<()>` lets `main.rs` mount it alongside the
+/// api-keys subrouter under the same session middleware
+/// layer.
 pub fn me_handler() -> axum::routing::MethodRouter<()> {
     axum::routing::get(get_me)
 }
