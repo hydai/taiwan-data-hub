@@ -113,8 +113,9 @@ base64 = "0.22"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1-rustls-tls", "hostname", "pool"] }
 # Auth (#4.3): AES-256-GCM for the at-rest encryption of provider
 # access + refresh tokens stored in `oauth_accounts`. RustCrypto's
-# aes-gcm crate; we use the `Aead` trait + `AeadCore::generate_nonce`
-# at the call sites.
+# aes-gcm crate; we use the `Aead` trait at the call sites and
+# generate the 12-byte GCM nonce via `OsRng::try_fill_bytes` so the
+# entropy source is the same one used for PKCE + CSRF state.
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
 [workspace.lints.rust]

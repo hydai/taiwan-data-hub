@@ -157,9 +157,21 @@ where
             }
             None => (None, None),
         };
-        let expires_at = profile
-            .expires_in
-            .map(|d| now + chrono::Duration::from_std(d).unwrap_or(chrono::Duration::zero()));
+        // A provider-supplied `expires_in` that doesn't fit in
+        // `chrono::Duration` is malformed — silently coercing to
+        // zero would mark the freshly-issued token as already
+        // expired. Surface as `OAuthExchange` so the caller can
+        // retry and ops can see the upstream bug.
+        let expires_at = match profile.expires_in {
+            Some(d) => Some(
+                now + chrono::Duration::from_std(d).map_err(|e| {
+                    AuthError::OAuthExchange(format!(
+                        "provider returned expires_in outside chrono::Duration range: {e}"
+                    ))
+                })?,
+            ),
+            None => None,
+        };
         self.accounts
             .upsert_oauth_account(NewOAuthAccount {
                 user_id: user.id,
@@ -198,14 +210,15 @@ where
                 created_at: refreshed.created_at,
             });
         }
-        // The OAuth-created user has no password — login via the
-        // email/password path is impossible until they go through
-        // `request_password_reset`. The hash column is non-null
-        // in the DB, so we store a syntactically-valid PHC string
-        // that no plaintext can match.
+        // The OAuth-created user has no password. The hash column
+        // is non-null in the DB, so we generate a unique argon2id
+        // PHC string from 32 bytes of `OsRng` and immediately
+        // discard the plaintext — meaning even a future offline
+        // crack of one row yields a useless one-off secret, not a
+        // shared backdoor across every OAuth-only account.
         let user = match self
             .users
-            .insert_user(email, OAUTH_ONLY_PASSWORD_HASH)
+            .insert_user(email, &unguessable_password_hash().await?)
             .await
         {
             Ok(user) => user,
@@ -238,14 +251,25 @@ where
     }
 }
 
-/// A syntactically-valid argon2id PHC string whose plaintext is
-/// 32 bytes of `OsRng`-derived secret that's never recorded
-/// anywhere. Stored on OAuth-created users to satisfy the
-/// non-null `password_hash` column without enabling any
-/// password login path — only `request_password_reset` (which
-/// overwrites the column) can produce a usable credential.
-///
-/// The hash below was generated with the default argon2id PHC
-/// parameters and a one-time random plaintext that was then
-/// discarded.
-const OAUTH_ONLY_PASSWORD_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$b2F1dGgtb25seS1mb3JjZS1yZXNldA$VVH3hgKKBA1pkRC8/JtN8aVbHo7E8YQ3CkHFmd2pCfA";
+/// Generate a unique argon2id PHC string whose plaintext is 32
+/// bytes of `OsRng`-derived secret that's never returned to the
+/// caller. Used to fill the non-null `password_hash` column on
+/// OAuth-created users so a future offline crack of one row
+/// yields only a one-off secret instead of a shared backdoor
+/// across every OAuth-only account.
+async fn unguessable_password_hash() -> Result<String, AuthError> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use rand::TryRngCore;
+    use rand::rngs::OsRng;
+
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OsRng must provide entropy for OAuth password placeholder");
+    // The plaintext is the random bytes encoded as base64. The
+    // bytes themselves go out of scope at the end of the await;
+    // only the resulting argon2id hash is ever returned.
+    let plaintext = STANDARD_NO_PAD.encode(bytes);
+    crate::password::hash_password(plaintext).await
+}

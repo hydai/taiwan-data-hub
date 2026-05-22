@@ -1,16 +1,18 @@
 //! OAuth 2.1 with PKCE + CSRF state.
 //!
-//! `OAuthService` drives the two-leg authorization-code flow:
+//! `OAuthService` is generic over a provider impl —
+//! `OAuthService<GitHubProvider>` for #4.3,
+//! `OAuthService<GoogleProvider>` for #4.4. The service itself
+//! drives the two-leg authorization-code flow:
 //!
-//! 1. `start_login(provider, redirect_uri)` mints a PKCE
-//!    code-verifier + a CSRF `state` token, persists them in
-//!    `oauth_states`, and returns the provider's authorize URL.
-//! 2. `finish_login(provider, code, state, redirect_uri)`
-//!    consumes the matching `oauth_states` row, exchanges the
-//!    code for an access token (sending `code_verifier`),
-//!    fetches the provider's user profile, and links it to an
-//!    existing user by verified email — creating one if no
-//!    match exists.
+//! 1. `start_login(redirect_uri)` mints a PKCE code-verifier +
+//!    a CSRF `state` token, persists them in `oauth_states`,
+//!    and returns the provider's authorize URL.
+//! 2. `finish_login(code, state, redirect_uri)` consumes the
+//!    matching `oauth_states` row, exchanges the code for an
+//!    access token (sending `code_verifier`), fetches the
+//!    provider's user profile, and links it to an existing user
+//!    by verified email — creating one if no match exists.
 //!
 //! The access token (and refresh token, if any) is AES-256-GCM
 //! encrypted before it lands in `oauth_accounts` (see [`crypto`]).

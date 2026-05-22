@@ -60,6 +60,12 @@ CREATE TABLE oauth_accounts (
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     PRIMARY KEY (provider, provider_user_id),
+    -- One account per (user, provider) — a user has at most one
+    -- GitHub identity, one Google identity, etc. Catches the
+    -- "user re-authed with a different GitHub account that has
+    -- the same email" race at INSERT time instead of letting two
+    -- rows coexist.
+    UNIQUE (user_id, provider),
     CONSTRAINT oauth_accounts_provider_known
         CHECK (provider IN ('github', 'google')),
     CONSTRAINT oauth_accounts_access_nonce_len
