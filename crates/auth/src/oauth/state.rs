@@ -2,9 +2,9 @@
 //!
 //! 32-byte `OsRng` entropy, URL-safe + no-padding base64 (43
 //! chars). Cleartext goes into the authorize-redirect query
-//! string; only `sha256(state)` is persisted (in `oauth_states.
-//! state_hash`) so a DB leak alone can't forge a callback
-//! challenge.
+//! string; only `sha256(state)` is persisted (in
+//! `oauth_states.state_hash`) so a DB leak alone can't forge a
+//! callback challenge.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
