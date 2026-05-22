@@ -81,20 +81,29 @@ pub struct FormatResult {
 #[must_use]
 pub fn validate(kind: FormatKind, value: &str) -> FormatResult {
     let trimmed = value.trim();
-    let valid = match kind {
-        FormatKind::Invoice => is_valid_invoice(trimmed),
-        FormatKind::Taipower => is_valid_taipower(trimmed),
-        FormatKind::WaterMeter => is_valid_water_meter(trimmed),
-        FormatKind::Phone => is_valid_phone(trimmed),
-        FormatKind::LicensePlate => is_valid_license_plate(trimmed),
-        FormatKind::CreditCard => is_valid_luhn(trimmed),
-        FormatKind::Iban => is_valid_iban(trimmed),
-        FormatKind::IataAirport => lookup_iata(trimmed).is_some(),
-    };
-    let detail = match kind {
-        FormatKind::IataAirport => lookup_iata(trimmed).map(str::to_string),
-        FormatKind::CreditCard if valid => credit_card_issuer(trimmed).map(str::to_string),
-        _ => None,
+    // Compute (valid, detail) in one match arm per kind so each
+    // expensive path is run once. The previous version called
+    // `lookup_iata` twice in the IataAirport case.
+    let (valid, detail) = match kind {
+        FormatKind::Invoice => (is_valid_invoice(trimmed), None),
+        FormatKind::Taipower => (is_valid_taipower(trimmed), None),
+        FormatKind::WaterMeter => (is_valid_water_meter(trimmed), None),
+        FormatKind::Phone => (is_valid_phone(trimmed), None),
+        FormatKind::LicensePlate => (is_valid_license_plate(trimmed), None),
+        FormatKind::CreditCard => {
+            let v = is_valid_luhn(trimmed);
+            let d = if v {
+                credit_card_issuer(trimmed).map(str::to_string)
+            } else {
+                None
+            };
+            (v, d)
+        }
+        FormatKind::Iban => (is_valid_iban(trimmed), None),
+        FormatKind::IataAirport => match lookup_iata(trimmed) {
+            Some(name) => (true, Some(name.to_string())),
+            None => (false, None),
+        },
     };
     FormatResult {
         valid,
@@ -171,7 +180,19 @@ fn is_valid_water_meter(s: &str) -> bool {
 static PHONE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     // Strip spaces / hyphens before matching, so this regex
     // operates on the compact form.
-    Regex::new(r"^(?:\+886|0)(?:9\d{8}|[2-8]\d{7,8})$").expect("phone regex")
+    //
+    // Branches (each starts with `0` or `+886`):
+    //  - mobile: 09XX-XXXXXX (10 digits including leading 0)
+    //  - 1-digit area (台北 02, 雙北 03 / 04 / 05 / 06 / 07 / 08):
+    //    `[2-8]\d{7,8}` → 9 or 10 digits total
+    //  - 3-digit area (037 苗栗 / 049 南投 / 082 金門 / 0836 馬祖 /
+    //    089 台東 / 0826 烏坵 ...): match `0` + 2 more digits +
+    //    subscriber (6 or 7 digits typical). We accept any 2-digit
+    //    prefix in `37 49 82 83 89 92 26` (the published TWNIC list)
+    //    plus 6-7 digit subscriber. Kept narrow rather than `\d{2}`
+    //    to avoid accepting nonsense like `0007654321`.
+    Regex::new(r"^(?:\+886|0)(?:9\d{8}|[2-8]\d{7,8}|(?:37|49|82|83|89|26|92)\d{5,7})$")
+        .expect("phone regex")
 });
 
 fn is_valid_phone(s: &str) -> bool {
@@ -196,7 +217,19 @@ fn is_valid_phone(s: &str) -> bool {
 // ============================================================
 
 static PLATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:[A-Z]{2,3}-?\d{2,4}|\d{2,4}-?[A-Z]{2,3}|\d{3}-?\d{2})$").expect("plate regex")
+    // Explicit alternation of the documented formats only — the
+    // previous loose ranges accepted unintended shapes like
+    // "AB12" or "12AB". Letters {2,3} × digits {2,4} would still
+    // catch typos as "valid" plates that no Taiwanese 監理所 ever
+    // issued.
+    //  - 5-char "4 字": NNN-NN
+    //  - 6-char "4 字" cars: AA-NNNN
+    //  - 6-char "6 字" 2014+ cars: AAA-NNN  /  NNN-AAA  /  NNNN-AA
+    //  - 7-char "7 字" 2018+ cars: AAA-NNNN
+    Regex::new(
+        r"^(?:\d{3}-?\d{2}|[A-Z]{2}-?\d{4}|[A-Z]{3}-?\d{3}|\d{3}-?[A-Z]{3}|\d{4}-?[A-Z]{2}|[A-Z]{3}-?\d{4})$",
+    )
+    .expect("plate regex")
 });
 
 fn is_valid_license_plate(s: &str) -> bool {
@@ -209,11 +242,19 @@ fn is_valid_license_plate(s: &str) -> bool {
 // ============================================================
 
 fn is_valid_luhn(s: &str) -> bool {
-    let digits: Vec<u32> = s
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .filter_map(|c| c.to_digit(10))
-        .collect();
+    // Reject any non-digit, non-separator character — silently
+    // dropping garbage would let "4111-1111-FOO-1111" claim
+    // validity on its remaining 12 digits.
+    let mut digits: Vec<u32> = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_whitespace() || c == '-' {
+            continue;
+        }
+        match c.to_digit(10) {
+            Some(d) => digits.push(d),
+            None => return false,
+        }
+    }
     if digits.len() < 13 || digits.len() > 19 {
         return false;
     }
@@ -233,15 +274,37 @@ fn is_valid_luhn(s: &str) -> bool {
     sum % 10 == 0
 }
 
-/// Best-effort issuer hint based on the first 1-2 digits +
-/// length. Returned in the `detail` field of a successful LUHN
+/// Best-effort issuer hint based on the BIN range + length.
+/// Returned in the `detail` field of a successful LUHN
 /// validation purely as a convenience.
+///
+/// Mastercard covers two BIN ranges: the classic `51-55` prefix
+/// and the 2017+ `2221-2720` 2-series. Both are detected here.
 fn credit_card_issuer(s: &str) -> Option<&'static str> {
     let digits: String = s.chars().filter(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
     let first = digits.chars().next()?;
+    // Mastercard 2-series check uses the first four digits.
+    if digits.len() == 16 {
+        if let Ok(prefix4) = digits[..4].parse::<u32>() {
+            if (2221..=2720).contains(&prefix4) {
+                return Some("Mastercard");
+            }
+        }
+    }
     match first {
         '4' if matches!(digits.len(), 13 | 16 | 19) => Some("Visa"),
-        '5' if digits.len() == 16 => Some("Mastercard"),
+        '5' if digits.len() == 16 => {
+            // 51-55: classic Mastercard. 50/56-59 hit "Other".
+            let prefix2 = digits[..2].parse::<u32>().ok()?;
+            if (51..=55).contains(&prefix2) {
+                Some("Mastercard")
+            } else {
+                Some("Unknown issuer")
+            }
+        }
         '3' => {
             let second = digits.chars().nth(1)?;
             if matches!(second, '4' | '7') && digits.len() == 15 {
