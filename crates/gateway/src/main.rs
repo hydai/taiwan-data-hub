@@ -443,14 +443,15 @@ struct DoctorEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoctorStatus {
-    /// Config is valid and present.
+    /// Config is valid and ready to use — either set explicitly or
+    /// resolved from a documented default (e.g. [`DEFAULT_ADDR`]).
     Ok,
     /// Config is absent but the binary tolerates that (e.g. no
     /// `DATABASE_URL` in a personal-mode install). Always rendered
     /// `info`, never an error.
     Info,
     /// Config is present but malformed, partial, or contradictory.
-    /// Counts toward [`DoctorReport::has_errors`] so the process
+    /// Counts toward [`DoctorReport::error_count`] so the process
     /// exits non-zero.
     Error,
 }
@@ -586,16 +587,25 @@ fn validate_database_url(raw: Option<&str>) -> DoctorEntry {
             "unset — DB-backed tools will be disabled",
         ),
         Some(raw) => match Url::parse(raw) {
-            Ok(_) => doctor_entry(
-                "DATABASE_URL",
-                DoctorStatus::Ok,
-                "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)",
-            ),
             Err(e) => doctor_entry(
                 "DATABASE_URL",
                 DoctorStatus::Error,
                 format!("not a valid URL: {e}"),
             ),
+            Ok(url) => match url.scheme() {
+                "postgres" | "postgresql" => doctor_entry(
+                    "DATABASE_URL",
+                    DoctorStatus::Ok,
+                    "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)",
+                ),
+                other => doctor_entry(
+                    "DATABASE_URL",
+                    DoctorStatus::Error,
+                    format!(
+                        "scheme {other:?} is not supported by sqlx::PgPool; expected `postgres` or `postgresql`"
+                    ),
+                ),
+            },
         },
     }
 }
@@ -612,13 +622,24 @@ fn validate_object_store(base: Option<&str>, secret: Option<&str>) -> DoctorEntr
             DoctorStatus::Error,
             "partial config: both OBJECT_STORE_BASE_URL and OBJECT_STORE_SIGNING_SECRET must be set together",
         ),
-        (Some(b), Some(_)) => match Url::parse(b) {
-            Ok(_) => doctor_entry("OBJECT_STORE_*", DoctorStatus::Ok, format!("base={b}")),
+        (Some(b), Some(s)) => match Url::parse(b) {
             Err(e) => doctor_entry(
                 "OBJECT_STORE_BASE_URL",
                 DoctorStatus::Error,
                 format!("not a valid URL: {e}"),
             ),
+            // Mirror runtime wiring exactly: a syntactically-valid URL
+            // can still be rejected by `LocalFsObjectStore::new` for
+            // origin/secret-length reasons. Construct and discard so
+            // doctor catches what the runtime would warn-and-skip.
+            Ok(url) => match LocalFsObjectStore::new(url, s.as_bytes().to_vec()) {
+                Ok(_) => doctor_entry("OBJECT_STORE_*", DoctorStatus::Ok, format!("base={b}")),
+                Err(e) => doctor_entry(
+                    "OBJECT_STORE_*",
+                    DoctorStatus::Error,
+                    format!("invalid config: {e}"),
+                ),
+            },
         },
     }
 }
@@ -648,28 +669,52 @@ fn validate_s3(
         );
     }
     let endpoint = endpoint.expect("checked above");
+    let region = region.expect("checked above");
+    let key = key.expect("checked above");
+    let secret = secret.expect("checked above");
     let token_note = if token_set {
         " (with session token)"
     } else {
         ""
     };
     match Url::parse(endpoint) {
-        Ok(_) => doctor_entry(
-            "S3_*",
-            DoctorStatus::Ok,
-            format!("endpoint={endpoint}{token_note}"),
-        ),
         Err(e) => doctor_entry(
             "S3_ENDPOINT",
             DoctorStatus::Error,
             format!("not a valid URL: {e}"),
         ),
+        // Mirror runtime wiring: `S3ObjectStore::new` rejects endpoints
+        // that carry a path/query/fragment because the path is later
+        // overwritten with `/{bucket}/{key}` and any prefix would
+        // silently disappear from the signature. Construct and discard
+        // so doctor catches the same misconfig the runtime warn-skips.
+        Ok(url) => {
+            let creds = S3Credentials {
+                access_key_id: key.to_owned(),
+                secret_access_key: secret.to_owned(),
+                session_token: session_token.map(str::to_owned),
+            };
+            match S3ObjectStore::new(url, region.to_owned(), creds) {
+                Ok(_) => doctor_entry(
+                    "S3_*",
+                    DoctorStatus::Ok,
+                    format!("endpoint={endpoint}{token_note}"),
+                ),
+                Err(e) => doctor_entry("S3_*", DoctorStatus::Error, format!("invalid config: {e}")),
+            }
+        }
     }
 }
 
 impl std::fmt::Display for DoctorReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "taiwan-data-hub doctor (gateway v{PKG_VERSION})")?;
+        // Use CARGO_PKG_NAME so the banner matches what clap prints
+        // for `--help` (and what operators actually invoked).
+        writeln!(
+            f,
+            "{bin} doctor (v{PKG_VERSION})",
+            bin = env!("CARGO_PKG_NAME"),
+        )?;
         writeln!(f, "build_sha={GIT_SHA}")?;
         writeln!(f, "---")?;
         for entry in &self.entries {
@@ -931,11 +976,19 @@ mod tests {
         assert!(entry.detail.contains("\"not-an-addr\""));
     }
 
+    /// A signing secret long enough to satisfy `LocalFsObjectStore`'s
+    /// 32-byte minimum without leaking a real key into tests.
+    const TEST_SIGNING_SECRET: &str = "test-only-signing-secret-32-bytes-min";
+
     #[test]
     fn validate_database_url_distinguishes_unset_set_and_bad() {
         assert_eq!(validate_database_url(None).status, DoctorStatus::Info);
         assert_eq!(
             validate_database_url(Some("postgres://x:y@h/db")).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(
+            validate_database_url(Some("postgresql://x:y@h/db")).status,
             DoctorStatus::Ok,
         );
         assert_eq!(
@@ -945,17 +998,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_database_url_rejects_non_postgres_scheme() {
+        let entry = validate_database_url(Some("https://example.invalid/db"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("\"https\""));
+    }
+
+    #[test]
     fn validate_object_store_partial_is_error() {
         assert_eq!(
-            validate_object_store(Some("file:///tmp"), None).status,
+            validate_object_store(Some("http://localhost:8080"), None).status,
             DoctorStatus::Error,
         );
         assert_eq!(
-            validate_object_store(None, Some("secret")).status,
+            validate_object_store(None, Some(TEST_SIGNING_SECRET)).status,
             DoctorStatus::Error,
         );
         assert_eq!(
-            validate_object_store(Some("file:///tmp"), Some("secret")).status,
+            validate_object_store(Some("http://localhost:8080"), Some(TEST_SIGNING_SECRET)).status,
             DoctorStatus::Ok,
         );
         assert_eq!(validate_object_store(None, None).status, DoctorStatus::Info);
@@ -963,9 +1023,29 @@ mod tests {
 
     #[test]
     fn validate_object_store_rejects_malformed_url() {
-        let entry = validate_object_store(Some("not-a-url"), Some("secret"));
+        let entry = validate_object_store(Some("not-a-url"), Some(TEST_SIGNING_SECRET));
         assert_eq!(entry.status, DoctorStatus::Error);
         assert_eq!(entry.label, "OBJECT_STORE_BASE_URL");
+    }
+
+    #[test]
+    fn validate_object_store_rejects_short_signing_secret() {
+        // `LocalFsObjectStore::new` requires 32+ bytes; doctor must
+        // surface that as an Error rather than rubber-stamp the URL.
+        let entry = validate_object_store(Some("http://localhost:8080"), Some("too-short"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("32 bytes"));
+    }
+
+    #[test]
+    fn validate_object_store_rejects_base_url_with_path() {
+        // Origin-only constraint from `LocalFsObjectStore::new`.
+        let entry = validate_object_store(
+            Some("http://localhost:8080/prefix"),
+            Some(TEST_SIGNING_SECRET),
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("origin"));
     }
 
     #[test]
@@ -976,7 +1056,7 @@ mod tests {
 
     #[test]
     fn validate_s3_partial_required_is_error() {
-        let entry = validate_s3(Some("https://s3.example"), None, None, None, None);
+        let entry = validate_s3(Some("https://s3.example.invalid"), None, None, None, None);
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("partial config"));
     }
@@ -990,7 +1070,7 @@ mod tests {
     #[test]
     fn validate_s3_complete_required_is_ok_and_notes_token() {
         let entry = validate_s3(
-            Some("https://s3.example"),
+            Some("https://s3.example.invalid"),
             Some("us-east-1"),
             Some("AKIA"),
             Some("SECRET"),
@@ -1000,7 +1080,7 @@ mod tests {
         assert!(!entry.detail.contains("session token"));
 
         let entry = validate_s3(
-            Some("https://s3.example"),
+            Some("https://s3.example.invalid"),
             Some("us-east-1"),
             Some("AKIA"),
             Some("SECRET"),
@@ -1021,6 +1101,20 @@ mod tests {
         );
         assert_eq!(entry.status, DoctorStatus::Error);
         assert_eq!(entry.label, "S3_ENDPOINT");
+    }
+
+    #[test]
+    fn validate_s3_rejects_endpoint_with_path() {
+        // Origin-only constraint from `S3ObjectStore::new`.
+        let entry = validate_s3(
+            Some("https://s3.example.invalid/prefix"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("origin"));
     }
 
     #[test]
