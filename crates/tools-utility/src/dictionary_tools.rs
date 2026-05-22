@@ -199,6 +199,7 @@ fn entry_schema() -> Value {
             "name": { "type": "string" },
             "aliases": { "type": "array", "items": { "type": "string" } },
         },
+        "additionalProperties": false,
     })
 }
 

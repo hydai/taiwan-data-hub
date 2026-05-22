@@ -48,27 +48,31 @@ impl Dictionary {
     /// Substring search across the name + alias fields, plus
     /// exact-prefix match on the code. Returns up to `limit`
     /// entries in the order they appear in the table. The query
-    /// is case-insensitive for ASCII; CJK matches use exact byte
-    /// substring (Unicode case-folding for CJK is a non-issue —
-    /// the codepoints have no case distinction).
+    /// is case-insensitive for ASCII (via `to_ascii_lowercase`
+    /// applied uniformly to every field — CJK codepoints pass
+    /// through unchanged since they have no case distinction).
     #[must_use]
     pub fn search(&self, query: &str, limit: usize) -> Vec<DictEntry> {
         let query_trimmed = query.trim();
         if query_trimmed.is_empty() {
             return Vec::new();
         }
-        let query_lower = query_trimmed.to_lowercase();
+        let query_lower = query_trimmed.to_ascii_lowercase();
         let mut out = Vec::with_capacity(limit.min(self.entries.len()));
         for entry in self.entries {
             if out.len() >= limit {
                 break;
             }
-            if entry.code.to_lowercase().starts_with(&query_lower)
-                || entry.name.contains(query_trimmed)
+            // Apply the same case-fold to every field so name
+            // matches behave the same way as code / alias matches.
+            // `to_ascii_lowercase` is allocation-cheap for short
+            // strings and doesn't touch CJK ranges.
+            if entry.code.to_ascii_lowercase().starts_with(&query_lower)
+                || entry.name.to_ascii_lowercase().contains(&query_lower)
                 || entry
                     .aliases
                     .iter()
-                    .any(|a| a.to_lowercase().contains(&query_lower))
+                    .any(|a| a.to_ascii_lowercase().contains(&query_lower))
             {
                 out.push(*entry);
             }
@@ -79,7 +83,8 @@ impl Dictionary {
 
 // ============================================================
 //  1. 行政區代碼 — TGOS-published district codes (representative
-//                  v0.1 subset; ~40 entries covering the 6 直轄市).
+//                  v0.1 subset; 31 entries covering the 6 直轄市:
+//                  12 台北 + 7 新北 + 3 桃園 + 3 台中 + 2 台南 + 4 高雄).
 // ============================================================
 
 pub const ADMIN_DIVISIONS: Dictionary = Dictionary {
