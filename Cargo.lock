@@ -1481,6 +1481,7 @@ dependencies = [
  "anyhow",
  "auth",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "connectors",
@@ -1503,6 +1504,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]

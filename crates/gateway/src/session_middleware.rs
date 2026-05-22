@@ -23,7 +23,17 @@
 //! The `#[allow(dead_code)]` markers below tag the public
 //! surface that the follow-up will consume.
 
-#![allow(dead_code)]
+// `session_middleware` is now mounted by
+// `build_auth_router_if_available`; the cookie-builder helpers
+// (`build_session_cookie` / `build_clear_session_cookie`) and
+// the `SessionExtension` alias are still waiting for the
+// login + logout endpoints to land in a follow-up sub-issue.
+// The `#[allow(dead_code)]` keeps those four symbols compiling
+// without a workspace warning until that PR consumes them; the
+// scope is intentionally narrow so a future unused public
+// helper does NOT silently slip in alongside.
+
+#![allow(dead_code, reason = "login/logout handlers in follow-up PR")]
 
 use std::num::NonZeroU64;
 use std::sync::Arc;

@@ -13,6 +13,7 @@
 //!   would and would not be wired, and exits non-zero on a hard config
 //!   error so operators can catch typos before a redeploy.
 
+mod api_keys_routes;
 mod session_middleware;
 
 use std::net::SocketAddr;
@@ -174,7 +175,11 @@ fn gateway_implementation() -> Implementation {
     Implementation::new(env!("CARGO_PKG_NAME"), PKG_VERSION)
 }
 
-fn build_router(server: McpServer, cancel: CancellationToken) -> Router {
+fn build_router(
+    server: McpServer,
+    auth_router: Option<Router>,
+    cancel: CancellationToken,
+) -> Router {
     let mcp_service = StreamableHttpService::new(
         move || Ok(server.clone()),
         LocalSessionManager::default().into(),
@@ -187,10 +192,14 @@ fn build_router(server: McpServer, cancel: CancellationToken) -> Router {
         .layer(build_mcp_cors())
         .service(mcp_service);
 
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest_service("/mcp", mcp_with_cors)
+        .nest_service("/mcp", mcp_with_cors);
+    if let Some(auth) = auth_router {
+        router = router.merge(auth);
+    }
+    router
 }
 
 #[tokio::main]
@@ -219,20 +228,27 @@ async fn serve() -> anyhow::Result<()> {
         "operating mode resolved"
     );
 
+    // Single Storage handle reused by the DB-backed MCP tools AND the
+    // #4.6 api-keys subrouter. Connecting once at boot means a transient
+    // DB outage doesn't double the gateway's startup pressure on the
+    // pool; both consumers share the same pool's connection lifecycle.
+    let storage = connect_storage_if_available().await;
+
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
     // same `tools_data::register_data_tools` helper, so tools register in
     // one place and reach every transport.
     let mut builder: DispatcherBuilder = tools_data::register_data_tools(Dispatcher::builder());
     builder = tools_utility::register_utility_tools(builder);
-    builder = wire_db_tools_if_available(builder).await;
+    builder = wire_db_tools_if_available(builder, storage.clone());
     let dispatcher = builder.build();
     let tool_count = dispatcher.len();
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");
 
     let cancel = CancellationToken::new();
-    let app = build_router(server, cancel.child_token());
+    let auth_router = build_auth_router_if_available(storage);
+    let app = build_router(server, auth_router, cancel.child_token());
 
     let listener = TcpListener::bind(addr)
         .await
@@ -276,33 +292,124 @@ fn doctor() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Register Postgres-backed tools when `DATABASE_URL` is set and a
-/// pool can be established. Mirrors the policy in `mcp-stdio` so
-/// both transports share the same view of which tools are available.
-/// Failure to connect downgrades to "no DB tools" rather than killing
-/// the gateway — `/healthz` and `/readyz` stay independently useful
-/// for ops, and personal-mode installs without Postgres still get a
-/// working MCP server with `list_domains`.
-async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBuilder {
+/// Open a [`Storage`] handle if `DATABASE_URL` is set and a pool
+/// can be established. Returning `Option<Storage>` lets the
+/// caller share one handle across both the DB-backed MCP tools
+/// AND the #4.6 api-keys subrouter — instead of each consumer
+/// opening its own pool, we open one and clone the cheap
+/// Arc-backed handle for each surface.
+///
+/// Failure to connect downgrades to `None` (and a `warn!`) rather
+/// than killing the gateway: `/healthz` and `/readyz` stay
+/// independently useful for ops, and personal-mode installs
+/// without Postgres still get a working MCP server with
+/// `list_domains`.
+async fn connect_storage_if_available() -> Option<Storage> {
     // Use the same blank==unset normalisation as `readyz` and the
     // doctor so all three observers report the same configuration
     // state instead of disagreeing on whether `DATABASE_URL=` (set
     // but empty) means "configured".
-    let Some(url) = non_empty_env("DATABASE_URL") else {
-        tracing::info!("DATABASE_URL unset; DB-backed tools disabled (list_domains still works)");
-        return builder;
-    };
+    let url = non_empty_env("DATABASE_URL")?;
     match Storage::connect(&url).await {
         Ok(storage) => {
-            tracing::info!("DATABASE_URL connected; registering DB-backed tools");
-            let router = build_object_store_router();
-            tools_data::register_db_tools(builder, storage, router)
+            tracing::info!("DATABASE_URL connected; DB-backed tools + api-keys subrouter enabled");
+            Some(storage)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "DATABASE_URL set but Storage::connect failed; DB tools disabled");
-            builder
+            tracing::warn!(
+                error = %e,
+                "DATABASE_URL set but Storage::connect failed; DB tools + api-keys disabled"
+            );
+            None
         }
     }
+}
+
+/// Register Postgres-backed tools onto the dispatcher when a
+/// [`Storage`] handle is available. `None` is a hard no-op — the
+/// caller already logged the reason in [`connect_storage_if_available`].
+fn wire_db_tools_if_available(
+    builder: DispatcherBuilder,
+    storage: Option<Storage>,
+) -> DispatcherBuilder {
+    let Some(storage) = storage else {
+        tracing::info!("DB tools skipped: no Storage handle (list_domains still works)");
+        return builder;
+    };
+    let router = build_object_store_router();
+    tools_data::register_db_tools(builder, storage, router)
+}
+
+/// Build the `/v1/api-keys` subrouter (session-gated). Returns
+/// `None` and logs a `warn!` when any of the required dependencies
+/// is missing:
+///
+/// - `storage` is `None` (no `DATABASE_URL` or connection failure).
+/// - `SESSION_HMAC_KEY` env var is missing / blank / shorter than
+///   the auth crate's required minimum.
+///
+/// In either case the rest of the gateway still serves — the
+/// account page just can't load. This matches the broader
+/// "fail-soft on optional DB dependencies" posture of the binary.
+fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
+    let storage = storage?;
+    let hmac_key = match auth_hmac_key_from_env() {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            tracing::info!(
+                "SESSION_HMAC_KEY unset; api-keys subrouter disabled (login + account UI inactive)"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "SESSION_HMAC_KEY rejected; api-keys subrouter disabled"
+            );
+            return None;
+        }
+    };
+
+    let session_repo: Arc<dyn storage::SessionRepo> = Arc::new(storage.clone());
+    let api_key_repo: Arc<dyn storage::ApiKeyRepo> = Arc::new(storage);
+    let session_service = match auth::SessionService::new(session_repo, hmac_key) {
+        Ok(svc) => Arc::new(svc),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "SessionService::new failed; api-keys subrouter disabled"
+            );
+            return None;
+        }
+    };
+    let api_key_service = Arc::new(auth::ApiKeyService::new(api_key_repo));
+
+    // Mount the api-keys handlers behind the session middleware so
+    // every handler receives `Option<Extension<ValidatedSession>>`
+    // and can return 401 instead of letting axum 500 on a missing
+    // extractor when the cookie was missing / expired / revoked.
+    let router = api_keys_routes::router(api_key_service)
+        .layer(axum::middleware::from_fn_with_state(
+            session_service,
+            session_middleware::session_middleware,
+        ));
+    Some(Router::new().nest("/v1/api-keys", router))
+}
+
+/// Decode `SESSION_HMAC_KEY` from base64. Returns `Ok(None)` when
+/// the env var is unset or blank (so the gateway can fall back to
+/// "auth disabled"), `Err(...)` when the var is set but invalid
+/// (so operators see a typo at boot instead of a silent fallback).
+fn auth_hmac_key_from_env() -> Result<Option<Vec<u8>>, String> {
+    use base64::Engine;
+
+    let Some(encoded) = non_empty_env("SESSION_HMAC_KEY") else {
+        return Ok(None);
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map(Some)
+        .map_err(|e| format!("SESSION_HMAC_KEY is not valid base64: {e}"))
 }
 
 /// Assemble the `ObjectStoreRouter` from environment variables.
@@ -793,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_200_with_version_and_sha() {
-        let app = build_router(test_server(), CancellationToken::new());
+        let app = build_router(test_server(), None, CancellationToken::new());
         let resp = app
             .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
             .await
@@ -831,7 +938,7 @@ mod tests {
     /// while the same preflight to `/mcp` should.
     #[tokio::test]
     async fn cors_is_scoped_to_mcp_and_does_not_leak_to_healthz() {
-        let app = build_router(test_server(), CancellationToken::new());
+        let app = build_router(test_server(), None, CancellationToken::new());
 
         let mcp_preflight = app
             .clone()
@@ -880,7 +987,7 @@ mod tests {
     /// the negotiated protocol version + the server's identity.
     #[tokio::test]
     async fn mcp_post_initialize_returns_2025_11_25_with_gateway_identity() {
-        let app = build_router(test_server(), CancellationToken::new());
+        let app = build_router(test_server(), None, CancellationToken::new());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
