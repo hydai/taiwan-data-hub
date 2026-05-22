@@ -83,6 +83,12 @@ impl ApiKeyRepo for InMemoryApiKeyRepo {
             }
         }
         let id = Uuid::now_v7();
+        // Mirror the production INSERT: `created_at` comes from
+        // `new.created_at` (the caller-supplied `now`), NOT a
+        // fresh `Utc::now()`. The fake's row keeps the same
+        // single-clock-source invariant as the real table —
+        // exercising the production audit-timeline guarantee
+        // even in tests.
         let row = Row {
             id,
             user_id: new.user_id,
@@ -91,7 +97,7 @@ impl ApiKeyRepo for InMemoryApiKeyRepo {
             key_hash: new.key_hash,
             scopes: new.scopes,
             rate_limit_tier: new.rate_limit_tier,
-            created_at: Utc::now(),
+            created_at: new.created_at,
             last_used_at: None,
             revoked_at: None,
         };

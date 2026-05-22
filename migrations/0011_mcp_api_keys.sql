@@ -48,14 +48,26 @@ CREATE TABLE mcp_api_keys (
     -- ENUM) so adding a new tier is a one-line CHECK update
     -- instead of an ALTER TYPE round trip.
     rate_limit_tier TEXT         NOT NULL DEFAULT 'free',
+    -- `DEFAULT now()` is a SAFETY NET for direct SQL writers
+    -- (manual psql, future backfill). The auth crate ALWAYS
+    -- binds `created_at` explicitly from the same wall-clock
+    -- value it uses for subsequent `last_used_at` and
+    -- `revoked_at` writes — without that, the DB clock and
+    -- app clock can diverge enough to record `last_used_at <
+    -- created_at` on the very first touch (and corrupt the
+    -- "active sessions" UI's ordering). Mirrors the #4.5
+    -- session-row fix.
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     -- Touched by the #4.7 rate-limit middleware on every
     -- authenticated request that carries this key. NULL for a
     -- freshly-minted key that has not yet been used. The audit
-    -- timeline `created_at <= last_used_at` is monotonic — the
-    -- middleware uses `GREATEST(last_used_at, $now)` to defend
-    -- against multi-instance clock skew, mirroring the
-    -- `sessions` table pattern from #4.5.
+    -- timeline `created_at <= last_used_at` is monotonic
+    -- because (a) the auth crate captures one `Utc::now()` per
+    -- issue and reuses it for the row's `created_at`, and (b)
+    -- the middleware uses `GREATEST(last_used_at, $now)` to
+    -- defend against multi-instance clock skew so each
+    -- subsequent touch can only advance the column. Single
+    -- clock source + monotonic clamp = the invariant holds.
     last_used_at    TIMESTAMPTZ,
     -- Set on revoke / rotate. A NULL value means the key is
     -- valid. The lookup predicate is `revoked_at IS NULL` so

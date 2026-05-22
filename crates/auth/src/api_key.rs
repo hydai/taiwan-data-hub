@@ -209,6 +209,14 @@ impl ApiKeyService {
             &body[..API_KEY_PREFIX_VISIBLE_CHARS]
         );
 
+        // Single wall-clock source for the whole row, mirroring
+        // the #4.5 session-row pattern. `created_at` is the
+        // anchor — every subsequent `last_used_at` and
+        // `revoked_at` update reads `Utc::now()` again, so
+        // sharing the clock here keeps the audit timeline
+        // `created_at <= last_used_at <= revoked_at` true even
+        // under app/DB clock skew.
+        let now = Utc::now();
         let id = self
             .keys
             .insert_api_key(NewApiKey {
@@ -218,6 +226,7 @@ impl ApiKeyService {
                 key_hash,
                 scopes: scopes.to_vec(),
                 rate_limit_tier: rate_limit_tier.to_owned(),
+                created_at: now,
             })
             .await
             .map_err(AuthError::Storage)?;

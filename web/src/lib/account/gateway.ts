@@ -44,19 +44,66 @@ export function rotateApiKeyUrl(base: string, id: string): string {
 }
 
 /**
- * Forward the inbound request's `Cookie:` header so SvelteKit's
- * server-side `fetch` carries the user's session cookie through
- * to the gateway. SvelteKit's `event.fetch` does this
- * automatically for same-origin requests; this helper exists for
- * the cross-origin case (compose deployment where `web` and
+ * Cookie name the auth crate sets via `SESSION_COOKIE_NAME`.
+ * Forwarded by [`withCookieHeader`] when present on the inbound
+ * request. Kept in lockstep with `auth::SESSION_COOKIE_NAME` on
+ * the Rust side — a future rename needs to touch both.
+ */
+export const FORWARDED_COOKIE_NAME = 'tdh_session';
+
+/**
+ * Forward the user's session cookie (and ONLY that cookie) to
+ * the gateway. SvelteKit's `event.fetch` carries cookies through
+ * automatically for same-origin requests; this helper exists
+ * for the cross-origin case (compose deployment where `web` and
  * `gateway` run on different domains).
+ *
+ * Why filter to a single cookie instead of copying the whole
+ * `Cookie:` header: the gateway only ever needs the session
+ * cookie. Forwarding every cookie the page set (analytics IDs,
+ * feature flags, anti-CSRF tokens, etc.) widens the leak
+ * surface to any other origin the gateway URL might
+ * accidentally point at via a misconfigured
+ * `GATEWAY_HTTP_URL`. Filtering at the helper makes "minimum
+ * necessary cookies" the default for every action handler.
  */
 export function withCookieHeader(headers: Headers, cookieHeader: string | null): Headers {
 	const copy = new Headers(headers);
-	if (cookieHeader) {
-		copy.set('cookie', cookieHeader);
+	if (cookieHeader === null) {
+		return copy;
+	}
+	const sessionValue = extractCookie(cookieHeader, FORWARDED_COOKIE_NAME);
+	if (sessionValue !== null) {
+		copy.set('cookie', `${FORWARDED_COOKIE_NAME}=${sessionValue}`);
 	}
 	return copy;
+}
+
+/**
+ * Extract a single cookie value from an inbound `Cookie:`
+ * header string. Returns `null` when the cookie is absent or
+ * its value is empty.
+ *
+ * Implemented inline rather than depending on a cookie parser
+ * because the surface is tiny (split on `;`, trim, match the
+ * exact name) and a dep would add weight for one helper. RFC
+ * 6265's quoted-value form is NOT supported because session
+ * cookies don't use it; if a future cookie does, this helper
+ * needs upgrading.
+ */
+function extractCookie(header: string, name: string): string | null {
+	for (const pair of header.split(';')) {
+		const trimmed = pair.trim();
+		const eq = trimmed.indexOf('=');
+		if (eq <= 0) {
+			continue;
+		}
+		if (trimmed.substring(0, eq) === name) {
+			const value = trimmed.substring(eq + 1).trim();
+			return value.length === 0 ? null : value;
+		}
+	}
+	return null;
 }
 
 /**

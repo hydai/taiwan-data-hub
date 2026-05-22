@@ -33,6 +33,16 @@ pub struct NewApiKey {
     /// Rate-limit tier (`free` / `pro` / `enterprise`). The
     /// table-level CHECK constraint enforces the allowed set.
     pub rate_limit_tier: String,
+    /// Wall-clock `now` the auth crate captured for this issue.
+    /// Bound to `created_at` so it shares the clock source with
+    /// every subsequent `last_used_at` / `revoked_at` update
+    /// (which the auth crate also passes `Utc::now()` into).
+    /// Mirrors the #4.5 session-row pattern: under app/DB clock
+    /// skew the audit timeline `created_at <= last_used_at`
+    /// would otherwise be violatable on the very first touch.
+    /// The table's `DEFAULT now()` stays as a safety net for
+    /// direct SQL writers that don't supply a value.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Row shape returned by list / verify lookups. Cleartext key is
@@ -99,15 +109,21 @@ impl ApiKeyRepo for Storage {
     async fn insert_api_key(&self, new: NewApiKey) -> Result<Uuid, StorageError> {
         // `id` defaults to `uuidv7()` from the table definition;
         // the RETURNING clause hands the generated UUID back to
-        // the caller in a single round trip. `created_at` rides
-        // its `DEFAULT now()` — for API keys (unlike sessions),
-        // there is no app-clock expiry to keep aligned with, so
-        // letting the DB clock own `created_at` is fine.
+        // the caller in a single round trip.
+        //
+        // `created_at` is bound EXPLICITLY from
+        // `new.created_at` (the auth crate's single per-issue
+        // `now`) so it shares the wall-clock source with every
+        // subsequent `last_used_at` / `revoked_at` write —
+        // mirroring the #4.5 session-row fix. The table's
+        // `DEFAULT now()` remains as a safety net for direct
+        // SQL writers (manual psql, future backfills) that
+        // skip this column.
         let row: (Uuid,) = sqlx::query_as(
             "INSERT INTO mcp_api_keys
                 (user_id, name, key_prefix, key_hash,
-                 scopes, rate_limit_tier)
-             VALUES ($1, $2, $3, $4, $5, $6)
+                 scopes, rate_limit_tier, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              RETURNING id",
         )
         .bind(new.user_id)
@@ -116,6 +132,7 @@ impl ApiKeyRepo for Storage {
         .bind(&new.key_hash)
         .bind(&new.scopes)
         .bind(&new.rate_limit_tier)
+        .bind(new.created_at)
         .fetch_one(self.pool())
         .await
         // SQLSTATE 23505 on the hash column means a SHA-256
