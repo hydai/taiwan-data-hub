@@ -228,9 +228,13 @@ impl QueryRowsTool {
             return;
         };
         // Bound the recorder write with its own short deadline.
-        // A slow/hung Postgres must not let telemetry overrun the
-        // outer `QUERY_TIMEOUT` — the user's query already
-        // completed at this point, recording is best-effort.
+        // This call runs *before* parquet_path_for_query and the
+        // Polars execution (so cache misses also get recorded),
+        // so a slow/hung Postgres could otherwise add unbounded
+        // latency *before* the user query even starts. The 500ms
+        // cap keeps that latency tight and lets the outer
+        // `QUERY_TIMEOUT` stay meaningful. Best-effort: a write
+        // failure (or timeout) logs and continues.
         // Bind the NewUsageRecord to a named local so it outlives
         // the future created by `record_usage`.
         let record = NewUsageRecord {
@@ -628,7 +632,7 @@ mod tests {
     #[derive(Default, Clone)]
     struct StubRecorder {
         calls: Arc<Mutex<Vec<(Uuid, String)>>>,
-        fail_next: Arc<Mutex<bool>>,
+        fail_always: Arc<Mutex<bool>>,
     }
 
     impl StubRecorder {
@@ -643,7 +647,7 @@ mod tests {
             &self,
             record: &storage::NewUsageRecord<'_>,
         ) -> Result<Uuid, StorageError> {
-            if *self.fail_next.lock().unwrap() {
+            if *self.fail_always.lock().unwrap() {
                 return Err(StorageError::InvalidArgument(
                     "test-injected failure".into(),
                 ));
@@ -1030,7 +1034,7 @@ mod tests {
         let (_dir, path) = write_fixture_parquet();
         let cache_ref = cache_ref_for(&path);
         let recorder = StubRecorder::default();
-        *recorder.fail_next.lock().unwrap() = true;
+        *recorder.fail_always.lock().unwrap() = true;
         let tool =
             QueryRowsTool::new(StubLookup::new(Some(cache_ref))).with_recorder(Arc::new(recorder));
         let out = tool
