@@ -69,7 +69,10 @@ const SCOPES: &str = "openid email";
 /// but advertises the new ones well in advance, so a generous
 /// in-process TTL is fine — the cost of a missed rotation is one
 /// extra failed login that re-fetches.
-pub const JWKS_TTL: Duration = Duration::from_secs(60 * 60);
+///
+/// Module-private — there is no external API contract on this
+/// value; future tuning happens in-tree.
+pub(crate) const JWKS_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Production-shape Google OIDC provider.
 #[derive(Clone)]
@@ -312,14 +315,14 @@ impl GoogleProvider {
             )));
         }
         let access_token = body.access_token.ok_or_else(|| {
-            AuthError::OAuthExchange(
-                "token endpoint returned 200 with no access_token and no error".to_owned(),
-            )
+            AuthError::OAuthExchange(format!(
+                "token endpoint returned {status} with no access_token and no error"
+            ))
         })?;
         let id_token = body.id_token.ok_or_else(|| {
-            AuthError::OAuthExchange(
-                "token endpoint returned 200 with no id_token (OIDC required)".to_owned(),
-            )
+            AuthError::OAuthExchange(format!(
+                "token endpoint returned {status} with no id_token (OIDC required)"
+            ))
         })?;
         Ok(ExchangedToken {
             access_token,
