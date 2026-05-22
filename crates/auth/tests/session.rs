@@ -166,7 +166,8 @@ async fn issue_then_authenticate_round_trip() {
         .unwrap();
 
     // Cookie value is `<base64url(token)>.<base64url(hmac)>` —
-    // 43 chars (32 random bytes) + `.` + 43 chars (sha256 tag).
+    // 43 chars (32 random token bytes) + `.` + 43 chars
+    // (HMAC-SHA-256 tag, also 32 bytes).
     let (token, tag) = issued.cookie_value.split_once('.').unwrap();
     assert_eq!(token.len(), 43, "token base64url is 43 chars");
     assert_eq!(tag.len(), 43, "HMAC-SHA256 tag base64url is 43 chars");

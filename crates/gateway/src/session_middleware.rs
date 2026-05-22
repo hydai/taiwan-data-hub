@@ -116,30 +116,47 @@ fn extract_session_cookie(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Build the `Set-Cookie` header value for a freshly-issued
-/// session. Attrs follow the spec: `HttpOnly` (no JS access),
-/// `Secure` (HTTPS only — set unconditionally; the gateway is
-/// always behind TLS in any non-`personal` deployment),
-/// `SameSite=Lax` (lets top-level GET redirects through, blocks
-/// cross-site POSTs), `Path=/`, `Max-Age=<ttl_seconds>`.
+/// session. Attrs:
+///
+/// - `HttpOnly` (no JS access) — always.
+/// - `Secure` (HTTPS only) — ONLY when `secure` is `true`. The
+///   production gateway is behind TLS so `secure=true` is the
+///   default; local dev / staging on plain `http://` (e.g.
+///   docker-compose mapping `:8080`) needs `secure=false` or
+///   browsers won't send the cookie back at all.
+/// - `SameSite=Lax` (lets top-level GET redirects through,
+///   blocks cross-site POSTs) — always.
+/// - `Path=/` — always.
+/// - `Max-Age=<ttl_seconds>` — always.
+///
+/// The `secure` flag is driven by config (e.g.
+/// `TDH_INSECURE_COOKIES=1` for local dev). Defaulting to
+/// `true` in production code matches the security-first posture;
+/// the dev override is opt-in.
 ///
 /// `max_age_seconds` is `u64` — RFC 6265 §5.2.2 defines
-/// `Max-Age` as a non-zero positive integer; a signed type would
-/// let a negative value through, which most browsers interpret
-/// as "delete the cookie immediately" and would silently log
-/// the user out the moment the cookie is set.
+/// `Max-Age` as a non-zero positive integer; a signed type
+/// would let a negative value through, which most browsers
+/// interpret as "delete the cookie immediately" and would
+/// silently log the user out the moment the cookie is set.
 #[must_use]
-pub fn build_session_cookie(cookie_value: &str, max_age_seconds: u64) -> String {
+pub fn build_session_cookie(cookie_value: &str, max_age_seconds: u64, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_seconds}"
+        "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age={max_age_seconds}"
     )
 }
 
 /// `Set-Cookie` for clearing the session cookie (logout). Same
 /// attrs as the issue path so browsers match the cookie when
-/// computing replacement; `Max-Age=0` evicts immediately.
+/// computing replacement; `Max-Age=0` evicts immediately. The
+/// `secure` flag MUST match what was used at issue time —
+/// otherwise the browser may treat the new cookie as a distinct
+/// cookie and skip the replacement.
 #[must_use]
-pub fn build_clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0")
+pub fn build_clear_session_cookie(secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE_NAME}=; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age=0")
 }
 
 /// Convenience alias the `#4.6` handler wiring extracts via
@@ -194,7 +211,7 @@ mod tests {
 
     #[test]
     fn build_session_cookie_has_required_attrs() {
-        let s = build_session_cookie("tok", 1_209_600);
+        let s = build_session_cookie("tok", 1_209_600, true);
         assert!(s.contains("HttpOnly"));
         assert!(s.contains("Secure"));
         assert!(s.contains("SameSite=Lax"));
@@ -204,9 +221,30 @@ mod tests {
     }
 
     #[test]
+    fn build_session_cookie_omits_secure_when_disabled() {
+        // Local dev / staging on plain HTTP needs the cookie to
+        // ride over `http://` requests; that means dropping the
+        // `Secure` attr. The other attrs must remain.
+        let s = build_session_cookie("tok", 60, false);
+        assert!(s.contains("HttpOnly"));
+        assert!(!s.contains("Secure"), "Secure must be absent: {s}");
+        assert!(s.contains("SameSite=Lax"));
+        assert!(s.contains("Path=/"));
+        assert!(s.contains("Max-Age=60"));
+    }
+
+    #[test]
     fn build_clear_session_cookie_uses_zero_max_age() {
-        let s = build_clear_session_cookie();
+        let s = build_clear_session_cookie(true);
         assert!(s.contains("Max-Age=0"));
+        assert!(s.contains("Secure"));
         assert!(s.starts_with("tdh_session=;"));
+    }
+
+    #[test]
+    fn build_clear_session_cookie_omits_secure_when_disabled() {
+        let s = build_clear_session_cookie(false);
+        assert!(s.contains("Max-Age=0"));
+        assert!(!s.contains("Secure"));
     }
 }

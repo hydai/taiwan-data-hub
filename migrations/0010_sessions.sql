@@ -47,10 +47,11 @@ CREATE TABLE sessions (
     -- Spec ("max 14d total") lives here.
     absolute_expires_at TIMESTAMPTZ NOT NULL,
     -- Set on logout / forced revocation. A NULL value means the
-    -- session is still valid (subject to expires_at). The lookup
-    -- predicate filters on `revoked_at IS NULL AND expires_at >
-    -- now()` so revoke + expiry both surface the same way to
-    -- callers.
+    -- session is still valid (subject to expires_at AND
+    -- absolute_expires_at). The lookup predicate is
+    -- `revoked_at IS NULL AND expires_at > now() AND
+    -- absolute_expires_at > now()` — revoke, idle expiry, and
+    -- hard cap all surface the same way (no row returned).
     revoked_at        TIMESTAMPTZ,
     -- Best-effort audit metadata. NULL when the gateway couldn't
     -- determine the value (e.g. a misconfigured reverse proxy
