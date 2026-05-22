@@ -51,8 +51,16 @@ export function parseConfigResponse(value: unknown): ConfigResponse | null {
  * Narrow an arbitrary JSON value into a [`MeResponse`].
  * `user: null` is the documented anonymous shape; the
  * authenticated branch checks for the three documented user
- * fields. Returns `null` on shape mismatch so the caller can
- * surface a typed error.
+ * fields.
+ *
+ * Returns `null` for any shape mismatch. The current
+ * `+layout.server.ts` caller treats that as "unexpected
+ * response from the gateway" — logs the cause server-side
+ * via `console.error` and falls back to `user: null` so the
+ * layout still renders. A future caller that wants to
+ * distinguish "expected anonymous" (`{ user: null }`) from
+ * "malformed response" (parser returned `null`) can branch
+ * explicitly on the parse result.
  */
 export function parseMeResponse(value: unknown): MeResponse | null {
 	if (value === null || typeof value !== 'object') {

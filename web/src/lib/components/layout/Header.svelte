@@ -17,6 +17,7 @@
 	import { navLinks } from '$lib/components/layout/nav-links';
 	import { cn } from '$lib/utils';
 	import type { MeUser } from '$lib/gateway/config';
+	import type { GatewayMode } from '$lib/gateway/types';
 
 	export type Locale = 'zh-TW' | 'en';
 
@@ -26,7 +27,7 @@
 		/** Toggle the overlay open ↔ closed. */
 		onToggleMenu: () => void;
 		/** Operating mode from the gateway; "personal" hides auth UI. */
-		mode: 'personal' | 'multi-user';
+		mode: GatewayMode;
 		/** Active session's user identity, or `null` for anonymous /
 		 * personal-mode requests. When non-null and `mode === 'multi-user'`
 		 * the header renders the signed-in cluster (user id chip +

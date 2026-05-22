@@ -509,7 +509,14 @@ fn build_auth_router_if_available(
     // disabled-reason lines above. Operators grepping for
     // "api-keys" in the boot log see exactly one of these
     // five outcomes.
-    tracing::info!("api-keys subrouter enabled at /v1/api-keys; /api/v1/me session-gated");
+    // `/api/v1/me` is session-AWARE (returns `{ user: null }`
+    // for anonymous requests via `Option<Extension<…>>` —
+    // see `api_routes::get_me`), not session-REQUIRED. The
+    // log line uses "session middleware mounted" so operators
+    // don't misread this as a 401-on-anonymous endpoint.
+    tracing::info!(
+        "api-keys subrouter enabled at /v1/api-keys; /api/v1/me has session middleware mounted"
+    );
     Some(authed)
 }
 
