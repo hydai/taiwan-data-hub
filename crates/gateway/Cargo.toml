@@ -17,10 +17,12 @@ workspace = true
 # binding lives in a single crate; do not add a direct `rmcp` dep here.
 mcp-core = { path = "../mcp-core" }
 object-store = { path = "../object-store" }
+shared = { path = "../shared" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 tools-utility = { path = "../tools-utility" }
 axum = { workspace = true }
+clap = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tower = { workspace = true }

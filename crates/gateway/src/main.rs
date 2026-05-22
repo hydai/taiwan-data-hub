@@ -5,12 +5,20 @@
 //! backward-compat SSE upgrade). The MCP dispatcher is shared with the
 //! stdio shim: both transports talk to the same `mcp_core::McpServer`, so
 //! tools register once and reach every client.
+//!
+//! Two subcommands are exposed via clap (#4.1):
+//!
+//! - `serve` (default) — long-running HTTP listener
+//! - `doctor` — parses every env knob the binary reads, reports what
+//!   would and would not be wired, and exits non-zero on a hard config
+//!   error so operators can catch typos before a redeploy.
 
-use std::net::SocketAddr;
+use std::net::{AddrParseError, SocketAddr};
 
 use anyhow::Context;
 use axum::http::{HeaderName, Method, header};
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
+use clap::{Parser, Subcommand};
 use mcp_core::rmcp::model::Implementation;
 use mcp_core::rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -18,6 +26,7 @@ use mcp_core::rmcp::transport::streamable_http_server::{
 use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
 use object_store::{LocalFsObjectStore, ObjectStore, S3Credentials, S3ObjectStore};
 use serde::Serialize;
+use shared::Mode;
 use std::sync::Arc;
 use storage::Storage;
 use tokio::net::TcpListener;
@@ -38,6 +47,35 @@ const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 /// Custom header per the MCP 2025-11-25 Streamable HTTP spec — used to bind
 /// a session across multiple HTTP requests.
 const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
+
+/// HTTP routes the gateway always exposes without auth. The `serve`
+/// boot log prints this list so operators can sanity-check what is
+/// reachable; the `doctor` subcommand reuses the same source of truth
+/// so the two outputs cannot disagree.
+const PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "taiwan-data-hub",
+    version = PKG_VERSION,
+    about = "Taiwan Data Hub HTTP + MCP gateway",
+    long_about = None,
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the long-lived HTTP + MCP gateway (default if no
+    /// subcommand is given).
+    Serve,
+    /// Validate every env var the gateway reads and print a
+    /// human-readable report. Exits 0 when the config is consistent,
+    /// 1 when a hard error is detected.
+    Doctor,
+}
 
 #[derive(Serialize)]
 struct HealthBody {
@@ -162,10 +200,23 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    let addr: SocketAddr = std::env::var("GATEWAY_ADDR")
-        .unwrap_or_else(|_| DEFAULT_ADDR.to_owned())
-        .parse()
-        .context("GATEWAY_ADDR must be a valid socket address (host:port)")?;
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve().await,
+        Command::Doctor => doctor(),
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
+    let mode = Mode::from_env().context("invalid MODE env var")?;
+    let addr = read_gateway_addr()?;
+
+    info!(
+        mode = mode.as_str(),
+        public_routes = PUBLIC_ROUTES.join(","),
+        gated_routes = gated_route_list(mode),
+        "operating mode resolved"
+    );
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
@@ -199,6 +250,28 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("axum server crashed")?;
 
+    Ok(())
+}
+
+/// Validates the gateway's env knobs and prints a human-readable
+/// report. Connection probes are deliberately out of scope: doctor
+/// must run usefully in CI and on a fresh laptop where Postgres /
+/// `SeaweedFS` aren't reachable. What it catches:
+///
+/// - invalid `MODE` value
+/// - malformed `GATEWAY_ADDR`
+/// - malformed object-store URLs
+/// - partially-configured S3 credentials (some set, some missing)
+///
+/// Exits 1 on any hard error so a CI smoke test can `--fail-fast`
+/// before a redeploy.
+fn doctor() -> anyhow::Result<()> {
+    let report = DoctorReport::collect();
+    println!("{report}");
+    let err_count = report.error_count();
+    if err_count > 0 {
+        anyhow::bail!("doctor found {err_count} config error(s); see report above");
+    }
     Ok(())
 }
 
@@ -313,6 +386,27 @@ fn non_empty_env(key: &str) -> Option<String> {
     }
 }
 
+/// Parse `GATEWAY_ADDR` from env (or the default) into a `SocketAddr`.
+/// Extracted so `serve` and `doctor` share the same error wording.
+fn read_gateway_addr() -> anyhow::Result<SocketAddr> {
+    std::env::var("GATEWAY_ADDR")
+        .unwrap_or_else(|_| DEFAULT_ADDR.to_owned())
+        .parse()
+        .context("GATEWAY_ADDR must be a valid socket address (host:port)")
+}
+
+/// Returns the comma-separated list of routes that require auth in
+/// the given mode. Auth middleware lands in #4.5 — until then both
+/// modes serve every route publicly, so this returns `""` for
+/// `Personal` and `"<pending #4.5>"` for `MultiUser`. The string is
+/// stable enough to grep for in operator logs.
+fn gated_route_list(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Personal => "",
+        Mode::MultiUser => "<pending #4.5>",
+    }
+}
+
 /// Returns when the process receives SIGINT or SIGTERM. Cancels the shared
 /// MCP cancellation token first so any in-flight `/mcp` sessions abort
 /// cleanly, then lets axum drain HTTP requests.
@@ -328,6 +422,211 @@ async fn shutdown_signal(cancel: CancellationToken) {
     }
 
     cancel.cancel();
+}
+
+// -------- doctor report ------------------------------------------------
+
+/// Findings from one `doctor` run. Held as data (not printed
+/// inline) so the report struct can be unit-tested without
+/// capturing stdout.
+#[derive(Debug, Default)]
+struct DoctorReport {
+    entries: Vec<DoctorEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorEntry {
+    label: String,
+    status: DoctorStatus,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    /// Config is valid and present.
+    Ok,
+    /// Config is absent but the binary tolerates that (e.g. no
+    /// `DATABASE_URL` in a personal-mode install). Always rendered
+    /// `info`, never an error.
+    Info,
+    /// Config is present but malformed, partial, or contradictory.
+    /// Counts toward [`DoctorReport::has_errors`] so the process
+    /// exits non-zero.
+    Error,
+}
+
+impl DoctorReport {
+    fn collect() -> Self {
+        let mut report = Self::default();
+        report.check_mode();
+        report.check_gateway_addr();
+        report.check_database_url();
+        report.check_object_store();
+        report.check_s3();
+        report
+    }
+
+    fn error_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.status == DoctorStatus::Error)
+            .count()
+    }
+
+    #[cfg(test)]
+    fn has_errors(&self) -> bool {
+        self.error_count() > 0
+    }
+
+    fn push(&mut self, label: &str, status: DoctorStatus, detail: impl Into<String>) {
+        self.entries.push(DoctorEntry {
+            label: label.to_owned(),
+            status,
+            detail: detail.into(),
+        });
+    }
+
+    fn check_mode(&mut self) {
+        match Mode::from_env() {
+            Ok(mode) => self.push(
+                "MODE",
+                DoctorStatus::Ok,
+                format!(
+                    "{mode} (public: {}; gated: {})",
+                    PUBLIC_ROUTES.join(","),
+                    match gated_route_list(mode) {
+                        "" => "<none>",
+                        s => s,
+                    }
+                ),
+            ),
+            Err(e) => self.push("MODE", DoctorStatus::Error, e.to_string()),
+        }
+    }
+
+    fn check_gateway_addr(&mut self) {
+        let raw = std::env::var("GATEWAY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
+        match raw.parse::<SocketAddr>() {
+            Ok(addr) => self.push("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
+            Err(e) => self.push(
+                "GATEWAY_ADDR",
+                DoctorStatus::Error,
+                format_addr_error(&raw, &e),
+            ),
+        }
+    }
+
+    fn check_database_url(&mut self) {
+        match non_empty_env("DATABASE_URL") {
+            None => self.push(
+                "DATABASE_URL",
+                DoctorStatus::Info,
+                "unset — DB-backed tools will be disabled".to_owned(),
+            ),
+            Some(raw) => match Url::parse(&raw) {
+                Ok(_) => self.push(
+                    "DATABASE_URL",
+                    DoctorStatus::Ok,
+                    "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)".to_owned(),
+                ),
+                Err(e) => self.push(
+                    "DATABASE_URL",
+                    DoctorStatus::Error,
+                    format!("not a valid URL: {e}"),
+                ),
+            },
+        }
+    }
+
+    fn check_object_store(&mut self) {
+        let base = non_empty_env("OBJECT_STORE_BASE_URL");
+        let secret = non_empty_env("OBJECT_STORE_SIGNING_SECRET");
+        match (base, secret) {
+            (None, None) => self.push(
+                "OBJECT_STORE_*",
+                DoctorStatus::Info,
+                "unset — file:// URIs unavailable".to_owned(),
+            ),
+            (Some(_), None) | (None, Some(_)) => self.push(
+                "OBJECT_STORE_*",
+                DoctorStatus::Error,
+                "partial config: both OBJECT_STORE_BASE_URL and OBJECT_STORE_SIGNING_SECRET must be set together".to_owned(),
+            ),
+            (Some(b), Some(_)) => match Url::parse(&b) {
+                Ok(_) => self.push(
+                    "OBJECT_STORE_*",
+                    DoctorStatus::Ok,
+                    format!("base={b}"),
+                ),
+                Err(e) => self.push(
+                    "OBJECT_STORE_BASE_URL",
+                    DoctorStatus::Error,
+                    format!("not a valid URL: {e}"),
+                ),
+            },
+        }
+    }
+
+    fn check_s3(&mut self) {
+        let endpoint = non_empty_env("S3_ENDPOINT");
+        let region = non_empty_env("S3_REGION");
+        let key = non_empty_env("S3_ACCESS_KEY_ID");
+        let secret = non_empty_env("S3_SECRET_ACCESS_KEY");
+        let any = endpoint.is_some() || region.is_some() || key.is_some() || secret.is_some();
+        let all = endpoint.is_some() && region.is_some() && key.is_some() && secret.is_some();
+        if !any {
+            self.push(
+                "S3_*",
+                DoctorStatus::Info,
+                "unset — s3:// URIs unavailable".to_owned(),
+            );
+            return;
+        }
+        if !all {
+            self.push(
+                "S3_*",
+                DoctorStatus::Error,
+                "partial config: S3_ENDPOINT, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY must be set together".to_owned(),
+            );
+            return;
+        }
+        let endpoint = endpoint.expect("checked above");
+        match Url::parse(&endpoint) {
+            Ok(_) => self.push("S3_*", DoctorStatus::Ok, format!("endpoint={endpoint}")),
+            Err(e) => self.push(
+                "S3_ENDPOINT",
+                DoctorStatus::Error,
+                format!("not a valid URL: {e}"),
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for DoctorReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "taiwan-data-hub doctor (gateway v{PKG_VERSION})")?;
+        writeln!(f, "build_sha={GIT_SHA}")?;
+        writeln!(f, "---")?;
+        for entry in &self.entries {
+            let marker = match entry.status {
+                DoctorStatus::Ok => "[ok]",
+                DoctorStatus::Info => "[info]",
+                DoctorStatus::Error => "[error]",
+            };
+            writeln!(f, "{marker} {}: {}", entry.label, entry.detail)?;
+        }
+        let err_count = self.error_count();
+        writeln!(f, "---")?;
+        if err_count == 0 {
+            writeln!(f, "all checks passed")
+        } else {
+            writeln!(f, "{err_count} error(s) — fix and re-run")
+        }
+    }
+}
+
+fn format_addr_error(raw: &str, e: &AddrParseError) -> String {
+    format!("{raw:?}: {e}")
 }
 
 #[cfg(test)]
@@ -502,5 +801,39 @@ mod tests {
             session.is_some(),
             "Mcp-Session-Id must be set on the initialize response"
         );
+    }
+
+    #[test]
+    fn gated_route_list_distinguishes_modes() {
+        assert_eq!(gated_route_list(Mode::Personal), "");
+        assert_eq!(gated_route_list(Mode::MultiUser), "<pending #4.5>");
+    }
+
+    #[test]
+    fn doctor_report_marks_partial_s3_as_error() {
+        let mut report = DoctorReport::default();
+        report.push("S3_*", DoctorStatus::Error, "partial config");
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn doctor_report_with_only_ok_and_info_does_not_error() {
+        let mut report = DoctorReport::default();
+        report.push("MODE", DoctorStatus::Ok, "personal");
+        report.push("DATABASE_URL", DoctorStatus::Info, "unset");
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn doctor_report_display_renders_markers_and_summary() {
+        let mut report = DoctorReport::default();
+        report.push("MODE", DoctorStatus::Ok, "personal");
+        report.push("X", DoctorStatus::Info, "unset");
+        report.push("Y", DoctorStatus::Error, "boom");
+        let rendered = format!("{report}");
+        assert!(rendered.contains("[ok] MODE: personal"));
+        assert!(rendered.contains("[info] X: unset"));
+        assert!(rendered.contains("[error] Y: boom"));
+        assert!(rendered.contains("1 error"));
     }
 }
