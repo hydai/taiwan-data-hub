@@ -115,9 +115,15 @@
 				>
 					Account
 				</a>
+				<!-- Both the visible chip AND the tooltip use the
+				     shortened id — the tooltip used to spell the
+				     full UUID, which defeated the "don't leak the
+				     full id into the DOM" intent of the chip
+				     itself. The 8-char prefix is enough for SR
+				     users / shared-device disambiguation. -->
 				<span
 					class="rounded-full bg-primary-50 px-2.5 py-1 font-mono text-xs font-medium text-primary-700"
-					title={`Signed in as user ${user.user_id}`}
+					title={`Signed in as user ${shortUserId}…`}
 					data-testid="header-user-chip"
 				>
 					{shortUserId}…
