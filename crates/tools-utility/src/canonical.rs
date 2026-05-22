@@ -14,14 +14,19 @@
 //!  - 改制 mappings re-use the [`crate::address`] tables so the
 //!    address normalizer and the canonicalizer never disagree.
 
-use serde::Serialize;
-
 use crate::address::{COUNTY_ALIASES, strip_county_prefix_exact};
 
 /// Stable identifier for every 直轄市 / 縣 (22 total). The
 /// `as_code()` strings are the wire form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+///
+/// Intentionally does **not** derive `Serialize` — the default
+/// enum representation would emit variant names ("Taipei") or,
+/// with `rename_all = "SCREAMING_SNAKE_CASE"`, "TAIPEI", neither
+/// of which matches the documented stable identifier strings
+/// from `as_code()` (e.g. `ROC_CITY_TAIPEI`). Callers serialising
+/// to JSON should go through `as_code()` so the wire form is
+/// always the canonical string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CountyCode {
     Taipei,     // 台北市
     NewTaipei,  // 新北市
@@ -107,7 +112,12 @@ impl CountyCode {
 /// District canonical code. For v0.1 we bake the 6 直轄市 fully
 /// and surface other counties' districts as `Unknown` (the
 /// county code still resolves correctly).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// No `Serialize` derive for the same reason as `CountyCode`:
+/// the default tagged-enum encoding (`{"Known": "DIST_..."}`)
+/// would diverge from the MCP wire form. The MCP wrapper
+/// converts via `as_code()` → string-or-null.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistrictCode {
     /// District resolved to one of the baked codes (e.g.
     /// `"DIST_BANQIAO"`).
@@ -130,7 +140,11 @@ impl DistrictCode {
 /// Result of [`canonicalize`]. The raw fields are preserved so a
 /// caller can fall back when canonicalisation finds the county
 /// but not the district.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Not `Serialize`-derived for the same reason as the codes
+/// (the wire form needs `as_code()` translation); the MCP
+/// wrapper does that conversion explicitly in `render`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Canonical {
     pub county_code: Option<CountyCode>,
     pub county_name_zh: Option<&'static str>,
@@ -190,6 +204,11 @@ pub fn canonicalize(county_input: &str, district_input: Option<&str>) -> Canonic
     }
 }
 
+/// Drop every whitespace char (ASCII + 全形) and ASCII / 全形
+/// commas. Stripping *internal* whitespace too lets us match
+/// "信義 區" → "信義區" in the table; it's documented behaviour
+/// of this function rather than a trim. `district_raw` echoes
+/// the post-strip form so callers see what was matched against.
 fn strip_whitespace(s: &str) -> String {
     s.chars()
         .filter(|c| !c.is_whitespace() && *c != ',' && *c != '，')
@@ -586,7 +605,8 @@ mod tests {
     #[test]
     fn county_code_as_code_strings_unique() {
         // Locks against accidental code collisions if someone
-        // edits the enum.
+        // edits the enum. Lists *every* variant so a new addition
+        // can't slip through with a duplicated code.
         let codes = [
             CountyCode::Taipei.as_code(),
             CountyCode::NewTaipei.as_code(),
@@ -598,8 +618,20 @@ mod tests {
             CountyCode::Hsinchu.as_code(),
             CountyCode::Chiayi.as_code(),
             CountyCode::HsinchuCo.as_code(),
+            CountyCode::Miaoli.as_code(),
+            CountyCode::Changhua.as_code(),
+            CountyCode::Nantou.as_code(),
+            CountyCode::Yunlin.as_code(),
             CountyCode::ChiayiCo.as_code(),
+            CountyCode::Pingtung.as_code(),
+            CountyCode::Yilan.as_code(),
+            CountyCode::Hualien.as_code(),
+            CountyCode::Taitung.as_code(),
+            CountyCode::Penghu.as_code(),
+            CountyCode::Kinmen.as_code(),
+            CountyCode::Lienchiang.as_code(),
         ];
+        assert_eq!(codes.len(), 22, "all 22 counties must be listed");
         let unique: std::collections::HashSet<_> = codes.iter().collect();
         assert_eq!(codes.len(), unique.len(), "duplicate codes: {codes:?}");
     }

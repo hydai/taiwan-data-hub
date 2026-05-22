@@ -122,8 +122,9 @@ fn input_schema() -> Map<String, Value> {
                 "description": "Free-form county name (post-改制, pre-改制 alias, or 臺 form). Examples: \"台北市\", \"新北市\", \"台中縣\", \"臺北縣\".",
             },
             "district": {
-                "type": "string",
-                "description": "Optional district name (e.g. \"信義區\", \"板橋區\"). When provided, the result includes `district_code`; otherwise `district_code` is null.",
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "Optional district name (e.g. \"信義區\", \"板橋區\"). Pass null or omit the field to get a county-only canonicalisation. Empty/whitespace strings are treated as null.",
             },
         },
         "additionalProperties": false,
