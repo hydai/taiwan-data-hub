@@ -21,6 +21,7 @@ use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use serde_json::{Map, Value, json};
 
 use crate::address::normalize_address;
+use crate::json_helpers::kind_of;
 
 pub const TOOL_NAME: &str = "tw_normalize_address";
 
@@ -78,17 +79,6 @@ fn parse_address(args: &Value) -> Result<String, ToolError> {
             kind_of(other)
         ))),
         None => Err(ToolError::InvalidArguments("missing `address`".into())),
-    }
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }
 

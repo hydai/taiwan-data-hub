@@ -18,6 +18,7 @@ pub mod date;
 pub mod date_tools;
 pub mod dictionaries;
 pub mod dictionary_tools;
+pub mod json_helpers;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;

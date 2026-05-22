@@ -55,6 +55,14 @@ impl Dictionary {
     /// is case-insensitive for ASCII (via `to_ascii_lowercase`
     /// applied uniformly to every field — CJK codepoints pass
     /// through unchanged since they have no case distinction).
+    ///
+    /// **Perf note**: allocates a lowercased `String` per
+    /// entry-field on every call. Acceptable on v0.1's ≤31-entry
+    /// tables (nanoseconds per search) but a hot-path concern
+    /// once #3.6 ETL replaces the baked subsets with full
+    /// registries. v0.2 should precompute the lowercased forms
+    /// (or use a manual ASCII-case-insensitive find loop) so
+    /// search stays cheap as the tables grow.
     #[must_use]
     pub fn search(&self, query: &str, limit: usize) -> Vec<DictEntry> {
         let query_trimmed = query.trim();
@@ -890,6 +898,58 @@ mod tests {
         let hits = BANK_CODES.search("80", 50);
         assert!(hits.iter().all(|e| e.code.starts_with("80")));
         assert!(!hits.is_empty());
+    }
+
+    /// R3 fix: `COUNTY_CODES` is hand-mirrored from
+    /// `canonical::CountyCode::as_code()`. This test enumerates
+    /// every `CountyCode` variant and asserts each appears exactly
+    /// once in the dictionary so a future edit to either side
+    /// can't silently drift.
+    #[test]
+    fn county_codes_dictionary_matches_canonical_county_code_enum() {
+        use crate::canonical::CountyCode;
+        let enum_codes: std::collections::HashSet<&'static str> = [
+            CountyCode::Taipei.as_code(),
+            CountyCode::NewTaipei.as_code(),
+            CountyCode::Taoyuan.as_code(),
+            CountyCode::Taichung.as_code(),
+            CountyCode::Tainan.as_code(),
+            CountyCode::Kaohsiung.as_code(),
+            CountyCode::Keelung.as_code(),
+            CountyCode::Hsinchu.as_code(),
+            CountyCode::Chiayi.as_code(),
+            CountyCode::HsinchuCo.as_code(),
+            CountyCode::Miaoli.as_code(),
+            CountyCode::Changhua.as_code(),
+            CountyCode::Nantou.as_code(),
+            CountyCode::Yunlin.as_code(),
+            CountyCode::ChiayiCo.as_code(),
+            CountyCode::Pingtung.as_code(),
+            CountyCode::Yilan.as_code(),
+            CountyCode::Hualien.as_code(),
+            CountyCode::Taitung.as_code(),
+            CountyCode::Penghu.as_code(),
+            CountyCode::Kinmen.as_code(),
+            CountyCode::Lienchiang.as_code(),
+        ]
+        .into_iter()
+        .collect();
+        let dict_codes: std::collections::HashSet<&'static str> =
+            COUNTY_CODES.entries.iter().map(|e| e.code).collect();
+        assert_eq!(
+            enum_codes.len(),
+            22,
+            "expected 22 enum variants, this test must enumerate them all",
+        );
+        assert_eq!(
+            dict_codes, enum_codes,
+            "COUNTY_CODES dictionary drifted from CountyCode enum — sync them",
+        );
+        assert_eq!(
+            COUNTY_CODES.entries.len(),
+            22,
+            "COUNTY_CODES has a duplicate or missing entry",
+        );
     }
 
     #[test]

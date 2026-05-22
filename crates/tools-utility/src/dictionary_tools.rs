@@ -4,10 +4,14 @@
 //! `&'static Dictionary` plus the wire metadata.
 //!
 //! Wire shape:
-//!  - `get_by_id(code)`: returns the matched entry or
-//!    `ToolError::NotFound`.
-//!  - `search(query, limit?)`: returns an array of entries.
-//!    `limit` defaults to 20, max 100.
+//!  - `get_by_id(code)`: returns the matched entry
+//!    `{code, name, aliases}` or `ToolError::NotFound`.
+//!  - `search(query, limit?)`: returns
+//!    `{count: integer, results: [entry...]}`. The count is the
+//!    length of `results` after the limit was applied (it's the
+//!    "how many matches did the caller actually receive", not
+//!    the total table size or unbounded match count). `limit`
+//!    defaults to 20, max 100.
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
@@ -16,6 +20,7 @@ use serde_json::{Map, Value, json};
 use crate::dictionaries::{
     ADMIN_DIVISIONS, BANK_CODES, COUNTY_CODES, DictEntry, Dictionary, MRT_STATIONS, POSTAL_CODES,
 };
+use crate::json_helpers::kind_of;
 
 const DEFAULT_SEARCH_LIMIT: usize = 20;
 const MAX_SEARCH_LIMIT: usize = 100;
@@ -141,17 +146,6 @@ fn parse_limit(obj: &Map<String, Value>) -> Result<usize, ToolError> {
             "`limit` must be an integer, got {}",
             kind_of(other)
         ))),
-    }
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }
 

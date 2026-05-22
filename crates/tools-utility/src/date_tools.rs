@@ -25,6 +25,7 @@ use crate::date::{
     DateError, SUPPORTED_YEAR_MAX, SUPPORTED_YEAR_MIN, SolarTerm, gregorian_to_lunar,
     gregorian_to_roc, is_national_holiday, roc_to_gregorian, solar_term_for_date,
 };
+use crate::json_helpers::kind_of;
 
 pub const TOOL_ROC_TO_GREGORIAN: &str = "tw_roc_to_gregorian";
 pub const TOOL_GREGORIAN_TO_ROC: &str = "tw_gregorian_to_roc";
@@ -210,17 +211,6 @@ fn parse_integer_field(
         )));
     }
     Ok(num)
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 /// Map a `DateError` into the public `ToolError::InvalidArguments`
