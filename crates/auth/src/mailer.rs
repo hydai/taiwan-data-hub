@@ -12,7 +12,9 @@
 //!   without SMTP can still complete the verify-by-clicking flow
 //!   by reading the log.
 //! - `MemoryMailer` — test double that records every send for
-//!   assertions; only compiled in `#[cfg(test)]`.
+//!   assertions. Exposed unconditionally (NOT behind `cfg(test)`)
+//!   so dependent crates can use it in their own integration
+//!   tests; #4.5's gateway HTTP tests are the first consumer.
 //!
 //! The crate intentionally does NOT shell out to provider-specific
 //! HTTP APIs (Resend, Postmark, …). Those all expose an SMTP

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use auth::{AuthError, AuthService, MailKind, MemoryMailer, verify_password};
+use auth::{AuthError, AuthService, MailKind, MemoryMailer};
 use chrono::{DateTime, Utc};
 use storage::{AuthTokenKind, AuthTokenRepo, StorageError, User, UserRepo};
 use url::Url;
@@ -85,6 +85,32 @@ impl UserRepo for InMemoryUserRepo {
 struct InMemoryAuthTokenRepo {
     /// Keyed by `token_hash` so the consume path is O(1).
     inner: Mutex<HashMap<Vec<u8>, TokenRow>>,
+}
+
+/// `UserRepo` over an `Arc<InMemoryUserRepo>` so a test can hold a
+/// second handle and mutate state out-of-band (e.g. delete a row
+/// after a token is consumed). Lives at module scope because the
+/// workspace's clippy gate rejects items declared after statements
+/// inside a test function.
+struct ArcUserRepo(std::sync::Arc<InMemoryUserRepo>);
+
+#[async_trait]
+impl UserRepo for ArcUserRepo {
+    async fn insert_user(&self, email: &str, hash: &str) -> Result<User, StorageError> {
+        self.0.insert_user(email, hash).await
+    }
+    async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, StorageError> {
+        self.0.find_user_by_email(email).await
+    }
+    async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError> {
+        self.0.find_user_by_id(id).await
+    }
+    async fn mark_email_verified(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.0.mark_email_verified(id).await
+    }
+    async fn update_password_hash(&self, id: Uuid, hash: &str) -> Result<bool, StorageError> {
+        self.0.update_password_hash(id, hash).await
+    }
 }
 
 #[derive(Clone)]
@@ -210,14 +236,17 @@ async fn verify_email_rejects_unknown_token() {
 }
 
 #[tokio::test]
-async fn login_returns_user_on_correct_password() {
+async fn login_returns_redacted_user_on_correct_password() {
     let (svc, _) = build_service();
     svc.register("carol@example.com", "passphrase")
         .await
         .unwrap();
-    let user = svc.login("carol@example.com", "passphrase").await.unwrap();
-    assert_eq!(user.email, "carol@example.com");
-    assert!(verify_password("passphrase", &user.password_hash).unwrap());
+    let authed = svc.login("carol@example.com", "passphrase").await.unwrap();
+    assert_eq!(authed.email, "carol@example.com");
+    // `AuthenticatedUser` deliberately has no `password_hash` field
+    // — that's the entire point of the redacted DTO. If a future
+    // refactor adds it back, this test won't compile.
+    assert!(authed.email_verified_at.is_none());
 }
 
 #[tokio::test]
@@ -292,6 +321,45 @@ async fn request_password_reset_returns_ok_for_unknown_user() {
         .await
         .unwrap();
     assert!(mailer.sent().is_empty());
+}
+
+#[tokio::test]
+async fn reset_password_surfaces_internal_when_user_disappears() {
+    // Regression for Copilot R2: a `reset_password` call that
+    // consumed a valid token but then found the user row gone
+    // used to return `Ok(())` silently. It now bubbles as
+    // `AuthError::Internal` so operators see the race.
+    let users = std::sync::Arc::new(InMemoryUserRepo::default());
+    let tokens = InMemoryAuthTokenRepo::default();
+    let mailer = MemoryMailer::new();
+    let base = Url::parse("https://hub.example").unwrap();
+    // Seed user manually, mint a reset token, then drop the row.
+    let user = users
+        .insert_user("ghost@example.com", "irrelevant-but-valid-PHC")
+        .await
+        .unwrap();
+    let token = auth::generate_token();
+    tokens
+        .insert_auth_token(
+            user.id,
+            AuthTokenKind::PasswordReset,
+            &token.digest,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+    users.inner.lock().unwrap().remove(&user.id);
+
+    // `ArcUserRepo` (at module scope) delegates to the same
+    // `Arc<InMemoryUserRepo>` so the service sees the post-delete
+    // state when it tries `update_password_hash`.
+    let svc = AuthService::new(ArcUserRepo(users), tokens, mailer, base);
+
+    let err = svc
+        .reset_password(&token.cleartext, "new-passphrase")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::Internal(_)));
 }
 
 #[tokio::test]

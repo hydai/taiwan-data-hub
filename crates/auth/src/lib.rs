@@ -24,7 +24,9 @@ mod token;
 pub use error::AuthError;
 pub use mailer::{LogMailer, MailFrom, MailKind, Mailer, MemoryMailer, SentMessage, SmtpMailer};
 pub use password::{hash_password, verify_password};
-pub use service::{AuthService, DEFAULT_RESET_TTL, DEFAULT_VERIFY_TTL, into_arc};
+pub use service::{
+    AuthService, AuthenticatedUser, DEFAULT_RESET_TTL, DEFAULT_VERIFY_TTL, into_arc,
+};
 pub use token::{
     GeneratedToken, TOKEN_ENTROPY_BYTES, TOKEN_HASH_BYTES, digest_token, generate_token,
 };

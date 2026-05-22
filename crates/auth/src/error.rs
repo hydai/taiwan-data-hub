@@ -41,4 +41,18 @@ pub enum AuthError {
     /// sqlx directly.
     #[error(transparent)]
     Storage(#[from] storage::StorageError),
+    /// Service configuration is impossible: e.g. a TTL outside
+    /// `chrono::Duration`'s representable range. Distinct from
+    /// `PasswordHash` (cryptographic) and `Storage` (backend
+    /// reachability) so operator-facing alerts can route the
+    /// "this binary was misconfigured" case separately.
+    #[error("auth service is misconfigured: {0}")]
+    InvalidConfig(String),
+    /// An invariant the auth crate relies on was violated after
+    /// the DB call succeeded — e.g. a verified reset token whose
+    /// owning user row has since been deleted. Always indicates
+    /// a data-integrity bug or an admin-side race; HTTP boundary
+    /// maps to 500.
+    #[error("auth invariant violated: {0}")]
+    Internal(String),
 }

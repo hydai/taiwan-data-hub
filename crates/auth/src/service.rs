@@ -29,14 +29,41 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use storage::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::AuthError;
 use crate::mailer::Mailer;
 use crate::password::{hash_password, verify_dummy, verify_password};
 use crate::token::{digest_token, generate_token};
+
+/// Redacted user view returned to the auth-crate caller. Excludes
+/// `password_hash` so a callback that hand-serialises the
+/// authenticated user into a response (or a `tracing` event)
+/// can't accidentally leak the credential material that
+/// [`storage::User`] carries. Kept distinct from the DB-row type
+/// so the redaction stays a compile-time invariant: future
+/// fields on `storage::User` are opt-in here, not opt-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedUser {
+    pub id: Uuid,
+    pub email: String,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AuthenticatedUser {
+    fn from_row(user: User) -> Self {
+        Self {
+            id: user.id,
+            email: user.email,
+            email_verified_at: user.email_verified_at,
+            created_at: user.created_at,
+        }
+    }
+}
 
 /// Default lifetime for email-verification links (24 hours).
 pub const DEFAULT_VERIFY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -124,7 +151,7 @@ where
         let token = generate_token();
         let expires = Utc::now()
             + chrono::Duration::from_std(self.verify_ttl).map_err(|e| {
-                AuthError::PasswordHash(format!("verify_ttl out of chrono range: {e}"))
+                AuthError::InvalidConfig(format!("verify_ttl out of chrono range: {e}"))
             })?;
         self.tokens
             .insert_auth_token(user.id, AuthTokenKind::EmailVerify, &token.digest, expires)
@@ -147,11 +174,13 @@ where
         Ok(())
     }
 
-    /// Verify credentials. Returns the [`User`] row on success,
+    /// Verify credentials. Returns an [`AuthenticatedUser`] on
+    /// success (deliberately a redacted view, NOT [`storage::User`]
+    /// — see the doc on [`AuthenticatedUser`] for why),
     /// `AuthError::InvalidCredentials` for either missing-user or
     /// wrong-password — both run an argon2 verify so the response
     /// timing is uniform.
-    pub async fn login(&self, email: &str, password: &str) -> Result<User, AuthError> {
+    pub async fn login(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
         if let Some(user) = self.users.find_user_by_email(email).await? {
             // A corrupt stored hash must NOT surface as a distinct
             // error to the caller — that would make "user exists
@@ -168,7 +197,7 @@ where
                 false
             });
             if matched {
-                Ok(user)
+                Ok(AuthenticatedUser::from_row(user))
             } else {
                 Err(AuthError::InvalidCredentials)
             }
@@ -188,7 +217,7 @@ where
         let token = generate_token();
         let expires = Utc::now()
             + chrono::Duration::from_std(self.reset_ttl).map_err(|e| {
-                AuthError::PasswordHash(format!("reset_ttl out of chrono range: {e}"))
+                AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
             })?;
         self.tokens
             .insert_auth_token(
@@ -217,7 +246,17 @@ where
             .await?
             .ok_or(AuthError::InvalidToken)?;
         let new_hash = hash_password(new_password)?;
-        let _ = self.users.update_password_hash(user_id, &new_hash).await?;
+        // A consumed token implies the owning user existed at
+        // consume time. If the row is gone by now (admin delete
+        // racing the reset, or a manual DB intervention), the
+        // token has been wasted with nothing to update — bubble
+        // that up so operators see the race instead of returning
+        // a silent Ok.
+        if !self.users.update_password_hash(user_id, &new_hash).await? {
+            return Err(AuthError::Internal(format!(
+                "reset_password consumed a token for user {user_id} but the user row is gone"
+            )));
+        }
         Ok(())
     }
 }
