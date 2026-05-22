@@ -67,12 +67,10 @@ impl FormatKind {
     ];
 }
 
-/// Result of a format validation. `kind` echoes the requested
-/// kind; `valid` is the answer. `detail` carries an optional
-/// structured payload (e.g. the resolved IATA airport name, the
-/// LUHN-derived issuer hint). Unlike `tw_validate_id`, this tool
-/// has no `auto` dispatch — the caller always picks the
-/// validator.
+/// Result of a format validation. `kind` echoes the
+/// caller-supplied [`FormatKind`]. `valid` is the answer.
+/// `detail` carries an optional structured payload (e.g. the
+/// resolved IATA airport name, the LUHN-derived issuer hint).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FormatResult {
     pub valid: bool,
@@ -193,10 +191,13 @@ static PHONE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     //    the leading 0.
     //  - Special long-prefix areas (037 苗栗 / 049 南投 / 082 金門
     //    / 083 馬祖 / 089 台東 / 026 烏坵 / 092): match the
-    //    leading 0 + two more digits + a 6-7-digit subscriber.
-    //    The 2-digit set `37|49|82|83|89|26|92` is the published
-    //    TWNIC prefix list rather than `\d{2}` so nonsense like
-    //    `0007654321` doesn't pass.
+    //    leading 0 + two more digits + a 5-7-digit subscriber.
+    //    Lengths are 5-7 because some 4-digit area codes like
+    //    0836 / 0826 absorb one more digit into the prefix and
+    //    leave just 5 subscriber digits (0836-XXXXX = 9 total
+    //    digits). The 2-digit set `37|49|82|83|89|26|92` is the
+    //    published TWNIC prefix list rather than `\d{2}` so
+    //    nonsense like `0007654321` doesn't pass.
     Regex::new(r"^(?:\+886|0)(?:9\d{8}|[2-8]\d{7,8}|(?:37|49|82|83|89|26|92)\d{5,7})$")
         .expect("phone regex")
 });
