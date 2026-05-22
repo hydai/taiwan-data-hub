@@ -119,11 +119,22 @@ pub struct IssuedSession {
     /// the DB has only `sha256(token)`. The HMAC tag is what
     /// makes this a "signed cookie" per the #4.5 spec.
     pub cookie_value: String,
-    /// Initial expiry. Anchors the cookie's `Max-Age` attribute
-    /// at issue time; the sliding-window refresh in
-    /// [`SessionService::authenticate`] advances this on each
-    /// access (but the cookie itself isn't rewritten — the
-    /// gateway re-issues `Set-Cookie` only on login / logout).
+    /// Initial server-side idle expiry: `min(now + idle_ttl,
+    /// absolute_expires_at)`. Stored on the session row and
+    /// advanced by the sliding-window refresh in
+    /// [`SessionService::authenticate`] (the cookie itself
+    /// isn't rewritten — the gateway re-issues `Set-Cookie`
+    /// only on login / logout).
+    ///
+    /// This is NOT the cookie's `Max-Age`. The browser-side
+    /// lifetime comes from
+    /// [`SessionService::cookie_max_age_seconds`] which uses
+    /// `absolute_max`, so the cookie evicts at the hard cap
+    /// regardless of how short or long the idle window is. The
+    /// two values are intentionally decoupled: the idle expiry
+    /// gates server-side authentication, the Max-Age gates
+    /// browser-side eviction, and the absolute cap is the
+    /// shared ceiling that keeps them consistent.
     pub expires_at: DateTime<Utc>,
 }
 

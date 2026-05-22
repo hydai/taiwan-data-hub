@@ -41,8 +41,11 @@ use tracing::debug;
 /// request extensions for downstream extractors.
 ///
 /// Errors from the session repo (DB outage, etc.) are logged at
-/// `warn` and the request continues anonymously — failing OPEN
-/// on infra trouble matches the personal-mode behaviour and
+/// `debug` (intentionally — see the inline comment in the
+/// `Err(e)` arm; outage detection lives in the planned storage
+/// health probe + lookup-failure counter, not in per-request
+/// log volume) and the request continues anonymously — failing
+/// OPEN on infra trouble matches the personal-mode behaviour and
 /// prevents a DB hiccup from locking everyone out of the
 /// gateway's read endpoints.
 pub async fn session_middleware(
