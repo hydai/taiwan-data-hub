@@ -1025,8 +1025,6 @@ mod tests {
         assert_eq!(recorder.call_count(), 1, "recorder should fire once");
         let calls = recorder.calls.lock().unwrap();
         assert_eq!(calls[0].1, TOOL_NAME);
-        // Same comparison via &str to be explicit about the lifetime.
-        assert_eq!(calls[0].1.as_str(), TOOL_NAME);
     }
 
     /// R4 fix: recorder errors must not fail the query. The user

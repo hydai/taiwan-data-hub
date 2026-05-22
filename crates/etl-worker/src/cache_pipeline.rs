@@ -151,6 +151,13 @@ pub async fn run_cache_tick(
     // 2. Find cold candidates and demote them. This is fully
     //    implemented — clearing `cached`/`cache_path` is a single
     //    SQL UPDATE per dataset.
+    //
+    //    Perf note: N-update loop. At v0.1 traffic the cold list
+    //    is small (a handful per 6-hour tick) so the overhead is
+    //    negligible. If candidates grow into the hundreds, add
+    //    `Storage::demote_datasets_bulk(&[Uuid])` doing
+    //    `UPDATE ... WHERE id = ANY($1) ... RETURNING id`. v0.2
+    //    work, tracked alongside the materialisation wiring.
     let cold = state
         .cold_candidates(config.demotion_inactive_days)
         .await
