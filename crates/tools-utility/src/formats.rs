@@ -82,8 +82,10 @@ pub struct FormatResult {
 pub fn validate(kind: FormatKind, value: &str) -> FormatResult {
     let trimmed = value.trim();
     // Compute (valid, detail) in one match arm per kind so each
-    // expensive path is run once. The previous version called
-    // `lookup_iata` twice in the IataAirport case.
+    // expensive path runs at most once — the IataAirport branch
+    // looks up the airport name once and reuses it for both
+    // fields, and CreditCard avoids re-walking the digits for
+    // an issuer hint when the LUHN already failed.
     let (valid, detail) = match kind {
         FormatKind::Invoice => (is_valid_invoice(trimmed), None),
         FormatKind::Taipower => (is_valid_taipower(trimmed), None),
@@ -347,9 +349,11 @@ fn is_valid_iban(s: &str) -> bool {
         return false;
     }
     let rearranged: String = format!("{}{}", &compact[4..], &compact[..4]);
-    // Convert to numeric string. mod-97 over a long string is
-    // done in chunks to avoid bignum: feed digits in 9-char
-    // windows because 10^9 fits in u64.
+    // Convert to a digit-only string by expanding letters via
+    // A=10..Z=35, then stream mod-97 digit-by-digit (each step
+    // is `(remainder * 10 + d) % 97`). Streaming avoids bignum
+    // and keeps the working value < 97 * 10 + 9 < u64::MAX, so
+    // a `u64` accumulator is more than enough.
     let numeric: String = rearranged
         .chars()
         .flat_map(|c| {
@@ -442,6 +446,35 @@ mod tests {
         panic!("expected at least one valid invoice number in 12345670..12345679");
     }
 
+    /// R2 fix: lock the 7th-digit-is-7 alternate-checksum branch
+    /// per the 財政部 公報. The algorithm allows two acceptable
+    /// sums for these numbers (the "+1" path) — locate one
+    /// fixture by scanning candidates.
+    #[test]
+    fn invoice_seventh_digit_seven_alternate_path() {
+        // Find a number where the standard sum fails (mod10 != 0)
+        // but the alternate sum (with `add: 1`) passes, AND the
+        // 7th digit (index 6) is 7. This exercises the branch.
+        let mut found = None;
+        for n in 1_000_000..9_999_999_u32 {
+            let s = format!("{n:08}");
+            if s.chars().nth(6) != Some('7') {
+                continue;
+            }
+            let digits: Vec<u32> = s.chars().map(|c| c.to_digit(10).unwrap()).collect();
+            // Standard path fails; alternate path passes:
+            if !invoice_check(&digits, 0) && invoice_check(&digits, 1) {
+                found = Some(s);
+                break;
+            }
+        }
+        let s = found.expect("expected at least one alternate-path fixture in the search space");
+        check(FormatKind::Invoice, &s, true);
+        // Sanity: standard path alone would reject it.
+        let digits: Vec<u32> = s.chars().map(|c| c.to_digit(10).unwrap()).collect();
+        assert!(!invoice_check(&digits, 0));
+    }
+
     #[test]
     fn invoice_rejects_wrong_length() {
         check(FormatKind::Invoice, "1234567", false);
@@ -517,6 +550,43 @@ mod tests {
         let r = validate(FormatKind::CreditCard, "4111111111111111");
         assert!(r.valid);
         assert_eq!(r.detail.as_deref(), Some("Visa"));
+    }
+
+    /// R2 fix: Mastercard 2-series (BIN 2221-2720). 2223 0000 0000
+    /// 0007 is the canonical test PAN from the Mastercard
+    /// developer docs.
+    #[test]
+    fn credit_card_mastercard_2_series_detection() {
+        let r = validate(FormatKind::CreditCard, "2223000000000007");
+        assert!(r.valid, "2-series Mastercard PAN should pass LUHN");
+        assert_eq!(
+            r.detail.as_deref(),
+            Some("Mastercard"),
+            "BIN 2223 must resolve to Mastercard (2-series 2221-2720)",
+        );
+    }
+
+    /// A 5-series number that's NOT in the 51-55 classic range
+    /// should not get the Mastercard label.
+    #[test]
+    fn credit_card_5_prefix_outside_classic_range_reports_unknown() {
+        // 5095... is a valid 16-digit LUHN built by hand: walk
+        // candidates until one passes.
+        let base = "5095000000000000";
+        let mut found = None;
+        for last in 0..10 {
+            let mut s = base.to_string();
+            s.pop();
+            s.push_str(&last.to_string());
+            if is_valid_luhn(&s) {
+                found = Some(s);
+                break;
+            }
+        }
+        let s = found.expect("expected one luhn-valid candidate in 50950...");
+        let r = validate(FormatKind::CreditCard, &s);
+        assert!(r.valid);
+        assert_eq!(r.detail.as_deref(), Some("Unknown issuer"));
     }
 
     #[test]
