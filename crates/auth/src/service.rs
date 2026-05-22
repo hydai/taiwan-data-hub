@@ -252,11 +252,28 @@ where
                 )
             })?;
         let token = generate_token();
-        let expires = Utc::now()
+        let now = Utc::now();
+        let expires = now
             + chrono::Duration::from_std(self.reset_ttl).map_err(|e| {
                 AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
             })?;
         let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
+        // Invalidate any older pending reset tokens for this user so
+        // an intercepted older email can't succeed once a fresh
+        // request has been made. Verification deliberately doesn't
+        // do this — multiple devices reading the same inbox should
+        // each be able to click their own copy.
+        let invalidated = self
+            .tokens
+            .invalidate_user_tokens(user.id, AuthTokenKind::PasswordReset, now)
+            .await?;
+        if invalidated > 0 {
+            tracing::debug!(
+                user_id = %user.id,
+                invalidated,
+                "superseded prior password-reset tokens",
+            );
+        }
         self.tokens
             .insert_auth_token(
                 user.id,
@@ -318,9 +335,14 @@ where
         if let Ok(permit) = Arc::clone(&self.send_permits).try_acquire_owned() {
             Some(permit)
         } else {
+            // Don't put the raw email in the log — it's PII and an
+            // attacker can drive cap-saturation by spamming
+            // password-reset requests. A short hex digest gives
+            // operators enough correlation across log lines without
+            // recording addresses.
             tracing::warn!(
                 kind,
-                recipient = to,
+                recipient_hash = %redact_email(to),
                 "in-flight mail-send cap reached; dropping send",
             );
             None
@@ -424,6 +446,26 @@ where
         }
         Ok(())
     }
+}
+
+/// Short hex prefix of `sha256(email)` for log correlation
+/// without recording the address. 8 bytes (16 hex chars) is
+/// well past the birthday bound for any reasonable log volume.
+fn redact_email(email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(email.as_bytes());
+    let digest = hasher.finalize();
+    hex_lower(&digest[..8])
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(out, "{b:02x}").expect("writing to a String never fails");
+    }
+    out
 }
 
 /// Build a `<base>/<path>?token=<cleartext>` magic-link URL.

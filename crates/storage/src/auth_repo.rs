@@ -130,6 +130,21 @@ pub trait AuthTokenRepo: Send + Sync {
         token_hash: &[u8],
         now: DateTime<Utc>,
     ) -> Result<Option<Uuid>, StorageError>;
+
+    /// Mark every still-pending token of `kind` for `user_id` as
+    /// consumed. Used by the auth crate's password-reset path so
+    /// requesting a new reset link invalidates any older
+    /// outstanding link — an intercepted older email can no
+    /// longer succeed after a fresh request.
+    ///
+    /// Returns the number of rows updated; callers typically log
+    /// it but do not branch on it.
+    async fn invalidate_user_tokens(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
 }
 
 #[async_trait]
@@ -254,6 +269,27 @@ impl AuthTokenRepo for Storage {
         .await?;
         row.map(|r| r.try_get::<Uuid, _>("user_id").map_err(StorageError::from))
             .transpose()
+    }
+
+    async fn invalidate_user_tokens(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "UPDATE auth_tokens
+                SET consumed_at = $3
+              WHERE user_id = $1
+                AND kind = $2
+                AND consumed_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .bind(now)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected())
     }
 }
 

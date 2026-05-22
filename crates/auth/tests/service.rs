@@ -177,6 +177,23 @@ impl AuthTokenRepo for InMemoryAuthTokenRepo {
         row.consumed_at = Some(now);
         Ok(Some(row.user_id))
     }
+
+    async fn invalidate_user_tokens(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut count = 0u64;
+        for row in inner.values_mut() {
+            if row.user_id == user_id && row.kind == kind && row.consumed_at.is_none() {
+                row.consumed_at = Some(now);
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 // --- helpers ---------------------------------------------------------
@@ -263,6 +280,14 @@ impl AuthTokenRepo for FailingTokenRepo {
         _now: DateTime<Utc>,
     ) -> Result<Option<Uuid>, StorageError> {
         Ok(None)
+    }
+    async fn invalidate_user_tokens(
+        &self,
+        _user_id: Uuid,
+        _kind: AuthTokenKind,
+        _now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
     }
 }
 
@@ -427,6 +452,53 @@ async fn request_password_reset_returns_ok_for_unknown_user() {
 }
 
 #[tokio::test]
+async fn second_password_reset_request_invalidates_the_first() {
+    // Regression for Copilot R9: an intercepted older reset link
+    // must NOT remain valid once the user has requested a fresh
+    // one. Two `request_password_reset` calls in a row should
+    // leave only the second link working.
+    let (svc, mailer) = build_service();
+    svc.register("ivy@example.com", "passphrase").await.unwrap();
+    wait_for_mailer(&mailer, 1).await;
+
+    svc.request_password_reset("ivy@example.com").await.unwrap();
+    wait_for_mailer(&mailer, 2).await;
+    let first_link = mailer
+        .sent()
+        .into_iter()
+        .find(|m| m.kind == MailKind::PasswordReset)
+        .unwrap()
+        .link;
+    let first_token = token_from_link(&first_link);
+
+    svc.request_password_reset("ivy@example.com").await.unwrap();
+    wait_for_mailer(&mailer, 3).await;
+    let second_link = mailer
+        .sent()
+        .into_iter()
+        .rfind(|m| m.kind == MailKind::PasswordReset)
+        .unwrap()
+        .link;
+    let second_token = token_from_link(&second_link);
+    assert_ne!(first_token, second_token);
+
+    // The first link is now invalid.
+    let err = svc
+        .reset_password(&first_token, "n3w-passphrase")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidToken));
+
+    // The second link still works.
+    svc.reset_password(&second_token, "n3w-passphrase")
+        .await
+        .unwrap();
+    svc.login("ivy@example.com", "n3w-passphrase")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn reset_password_surfaces_internal_when_user_disappears() {
     // Regression for Copilot R2: a `reset_password` call that
     // consumed a valid token but then found the user row gone
@@ -438,7 +510,7 @@ async fn reset_password_surfaces_internal_when_user_disappears() {
     let base = Url::parse("https://hub.example").unwrap();
     // Seed user manually, mint a reset token, then drop the row.
     let user = users
-        .insert_user("ghost@example.com", "irrelevant-but-valid-PHC")
+        .insert_user("ghost@example.com", "opaque-placeholder-not-a-real-phc")
         .await
         .unwrap();
     let token = auth::generate_token();

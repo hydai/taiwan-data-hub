@@ -164,7 +164,53 @@ impl Mailer for SmtpMailer {
 /// Personal-mode fallback: print magic links to logs instead of
 /// sending email. Lets a laptop install without SMTP credentials
 /// still complete the verify-by-clicking flow.
-pub struct LogMailer;
+///
+/// ⚠️ The full link (including the secret `?token=…`) is logged
+/// ONLY when `reveal_token` is `true`. That mode is for local
+/// personal-mode dev: a production deployment that ships logs to
+/// a central aggregator would otherwise effectively persist
+/// single-use credentials. `Default` is `reveal_token = false`
+/// — the redacted form omits the query string so the link is
+/// useless on its own. Use [`LogMailer::personal_mode_reveal`]
+/// to opt into the full-link form explicitly.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LogMailer {
+    reveal_token: bool,
+}
+
+impl LogMailer {
+    /// Redacted form: logs the link with the `?token=…` query
+    /// stripped. Safe to enable in any deployment but the
+    /// resulting log line is not enough to complete the flow.
+    #[must_use]
+    pub const fn redacting() -> Self {
+        Self {
+            reveal_token: false,
+        }
+    }
+
+    /// Reveal form: logs the FULL magic link including the secret
+    /// token. ONLY for personal-mode dev — production deployments
+    /// must use [`SmtpMailer`].
+    #[must_use]
+    pub const fn personal_mode_reveal() -> Self {
+        Self { reveal_token: true }
+    }
+
+    fn rendered_link(self, link: &Url) -> String {
+        if self.reveal_token {
+            link.to_string()
+        } else {
+            // Strip the query string so the token doesn't land in
+            // log aggregators. Operators still see which path the
+            // link targeted, which is enough for "did the email
+            // get triggered?" debugging.
+            let mut redacted = link.clone();
+            redacted.set_query(None);
+            format!("{redacted}?token=<redacted>")
+        }
+    }
+}
 
 #[async_trait]
 impl Mailer for LogMailer {
@@ -176,8 +222,9 @@ impl Mailer for LogMailer {
     ) -> Result<(), AuthError> {
         warn!(
             recipient = to,
-            link = %link,
+            link = %self.rendered_link(link),
             expires_in = ?expires_in,
+            reveal_token = self.reveal_token,
             "SMTP not configured; printing verification link to logs"
         );
         Ok(())
@@ -191,8 +238,9 @@ impl Mailer for LogMailer {
     ) -> Result<(), AuthError> {
         warn!(
             recipient = to,
-            link = %link,
+            link = %self.rendered_link(link),
             expires_in = ?expires_in,
+            reveal_token = self.reveal_token,
             "SMTP not configured; printing password-reset link to logs"
         );
         Ok(())
@@ -361,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_mailer_returns_ok_without_smtp() {
-        let mailer = LogMailer;
+        let mailer = LogMailer::redacting();
         let link = Url::parse("https://hub.example/verify?token=abc").unwrap();
         mailer
             .send_verification("u@example.com", &link, TEST_TTL)
