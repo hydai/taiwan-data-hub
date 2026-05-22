@@ -346,14 +346,17 @@ async fn connect_storage_if_available() -> Option<Storage> {
 }
 
 /// Register Postgres-backed tools onto the dispatcher when a
-/// [`Storage`] handle is available. `None` is a hard no-op — the
-/// caller already logged the reason in [`connect_storage_if_available`].
+/// [`Storage`] handle is available. `None` is a hard no-op:
+/// [`connect_storage_if_available`] already emitted the
+/// canonical `DATABASE_URL unset / connect failed` log line
+/// before returning `None`, so adding a second message here
+/// would just double-log the same outcome on every boot
+/// without auth wired up.
 fn wire_db_tools_if_available(
     builder: DispatcherBuilder,
     storage: Option<Storage>,
 ) -> DispatcherBuilder {
     let Some(storage) = storage else {
-        tracing::info!("DB tools skipped: no Storage handle (list_domains still works)");
         return builder;
     };
     let router = build_object_store_router();

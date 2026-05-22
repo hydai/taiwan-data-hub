@@ -132,8 +132,10 @@
 				<code
 					aria-label="Generated API key"
 					class="bg-background/80 mt-3 block w-full overflow-x-auto rounded px-3 py-2 font-mono text-xs"
-					data-testid="issued-cleartext">{issued.cleartext}</code
+					data-testid="issued-cleartext"
 				>
+					{issued.cleartext}
+				</code>
 				<button
 					type="button"
 					class="border-primary/40 text-primary hover:bg-primary/10 mt-3 inline-flex items-center rounded border px-3 py-1 text-xs font-medium"

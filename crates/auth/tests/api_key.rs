@@ -44,15 +44,6 @@ impl InMemoryApiKeyRepo {
     fn force_collisions(&self, n: u32) {
         *self.force_pk_collisions.lock().unwrap() = n;
     }
-
-    fn rows_by_hash(&self, key_hash: &[u8]) -> Option<Row> {
-        self.inner
-            .lock()
-            .unwrap()
-            .values()
-            .find(|r| r.key_hash == key_hash)
-            .cloned()
-    }
 }
 
 #[async_trait]
@@ -348,7 +339,7 @@ async fn issue_surfaces_internal_after_max_collisions() {
 
 #[tokio::test]
 async fn rotate_revokes_old_and_returns_new() {
-    let (svc, repo) = build_service();
+    let (svc, _repo) = build_service();
     let user = fresh_user_id();
     let original = svc
         .issue(user, "ci".into(), vec!["read".into()], "pro".into())
@@ -368,7 +359,6 @@ async fn rotate_revokes_old_and_returns_new() {
     assert!(new_row.revoked_at.is_none());
     // Old key is revoked and no longer verifies.
     assert!(svc.verify(&original.cleartext).await.unwrap().is_none());
-    let _ = repo.rows_by_hash(b"unused"); // exercise helper
 }
 
 #[tokio::test]
