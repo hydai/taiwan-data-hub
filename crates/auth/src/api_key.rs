@@ -14,14 +14,22 @@
 //! a Rust constant-time compare — the UNIQUE index on
 //! `mcp_api_keys.key_hash` makes the lookup a single btree
 //! probe and the surrounding request latency dwarfs any
-//! per-byte timing signal. A
-//! malformed cleartext (wrong prefix, length, or base64url
-//! alphabet) is rejected by [`is_well_shaped`] BEFORE hashing,
-//! so attacker-controlled bytes never reach `Sha256::digest`
-//! and never trigger a DB round trip. The trade-off is
-//! explicit: timing leaks the well-shaped/malformed distinction
-//! (microseconds for the in-process reject vs. milliseconds for
-//! the DB miss), which is acceptable because the cleartext
+//! per-byte timing signal.
+//!
+//! Pre-validation via [`is_well_shaped`] short-circuits inputs
+//! that don't match the documented cleartext format BEFORE
+//! hashing or any DB round trip: this rejects obviously-bogus
+//! values (truncated cookies, JWTs, random URLs) at near-zero
+//! cost. Well-shaped inputs ARE hashed and looked up — they
+//! have to be, since "well-shaped but unissued" is the
+//! attacker's main attack vector and the DB miss is the only
+//! way to discriminate it from a real key. So the precise
+//! guarantee is: pre-validation gates `Sha256::digest` to
+//! exactly the bytes that match the public cleartext format,
+//! not "no attacker bytes ever". The trade-off is explicit:
+//! timing leaks the well-shaped / malformed distinction
+//! (microseconds for the in-process reject vs. milliseconds
+//! for the DB miss), which is acceptable because the cleartext
 //! format is public knowledge (`tdh_` prefix + base64url
 //! alphabet + 43 chars) and shape doesn't narrow the search
 //! space.
@@ -301,28 +309,66 @@ impl ApiKeyService {
             .map_err(AuthError::Storage)
     }
 
-    /// Rotate a key: revoke the old row, mint a new one with
-    /// the same `name`, `scopes`, and `rate_limit_tier`. Returns
-    /// the new [`IssuedApiKey`] on success. Returns `Ok(None)`
-    /// if the source row doesn't exist or is already revoked
-    /// (idempotent — rotate-rotate is a no-op on the second
-    /// call).
+    /// Rotate a key: mint a new one with the same `name`,
+    /// `scopes`, and `rate_limit_tier` as the source row, then
+    /// revoke the source row. Returns the new [`IssuedApiKey`]
+    /// on success. Returns `Ok(None)` if the source row doesn't
+    /// exist OR is already revoked (idempotent — rotate-rotate
+    /// is a no-op on the second call).
+    ///
+    /// Order is "issue new, then revoke old" specifically so a
+    /// failure in `issue` (DB outage, retry exhaustion) leaves
+    /// the caller with their original key intact. The previous
+    /// "revoke first" order would have stranded the user with
+    /// no valid key on `issue` failure. The trade-off is a
+    /// brief overlap window where BOTH keys verify — that's
+    /// acceptable here because (a) the user already trusts both
+    /// (they chose to rotate), (b) the window is one DB round
+    /// trip wide, and (c) if the final revoke itself fails the
+    /// caller still gets `Ok(Some(new_key))` so they're not
+    /// stuck without access, with a `warn!` logged for ops.
     pub async fn rotate(
         &self,
         id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<IssuedApiKey>, AuthError> {
-        let Some(old) = self.revoke(id, user_id).await? else {
+        // Peek at the source row's metadata BEFORE issuing —
+        // `list_for_user` returns every row owned by this user
+        // (including revoked) so we filter on `revoked_at` to
+        // reject the "already revoked" path with `Ok(None)`.
+        // For realistic key counts (single digits to low tens
+        // per user) the full-list scan is cheaper than adding a
+        // dedicated `get_by_id` repo method that this is the
+        // only caller of.
+        let existing = self
+            .keys
+            .list_for_user(user_id)
+            .await
+            .map_err(AuthError::Storage)?
+            .into_iter()
+            .find(|r| r.id == id && r.revoked_at.is_none());
+        let Some(existing) = existing else {
             return Ok(None);
         };
-        // `revoke` already returned the snapshot of the row, so
-        // we don't need a second SELECT to recover the
-        // name/scopes/tier — but we DO need to mint with the
-        // same values, not the user-supplied ones (the gateway
-        // calls rotate by id only, no body).
+        // Issue first — if this fails the original key is still
+        // valid because we haven't touched the source row yet.
         let issued = self
-            .issue(user_id, old.name, old.scopes, old.rate_limit_tier)
+            .issue(user_id, existing.name, existing.scopes, existing.rate_limit_tier)
             .await?;
+        // Best-effort revoke of the source row. We do NOT
+        // propagate the error: the new key has been minted and
+        // returning `Err` here would hide it from the caller
+        // (gateway response → empty body → user has no idea a
+        // new key exists). The brief overlap is the lesser
+        // evil; the `warn!` flags the row for ops attention.
+        if let Err(e) = self.keys.revoke(id, user_id, Utc::now()).await {
+            tracing::warn!(
+                error = %e,
+                old_key_id = %id,
+                new_key_id = %issued.id,
+                "api key rotate: revoke of old key failed; new key minted successfully — old key remains valid until manually revoked"
+            );
+        }
         Ok(Some(issued))
     }
 }

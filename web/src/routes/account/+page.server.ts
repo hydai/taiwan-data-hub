@@ -206,8 +206,14 @@ export const actions: Actions = {
 			return fail(404, { revoke: { id, error: 'key not found or already revoked' } });
 		}
 		if (!response.ok) {
+			// Parse the gateway's structured `{error, message}`
+			// body when present so a 400 from validation or a
+			// 500 with a useful detail surfaces in the UI
+			// instead of the opaque "gateway returned <status>"
+			// fallback. Matches the `create` action's pattern.
+			const body = parseGatewayErrorBody(await safeJson(response));
 			return fail(response.status, {
-				revoke: { id, error: `gateway returned ${response.status}` }
+				revoke: { id, error: body?.message ?? `gateway returned ${response.status}` }
 			});
 		}
 		return { revoked: { id } };
@@ -245,8 +251,14 @@ export const actions: Actions = {
 			return fail(404, { rotate: { id, error: 'key not found or already revoked' } });
 		}
 		if (!response.ok) {
+			// Surface the gateway's structured error body when
+			// present, matching the `create` action's pattern —
+			// otherwise a validation 400 collapses to the
+			// opaque "gateway returned <status>" fallback that
+			// hides the actual problem from the user.
+			const body = parseGatewayErrorBody(await safeJson(response));
 			return fail(response.status, {
-				rotate: { id, error: `gateway returned ${response.status}` }
+				rotate: { id, error: body?.message ?? `gateway returned ${response.status}` }
 			});
 		}
 		const issued = parseIssuedApiKey(await safeJson(response));
