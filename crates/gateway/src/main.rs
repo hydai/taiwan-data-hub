@@ -14,6 +14,7 @@
 //!   error so operators can catch typos before a redeploy.
 
 mod api_keys_routes;
+mod rate_limit_middleware;
 mod session_middleware;
 
 use std::net::SocketAddr;
@@ -178,6 +179,7 @@ fn gateway_implementation() -> Implementation {
 fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
+    rate_limiter: Arc<dyn auth::RateLimiter>,
     cancel: CancellationToken,
 ) -> Router {
     let mcp_service = StreamableHttpService::new(
@@ -199,7 +201,15 @@ fn build_router(
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
-    router
+    // IP rate-limit middleware wraps the WHOLE router — applies
+    // to every route the gateway serves (`/healthz`, `/mcp`,
+    // and any merged subrouter). Mounting at the top level
+    // means the throttle still runs in personal-mode (no auth
+    // at all) and provides a defence in that posture.
+    router.layer(axum::middleware::from_fn_with_state(
+        rate_limiter,
+        rate_limit_middleware::ip_rate_limit_middleware,
+    ))
 }
 
 #[tokio::main]
@@ -246,9 +256,15 @@ async fn serve() -> anyhow::Result<()> {
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");
 
+    // Single rate-limiter shared by the IP + per-key middleware
+    // stacks. `PgRateLimiter` when Storage is available, in-
+    // memory fallback so personal-mode dev deploys still get IP
+    // throttling on `/healthz` / `/mcp`.
+    let rate_limiter = build_rate_limiter(storage.clone());
+
     let cancel = CancellationToken::new();
-    let auth_router = build_auth_router_if_available(storage);
-    let app = build_router(server, auth_router, cancel.child_token());
+    let auth_router = build_auth_router_if_available(storage, rate_limiter.clone());
+    let app = build_router(server, auth_router, rate_limiter, cancel.child_token());
 
     let listener = TcpListener::bind(addr)
         .await
@@ -262,10 +278,17 @@ async fn serve() -> anyhow::Result<()> {
         "gateway listening (HTTP + MCP Streamable at /mcp)"
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(cancel))
-        .await
-        .context("axum server crashed")?;
+    // `into_make_service_with_connect_info` plumbs the TCP peer
+    // address through to `ConnectInfo<SocketAddr>`-bearing
+    // handlers — the IP rate-limit middleware needs this for
+    // the "no proxy" fallback case.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(cancel))
+    .await
+    .context("axum server crashed")?;
 
     Ok(())
 }
@@ -381,7 +404,10 @@ fn wire_db_tools_if_available(
 /// In either case the rest of the gateway still serves — the
 /// account page just can't load. This matches the broader
 /// "fail-soft on optional DB dependencies" posture of the binary.
-fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
+fn build_auth_router_if_available(
+    storage: Option<Storage>,
+    rate_limiter: Arc<dyn auth::RateLimiter>,
+) -> Option<Router> {
     let Some(storage) = storage else {
         // `connect_storage_if_available` already logged the
         // underlying reason (URL unset or pool open failed) at
@@ -425,12 +451,24 @@ fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
     };
     let api_key_service = Arc::new(auth::ApiKeyService::new(api_key_repo));
 
-    // Mount the api-keys handlers behind the session middleware so
-    // every handler receives `Option<Extension<ValidatedSession>>`
-    // and can return 401 instead of letting axum 500 on a missing
-    // extractor when the cookie was missing / expired / revoked.
-    let router =
-        api_keys_routes::router(api_key_service).layer(axum::middleware::from_fn_with_state(
+    // Layer stack (axum applies bottom-up, so the order here
+    // is the OUTER-TO-INNER request flow):
+    //
+    //   1. Session middleware — sets `ValidatedSession` when the
+    //      cookie validates, otherwise leaves it absent.
+    //   2. API-key rate-limit middleware — runs DOWNSTREAM of
+    //      session so it can read the extension to key the
+    //      limiter by user / api-key id.
+    //
+    // The api-keys handlers run after both layers and see the
+    // session extension + the `X-RateLimit-*` headers added by
+    // the rate-limit middleware on the outgoing response.
+    let router = api_keys_routes::router(api_key_service)
+        .layer(axum::middleware::from_fn_with_state(
+            rate_limiter,
+            rate_limit_middleware::api_key_rate_limit_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
             session_service,
             session_middleware::session_middleware,
         ));
@@ -440,6 +478,29 @@ fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
     // five outcomes.
     tracing::info!("api-keys subrouter enabled at /v1/api-keys");
     Some(Router::new().nest("/v1/api-keys", router))
+}
+
+/// Build the rate-limiter the IP and per-key middleware share.
+///
+/// When `Storage` is available, the limiter persists counters
+/// to `rate_limit_counters` so multi-instance deployments share
+/// state (the spec wants `DragonflyDB`; the PG-backed impl is
+/// the documented small-deploy fallback until that lands).
+/// Otherwise — personal-mode with no `DATABASE_URL` — use an
+/// in-process `Mutex<HashMap>` so IP throttling still works
+/// without a DB. Per-IP burst protection in dev is more
+/// valuable than no throttle at all.
+fn build_rate_limiter(storage: Option<Storage>) -> Arc<dyn auth::RateLimiter> {
+    if let Some(storage) = storage {
+        let repo: Arc<dyn storage::RateLimitRepo> = Arc::new(storage);
+        tracing::info!("rate-limiter backend: postgres (rate_limit_counters)");
+        Arc::new(auth::PgRateLimiter::new(repo))
+    } else {
+        tracing::info!(
+            "rate-limiter backend: in-memory (no DATABASE_URL; throttles per-process only)"
+        );
+        Arc::new(auth::InMemoryRateLimiter::default())
+    }
 }
 
 /// Decode `SESSION_HMAC_KEY` from base64. Returns `Ok(None)` when
@@ -946,7 +1007,12 @@ mod tests {
 
     #[tokio::test]
     async fn healthz_returns_200_with_version_and_sha() {
-        let app = build_router(test_server(), None, CancellationToken::new());
+        let app = build_router(
+            test_server(),
+            None,
+            Arc::new(auth::InMemoryRateLimiter::default()),
+            CancellationToken::new(),
+        );
         let resp = app
             .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
             .await
@@ -984,7 +1050,12 @@ mod tests {
     /// while the same preflight to `/mcp` should.
     #[tokio::test]
     async fn cors_is_scoped_to_mcp_and_does_not_leak_to_healthz() {
-        let app = build_router(test_server(), None, CancellationToken::new());
+        let app = build_router(
+            test_server(),
+            None,
+            Arc::new(auth::InMemoryRateLimiter::default()),
+            CancellationToken::new(),
+        );
 
         let mcp_preflight = app
             .clone()
@@ -1033,7 +1104,12 @@ mod tests {
     /// the negotiated protocol version + the server's identity.
     #[tokio::test]
     async fn mcp_post_initialize_returns_2025_11_25_with_gateway_identity() {
-        let app = build_router(test_server(), None, CancellationToken::new());
+        let app = build_router(
+            test_server(),
+            None,
+            Arc::new(auth::InMemoryRateLimiter::default()),
+            CancellationToken::new(),
+        );
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
