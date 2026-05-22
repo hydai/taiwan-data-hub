@@ -79,6 +79,10 @@ impl UserRepo for InMemoryUserRepo {
         password_hash.clone_into(&mut user.password_hash);
         Ok(true)
     }
+
+    async fn delete_user(&self, id: Uuid) -> Result<bool, StorageError> {
+        Ok(self.inner.lock().unwrap().remove(&id).is_some())
+    }
 }
 
 #[derive(Default)]
@@ -110,6 +114,9 @@ impl UserRepo for ArcUserRepo {
     }
     async fn update_password_hash(&self, id: Uuid, hash: &str) -> Result<bool, StorageError> {
         self.0.update_password_hash(id, hash).await
+    }
+    async fn delete_user(&self, id: Uuid) -> Result<bool, StorageError> {
+        self.0.delete_user(id).await
     }
 }
 
@@ -217,6 +224,67 @@ async fn register_creates_user_and_sends_verification_link() {
             .link
             .as_str()
             .starts_with("https://hub.example/auth/verify?token=")
+    );
+}
+
+/// `AuthTokenRepo` whose `insert_auth_token` always returns an
+/// error. Used to drive the `register` compensating-delete path.
+#[derive(Default)]
+struct FailingTokenRepo;
+
+#[async_trait]
+impl AuthTokenRepo for FailingTokenRepo {
+    async fn insert_auth_token(
+        &self,
+        _user_id: Uuid,
+        _kind: AuthTokenKind,
+        _token_hash: &[u8],
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::InvalidArgument(
+            "fake token insert failure".to_owned(),
+        ))
+    }
+    async fn consume_auth_token(
+        &self,
+        _kind: AuthTokenKind,
+        _token_hash: &[u8],
+        _now: DateTime<Utc>,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Ok(None)
+    }
+}
+
+#[tokio::test]
+async fn register_compensates_with_delete_when_token_insert_fails() {
+    // Regression for Copilot R4: if the token insert fails after the
+    // user row is persisted, `register` must clean up the row so a
+    // retry doesn't hit `EmailTaken` against an orphaned account.
+    // The InMemoryUserRepo is held via Arc so the test can inspect
+    // the post-compensation state independently of the service.
+    let users = std::sync::Arc::new(InMemoryUserRepo::default());
+    let tokens = FailingTokenRepo;
+    let mailer = MemoryMailer::new();
+    let base = Url::parse("https://hub.example").unwrap();
+    let svc = AuthService::new(ArcUserRepo(users.clone()), tokens, mailer.clone(), base);
+
+    let err = svc
+        .register("orphan@example.com", "passphrase")
+        .await
+        .unwrap_err();
+    // Failure propagated from the storage layer (we faked it).
+    assert!(matches!(err, AuthError::Storage(_)));
+    // No mail sent because we never reached the spawn.
+    assert!(mailer.sent().is_empty());
+    // Most important: the orphaned row was deleted by the
+    // compensation step, so a retry wouldn't see `EmailTaken`.
+    assert!(
+        users
+            .find_user_by_email("orphan@example.com")
+            .await
+            .unwrap()
+            .is_none(),
+        "compensating delete should have removed the orphaned user"
     );
 }
 

@@ -57,6 +57,24 @@ CREATE INDEX auth_tokens_user_kind_idx
     ON auth_tokens (user_id, kind)
     WHERE consumed_at IS NULL;
 
+-- Cleanup index for the v0.2 background job that periodically
+-- prunes expired-but-unconsumed tokens. The partial filter keeps
+-- the index small (already-consumed rows are excluded by
+-- `auth_tokens_user_kind_idx`); the leading `expires_at` lets the
+-- cleanup query do a range scan:
+--
+--   DELETE FROM auth_tokens
+--    WHERE consumed_at IS NULL AND expires_at < now();
+--
+-- v0.1 does NOT yet run that cleanup — registration volume is low
+-- enough that the unbounded growth is hours/days away from being
+-- a problem on the target hardware. The cleanup job lands with
+-- the etl-worker cron extension in v0.2; this index ships now so
+-- the migration boundary doesn't change later.
+CREATE INDEX auth_tokens_expires_idx
+    ON auth_tokens (expires_at)
+    WHERE consumed_at IS NULL;
+
 -- Touch `updated_at` on every UPDATE so the rest of the codebase
 -- can rely on it (e.g. "most recent password change wins" later).
 CREATE OR REPLACE FUNCTION users_set_updated_at()

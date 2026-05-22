@@ -4,15 +4,19 @@
 //! and a [`Mailer`]. Concrete types are generic so unit tests can
 //! substitute in-memory fakes without taking a `dyn` dispatch hit.
 //!
-//! Five flows live here:
+//! Six flows live here:
 //!
 //! 1. [`AuthService::register`] — create user + email a verify link.
-//! 2. [`AuthService::verify_email`] — redeem a verify token.
-//! 3. [`AuthService::login`] — check password, return the `User`.
-//!    (Session issuance lands in #4.5 — the gateway handler wraps
-//!    this call and writes the cookie.)
-//! 4. [`AuthService::request_password_reset`] — email a reset link.
-//! 5. [`AuthService::reset_password`] — redeem a reset token + set
+//! 2. [`AuthService::resend_verification`] — mint + email a fresh
+//!    verify link for an existing-but-unverified user (silent for
+//!    unknown or already-verified addresses).
+//! 3. [`AuthService::verify_email`] — redeem a verify token.
+//! 4. [`AuthService::login`] — check password, return an
+//!    [`AuthenticatedUser`] (the redacted DTO — no password hash).
+//!    Session issuance lands in #4.5 — the gateway handler wraps
+//!    this call and writes the cookie.
+//! 5. [`AuthService::request_password_reset`] — email a reset link.
+//! 6. [`AuthService::reset_password`] — redeem a reset token + set
 //!    a new password.
 //!
 //! Enumeration-safety guarantees:
@@ -143,7 +147,29 @@ where
             Err(storage::StorageError::UniqueViolation(_)) => return Err(AuthError::EmailTaken),
             Err(e) => return Err(e.into()),
         };
-        self.send_verification_link(&user).await
+        // Token insert / mail-send setup happens AFTER user insert.
+        // If anything goes wrong, the row would otherwise sit in the
+        // users table with no pending verification token — a retry
+        // would hit "email taken" forever. Compensate by deleting
+        // the row before returning the error.
+        if let Err(err) = self.send_verification_link(&user).await {
+            if let Err(cleanup_err) = self.users.delete_user(user.id).await {
+                tracing::error!(
+                    user_id = %user.id,
+                    original_error = %err,
+                    cleanup_error = %cleanup_err,
+                    "register failed AND compensating delete failed; user row is orphaned",
+                );
+            } else {
+                tracing::warn!(
+                    user_id = %user.id,
+                    error = %err,
+                    "register failed after user insert; row deleted as compensation",
+                );
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Resend the verification link for a user who already
@@ -305,9 +331,12 @@ where
 /// shape and any future change (e.g. anti-CSRF token) lands in
 /// one place.
 fn magic_link(base: &Url, path: &str, cleartext_token: &str) -> Result<Url, AuthError> {
+    // A `base + path` failure is a service-configuration bug
+    // (the operator passed a `public_base_url` that can't host
+    // a sub-path), not a mail-delivery failure.
     let mut link = base
         .join(path)
-        .map_err(|e| AuthError::Mailer(format!("public_base_url + {path:?}: {e}")))?;
+        .map_err(|e| AuthError::InvalidConfig(format!("public_base_url + {path:?}: {e}")))?;
     link.query_pairs_mut().append_pair("token", cleartext_token);
     Ok(link)
 }

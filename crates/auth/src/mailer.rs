@@ -117,11 +117,17 @@ impl SmtpMailer {
         let to_addr: lettre::Address = to
             .parse()
             .map_err(|e: lettre::address::AddressError| AuthError::Mailer(e.to_string()))?;
+        // The verification + reset bodies include non-ASCII (em
+        // dash etc.), so the Content-Type MUST carry an explicit
+        // charset — `ContentType::TEXT_PLAIN` alone produces no
+        // charset and some MTAs/clients misinterpret the bytes.
+        let content_type = ContentType::parse("text/plain; charset=utf-8")
+            .expect("text/plain; charset=utf-8 is a static valid MIME");
         let message = Message::builder()
             .from(self.from.to_mailbox()?)
             .to(Mailbox::new(None, to_addr))
             .subject(subject)
-            .header(ContentType::TEXT_PLAIN)
+            .header(content_type)
             .body(body)
             .map_err(|e| AuthError::Mailer(e.to_string()))?;
         self.transport
@@ -299,9 +305,11 @@ fn reset_body(link: &Url, expires_in: Duration) -> String {
 }
 
 /// Render a `Duration` as the lowest-precision plain-English string
-/// that loses no information: "24 hours", "30 minutes", "45 seconds".
-/// Used by the email-body templates so the "expires in N" copy
-/// always matches the effective TTL.
+/// that loses no information *down to a one-second granularity*:
+/// "24 hours", "30 minutes", "45 seconds". Sub-second components
+/// are truncated (`as_secs`) because the surrounding TTLs are
+/// always whole seconds. Used by the email-body templates so the
+/// "expires in N" copy always matches the effective TTL.
 fn humanise_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 3600 && secs % 3600 == 0 {

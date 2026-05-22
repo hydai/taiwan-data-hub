@@ -95,6 +95,14 @@ pub trait UserRepo: Send + Sync {
         id: Uuid,
         password_hash: &str,
     ) -> Result<bool, StorageError>;
+
+    /// Delete a row by primary key. Returns `Ok(true)` when a row
+    /// was actually removed. Used by the auth crate as a
+    /// compensation step when [`UserRepo::insert_user`] succeeds
+    /// but the follow-up `auth_tokens` insert (in the same
+    /// register flow) fails — without it, a retry would see
+    /// "email taken" forever.
+    async fn delete_user(&self, id: Uuid) -> Result<bool, StorageError>;
 }
 
 /// Operations on `auth_tokens` consumed by the auth crate.
@@ -183,6 +191,14 @@ impl UserRepo for Storage {
     ) -> Result<bool, StorageError> {
         let result = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
             .bind(password_hash)
+            .bind(id)
+            .execute(self.pool())
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_user(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM users WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await?;
