@@ -38,15 +38,19 @@ pub struct ProviderProfile {
     /// provider returns one (Google's OIDC `name` claim when the
     /// caller requested the `profile` scope, GitHub's `/user.name`
     /// when set). `None` when the provider didn't return it OR
-    /// when this provider impl doesn't yet plumb it through. The
-    /// auth crate stores it for future use by the gateway; the
-    /// v0.1 `users` table has no display-name column so it's not
-    /// persisted yet — a follow-up will add the storage layer.
+    /// when this provider impl doesn't yet plumb it through.
+    ///
+    /// Exposed on this trait surface so callers can read it; the
+    /// v0.1 [`crate::OAuthService`] flow does NOT persist it (the
+    /// `users` table has no display-name column yet). Storing it
+    /// is tracked as a follow-up that needs the schema migration.
     pub display_name: Option<String>,
     /// Optional provider-supplied avatar URL. Populated from
     /// Google's OIDC `picture` claim or GitHub's `/user.avatar_url`.
-    /// Same v0.1 caveat as `display_name`: extracted by the
-    /// provider, not yet persisted.
+    ///
+    /// Same v0.1 caveat as `display_name`: extracted and exposed on
+    /// the trait surface, but not persisted by the current
+    /// `OAuthService` flow.
     pub avatar_url: Option<String>,
 }
 
