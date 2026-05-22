@@ -62,12 +62,17 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Reads from any [`DatasetCacheLookup`]; production code plugs in a
 /// `storage::Storage`, tests plug in an in-memory stub.
 ///
-/// `recorder` is optional: when supplied, every successful call
-/// writes a `usage_records` row with `tool = 'query_rows'`. The
-/// #3.6 hot-cache pipeline relies on these rows to detect
-/// frequently-queried datasets (≥ 50 hits / 7 days). Callers
-/// that don't care about telemetry (in-memory tests) can leave
-/// it `None`.
+/// `recorder` is optional: when supplied, **every call that
+/// resolves the dataset** writes a `usage_records` row with
+/// `tool = 'query_rows'` — *including* cache-miss (`NotFound` on
+/// uncached) and execution-failure paths. Recording an "attempt"
+/// (not just a success) is deliberate: the #3.6 hot-cache
+/// pipeline's `cache_hit_ratio` metric needs both numerator
+/// (cached=true at aggregation time) and denominator (total
+/// attempts), and would otherwise be biased to ≈ 1.0. Recording
+/// is best-effort — a write failure logs but doesn't fail the
+/// query. Callers that don't care about telemetry (in-memory
+/// tests) can leave it `None`.
 #[derive(Clone)]
 pub struct QueryRowsTool {
     lookup: Arc<dyn DatasetCacheLookup>,

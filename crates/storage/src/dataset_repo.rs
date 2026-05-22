@@ -1110,10 +1110,11 @@ impl Storage {
 
     /// #3.6 hot-cache pipeline: aggregate cache hit ratio for a
     /// `query_rows` window. A "hit" is a `query_rows` invocation
-    /// against a dataset whose `cached` flag is `true` **at the
-    /// time this aggregation runs** (i.e. when `cache_hit_ratio`
-    /// is called), not at the time of the original
-    /// `query_rows` call.
+    /// whose dataset has `cached = true` **right now** — that is,
+    /// when this aggregation method runs, not at the original
+    /// `query_rows` call time. (`usage_records` has no per-row
+    /// snapshot of the cache flag, so this is the closest
+    /// approximation; see paragraph below for the drift bound.)
     ///
     /// The join is against the *current* `datasets.cached` flag
     /// because `usage_records` has no per-row snapshot of the
