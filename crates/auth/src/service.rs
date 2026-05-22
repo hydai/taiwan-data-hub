@@ -168,6 +168,13 @@ where
     /// Returns `AuthError::EmailTaken` only to internal callers;
     /// the HTTP boundary maps that to the same uniform response
     /// as success so address presence cannot be probed.
+    ///
+    /// Unlike `request_password_reset` / `resend_verification`
+    /// (which swallow mail-send failures for enumeration safety),
+    /// register propagates cap-exhaustion errors as a normal
+    /// failure — registration is a deliberate first-party action
+    /// where surfacing 5xx tells the user to retry; there is no
+    /// account-existence to hide at this point.
     pub async fn register(&self, email: &str, password: &str) -> Result<(), AuthError> {
         let hash = hash_password(password.to_owned()).await?;
         let user = match self.users.insert_user(email, &hash).await {

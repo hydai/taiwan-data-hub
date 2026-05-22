@@ -28,9 +28,9 @@ impl UserRepo for InMemoryUserRepo {
             .values()
             .any(|u| u.email.to_lowercase().eq(&email.to_lowercase()))
         {
-            return Err(StorageError::UniqueViolation(format!(
-                "users_email_key on {email}"
-            )));
+            // Mirror the production storage layer's payload: the
+            // constraint name only, never the offending email.
+            return Err(StorageError::UniqueViolation("users_email_key".to_owned()));
         }
         let now = Utc::now();
         let user = User {
@@ -66,7 +66,12 @@ impl UserRepo for InMemoryUserRepo {
         if user.email_verified_at.is_some() {
             return Ok(false);
         }
-        user.email_verified_at = Some(Utc::now());
+        // Mirror migration 0008's `users_set_updated_at_trg` so the
+        // fake's behavior matches what production Postgres records
+        // on every UPDATE.
+        let now = Utc::now();
+        user.email_verified_at = Some(now);
+        user.updated_at = now;
         Ok(true)
     }
 
@@ -80,6 +85,7 @@ impl UserRepo for InMemoryUserRepo {
             return Ok(false);
         };
         password_hash.clone_into(&mut user.password_hash);
+        user.updated_at = Utc::now(); // matches the production trigger
         Ok(true)
     }
 
