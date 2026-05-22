@@ -33,7 +33,7 @@ use axum::extract::{Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
-use tracing::warn;
+use tracing::debug;
 
 /// axum middleware that runs on every request. Reads the
 /// `tdh_session` cookie, validates it against the [`SessionService`],
@@ -67,7 +67,20 @@ pub async fn session_middleware(
                 // public routes on a session-store hiccup. The
                 // private routes that REQUIRE a session will
                 // 401 because the extension wasn't inserted.
-                warn!(
+                //
+                // Logged at `debug!`, not `warn!`: under a
+                // sustained outage, every cookie-bearing
+                // request lands here, and per-request warnings
+                // would flood logs faster than they'd give
+                // operators a useful signal. The right outage
+                // signal lives in (1) the storage health
+                // probe and (2) a session-lookup-failure
+                // counter — both planned alongside the
+                // observability work in a later milestone.
+                // Until then, `debug!` keeps the cause visible
+                // in dev traces without paying production log
+                // amplification.
+                debug!(
                     error = %e,
                     "session lookup failed; request proceeding anonymously"
                 );
@@ -188,15 +201,27 @@ mod tests {
         h
     }
 
+    /// `Cookie:` header value formatted using the canonical
+    /// [`SESSION_COOKIE_NAME`] constant. Going through this
+    /// helper means a future rename of the cookie key only
+    /// touches the source constant — these tests stay focused
+    /// on parsing/serialisation behaviour rather than the
+    /// literal name.
+    fn session_cookie_header(value: &str) -> String {
+        format!("{SESSION_COOKIE_NAME}={value}")
+    }
+
     #[test]
     fn extracts_single_cookie() {
-        let h = header_map("tdh_session=abc123");
+        let h = header_map(&session_cookie_header("abc123"));
         assert_eq!(extract_session_cookie(&h), Some("abc123"));
     }
 
     #[test]
     fn extracts_session_amid_other_cookies() {
-        let h = header_map("other=foo; tdh_session=abc123; tracker=bar");
+        let h = header_map(&format!(
+            "other=foo; {SESSION_COOKIE_NAME}=abc123; tracker=bar"
+        ));
         assert_eq!(extract_session_cookie(&h), Some("abc123"));
     }
 
@@ -216,7 +241,7 @@ mod tests {
         );
         h.append(
             axum::http::header::COOKIE,
-            HeaderValue::from_static("tdh_session=abc123"),
+            HeaderValue::from_str(&session_cookie_header("abc123")).unwrap(),
         );
         assert_eq!(extract_session_cookie(&h), Some("abc123"));
     }
@@ -229,7 +254,7 @@ mod tests {
 
     #[test]
     fn returns_none_for_empty_value() {
-        let h = header_map("tdh_session=");
+        let h = header_map(&session_cookie_header(""));
         assert_eq!(extract_session_cookie(&h), None);
     }
 
@@ -248,7 +273,7 @@ mod tests {
         assert!(s.contains("SameSite=Lax"));
         assert!(s.contains("Path=/"));
         assert!(s.contains("Max-Age=1209600"));
-        assert!(s.starts_with("tdh_session=tok;"));
+        assert!(s.starts_with(&format!("{SESSION_COOKIE_NAME}=tok;")));
     }
 
     #[test]
@@ -270,7 +295,7 @@ mod tests {
         let s = build_clear_session_cookie(true);
         assert!(s.contains("Max-Age=0"));
         assert!(s.contains("Secure"));
-        assert!(s.starts_with("tdh_session=;"));
+        assert!(s.starts_with(&format!("{SESSION_COOKIE_NAME}=;")));
     }
 
     #[test]

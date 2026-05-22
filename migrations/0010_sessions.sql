@@ -93,16 +93,13 @@ CREATE TABLE sessions (
 -- the "active sessions" UI in #4.6.
 CREATE INDEX sessions_user_id_idx ON sessions (user_id);
 
--- Sweep candidates for the GC job over EXPIRED-BUT-UNREVOKED
--- sessions. The partial predicate (`revoked_at IS NULL`)
--- intentionally excludes revoked rows: they are
--- comparatively low-volume (driven by explicit user action,
--- not by traffic) and the existing `sessions_user_id_idx`
--- already serves the "revoke all for user X" sweep without
--- needing a second partial index. If revoked-row GC becomes a
--- hotspot we can add `WHERE revoked_at IS NOT NULL` later; for
--- now keeping a single narrow index minimises write
--- amplification on every authenticated request.
-CREATE INDEX sessions_expired_active_idx
-    ON sessions (expires_at)
-    WHERE revoked_at IS NULL;
+-- No index on `expires_at` yet. The GC sweep that would use it
+-- isn't built in #4.5 (lands in a later milestone), and the
+-- sliding-refresh path REWRITES `expires_at` on every
+-- authenticated request — a btree index on the column would
+-- therefore pay one leaf update per request for a read that
+-- doesn't yet exist. When the GC job lands we'll pick the
+-- right index shape for its actual access pattern (likely BRIN
+-- on `expires_at`, or `expires_at`-partitioning if the table
+-- grows past the BRIN sweet spot); both perform better for
+-- range-scan-by-time-bucket workloads than a hot btree.
