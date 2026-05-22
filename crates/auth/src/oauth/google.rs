@@ -356,6 +356,41 @@ struct JwkSet {
     keys: Vec<Jwk>,
 }
 
+/// JWK plus a pre-built [`DecodingKey`] so each login doesn't
+/// redo the base64-decode + RSA-component parse. `DecodingKey`
+/// is `Clone` and cheap to hand out by value to the verifier.
+#[derive(Clone)]
+struct CachedJwk {
+    kid: String,
+    alg: Option<String>,
+    key: DecodingKey,
+}
+
+/// Build cached entries from a parsed [`JwkSet`]. JWKs with
+/// malformed `n`/`e` (or non-RS256 declared `alg`) are silently
+/// dropped — the kid simply won't be found at lookup time, which
+/// surfaces as `no JWK matches kid=…` (the exact error we'd have
+/// otherwise produced lazily). Silent-drop is safe here because
+/// every legitimate kid Google publishes IS RS256 with valid RSA
+/// components; a malformed JWK in the set means Google's response
+/// is broken and that kid is unusable regardless.
+fn build_cached_jwks(set: JwkSet) -> Vec<CachedJwk> {
+    set.keys
+        .into_iter()
+        .filter_map(|jwk| {
+            if matches!(jwk.alg.as_deref(), Some(a) if a != "RS256") {
+                return None;
+            }
+            let key = DecodingKey::from_rsa_components(&jwk.n, &jwk.e).ok()?;
+            Some(CachedJwk {
+                kid: jwk.kid,
+                alg: jwk.alg,
+                key,
+            })
+        })
+        .collect()
+}
+
 /// Mutable JWKS cache shared across logins.
 ///
 /// Two operating modes, distinguished by [`JwksCacheInner::frozen`]:
@@ -376,7 +411,10 @@ pub struct JwksCache {
 }
 
 struct JwksCacheInner {
-    keys: Vec<Jwk>,
+    /// JWKs PLUS the pre-built [`DecodingKey`] each one verifies
+    /// with. Building the key once at fetch time avoids redoing
+    /// the base64 + RSA-component parse on every login.
+    cached: Vec<CachedJwk>,
     last_fetched_at: Option<Instant>,
     /// `true` when the cache was preseeded (tests). Refreshes are
     /// suppressed so a stale TTL or an unknown `kid` doesn't try
@@ -393,7 +431,7 @@ impl JwksCache {
             http,
             jwks_url,
             inner: Mutex::new(JwksCacheInner {
-                keys: Vec::new(),
+                cached: Vec::new(),
                 last_fetched_at: None,
                 frozen: false,
             }),
@@ -406,7 +444,7 @@ impl JwksCache {
     /// don't have to mock the JWKS endpoint.
     #[doc(hidden)]
     pub fn with_preseeded_keys(jwks_json: &str) -> Result<Arc<Self>, AuthError> {
-        let JwkSet { keys } = serde_json::from_str(jwks_json)
+        let set: JwkSet = serde_json::from_str(jwks_json)
             .map_err(|e| AuthError::OAuthExchange(format!("preseeded JWKS not valid JSON: {e}")))?;
         Ok(Arc::new(Self {
             // Both fields are unreachable while `frozen = true`;
@@ -414,7 +452,7 @@ impl JwksCache {
             http: Client::new(),
             jwks_url: String::new(),
             inner: Mutex::new(JwksCacheInner {
-                keys,
+                cached: build_cached_jwks(set),
                 last_fetched_at: Some(Instant::now()),
                 frozen: true,
             }),
@@ -432,7 +470,7 @@ impl JwksCache {
                 .is_none_or(|t| t.elapsed() >= JWKS_TTL);
         if stale {
             let fetched = self.fetch_jwks().await?;
-            guard.keys = fetched.keys;
+            guard.cached = build_cached_jwks(fetched);
             guard.last_fetched_at = Some(Instant::now());
         }
         // Resilient kid-miss path: if Google rotates a signing key
@@ -441,26 +479,27 @@ impl JwksCache {
         // the mutex so concurrent callers don't stampede). Without
         // this every login fails for up to JWKS_TTL after a Google
         // key rotation. A frozen test cache skips this branch.
-        let mut jwk = guard.keys.iter().find(|k| k.kid == kid).cloned();
-        if jwk.is_none() && !guard.frozen && !stale {
+        let mut entry = guard.cached.iter().find(|c| c.kid == kid).cloned();
+        if entry.is_none() && !guard.frozen && !stale {
             let fetched = self.fetch_jwks().await?;
-            guard.keys = fetched.keys;
+            guard.cached = build_cached_jwks(fetched);
             guard.last_fetched_at = Some(Instant::now());
-            jwk = guard.keys.iter().find(|k| k.kid == kid).cloned();
+            entry = guard.cached.iter().find(|c| c.kid == kid).cloned();
         }
-        let jwk = jwk.ok_or_else(|| {
+        let entry = entry.ok_or_else(|| {
             AuthError::OAuthExchange(format!("no JWK matches kid={kid} in Google's JWKS"))
         })?;
-        if let Some(alg) = jwk.alg.as_deref()
+        if let Some(alg) = entry.alg.as_deref()
             && alg != "RS256"
         {
+            // Defence-in-depth: `build_cached_jwks` already drops
+            // non-RS256 entries, but if a future refactor changes
+            // that filter this check still rejects at lookup time.
             return Err(AuthError::OAuthExchange(format!(
                 "JWK kid={kid} advertises alg={alg}, refusing (only RS256 accepted)"
             )));
         }
-        DecodingKey::from_rsa_components(&jwk.n, &jwk.e).map_err(|e| {
-            AuthError::OAuthExchange(format!("JWK kid={kid} not valid RSA components: {e}"))
-        })
+        Ok(entry.key)
     }
 
     async fn fetch_jwks(&self) -> Result<JwkSet, AuthError> {
