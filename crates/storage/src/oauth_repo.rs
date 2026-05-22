@@ -67,8 +67,25 @@ pub trait OAuthStateRepo: Send + Sync {
 #[async_trait]
 pub trait OAuthAccountRepo: Send + Sync {
     /// Upsert by (`provider`, `provider_user_id`). On conflict,
-    /// rotates the encrypted tokens + bumps `updated_at`.
+    /// rotates the encrypted tokens + bumps `updated_at` but
+    /// leaves `user_id` untouched — the provider identity binds
+    /// to the original user even if the auth service's
+    /// email-based fallback would otherwise pick a different
+    /// row. That defends against an account-takeover where an
+    /// attacker can change their provider-side email to match
+    /// an existing victim's address.
     async fn upsert_oauth_account(&self, new: NewOAuthAccount) -> Result<(), StorageError>;
+
+    /// Look up the `user_id` for an existing
+    /// (`provider`, `provider_user_id`) link. Returned by the
+    /// auth service's `finish_login` BEFORE the email-based
+    /// fallback so the provider identity stays bound to the
+    /// original user.
+    async fn find_user_id_by_provider_identity(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<Uuid>, StorageError>;
 }
 
 #[async_trait]
@@ -121,6 +138,11 @@ impl OAuthStateRepo for Storage {
 #[async_trait]
 impl OAuthAccountRepo for Storage {
     async fn upsert_oauth_account(&self, new: NewOAuthAccount) -> Result<(), StorageError> {
+        // `user_id` is deliberately ABSENT from the UPDATE set:
+        // the binding made on the original INSERT stays put even
+        // if the auth-service caller passes a different user_id
+        // (which the service shouldn't, but the DB enforces it
+        // independently as defense-in-depth).
         sqlx::query(
             "INSERT INTO oauth_accounts
                 (user_id, provider, provider_user_id,
@@ -130,7 +152,6 @@ impl OAuthAccountRepo for Storage {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (provider, provider_user_id)
              DO UPDATE SET
-                user_id = EXCLUDED.user_id,
                 access_token_ciphertext = EXCLUDED.access_token_ciphertext,
                 access_token_nonce = EXCLUDED.access_token_nonce,
                 refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
@@ -148,5 +169,21 @@ impl OAuthAccountRepo for Storage {
         .execute(self.pool())
         .await?;
         Ok(())
+    }
+
+    async fn find_user_id_by_provider_identity(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let row = sqlx::query_as::<_, (Uuid,)>(
+            "SELECT user_id FROM oauth_accounts
+              WHERE provider = $1 AND provider_user_id = $2",
+        )
+        .bind(provider)
+        .bind(provider_user_id)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(|(uid,)| uid))
     }
 }

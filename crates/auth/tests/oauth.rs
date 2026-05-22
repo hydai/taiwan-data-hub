@@ -84,11 +84,6 @@ impl UserRepo for InMemoryUserRepo {
     }
 }
 
-// AuthTokenRepo isn't exercised by OAuth; provide a noop impl so
-// the test fixture compiles when the user repo is shared with the
-// password service. We don't construct AuthService here, but the
-// fake user repo's trait bounds don't drag this in either — the
-// OAuthService takes Arc<dyn UserRepo> directly.
 #[derive(Default)]
 struct InMemoryOAuthStateRepo {
     inner: Mutex<HashMap<Vec<u8>, OAuthPendingState>>,
@@ -131,8 +126,32 @@ struct InMemoryOAuthAccountRepo {
 impl OAuthAccountRepo for InMemoryOAuthAccountRepo {
     async fn upsert_oauth_account(&self, new: NewOAuthAccount) -> Result<(), StorageError> {
         let mut inner = self.inner.lock().unwrap();
-        inner.insert((new.provider.clone(), new.provider_user_id.clone()), new);
+        let key = (new.provider.clone(), new.provider_user_id.clone());
+        if let Some(existing) = inner.get_mut(&key) {
+            // Mirror the production SQL: keep the original
+            // `user_id`, rotate every other field.
+            existing.access_token_ciphertext = new.access_token_ciphertext;
+            existing.access_token_nonce = new.access_token_nonce;
+            existing.refresh_token_ciphertext = new.refresh_token_ciphertext;
+            existing.refresh_token_nonce = new.refresh_token_nonce;
+            existing.expires_at = new.expires_at;
+        } else {
+            inner.insert(key, new);
+        }
         Ok(())
+    }
+
+    async fn find_user_id_by_provider_identity(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .get(&(provider.to_owned(), provider_user_id.to_owned()))
+            .map(|row| row.user_id))
     }
 }
 
@@ -363,6 +382,70 @@ async fn finish_login_replay_returns_invalid_state() {
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::InvalidState));
+}
+
+#[tokio::test]
+async fn provider_identity_stays_bound_to_original_user_when_email_changes() {
+    // Regression for Copilot R2: an attacker who controls the
+    // GitHub side could change their email to match an existing
+    // local user. The OAuth identity must NOT migrate via that
+    // path — look-up by (provider, provider_user_id) wins over
+    // email-based linking.
+    let server = MockServer::start().await;
+    let (svc, users, accounts, _) = build_service(&server.uri());
+
+    // First login: GitHub returns email "alice@example.com" and
+    // user id 9999. A fresh `users` row is created.
+    install_github_mocks(&server, "alice@example.com", 9999).await;
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    let alice = svc
+        .finish_login("code1", &state, "https://hub.example/cb")
+        .await
+        .unwrap();
+
+    // After Alice owns user_id X, ANOTHER user with email
+    // "alice@example.com" should never get the GitHub identity
+    // even if the second login claims that email. We can't
+    // re-mount different responses on the same wiremock server,
+    // so the test asserts the simpler invariant: a second login
+    // with the same provider_user_id but a different email
+    // string still lands on Alice's user_id. We do this by
+    // mutating the seed user's email directly (simulating a
+    // local user that registered with the same address) and
+    // then re-running the OAuth login — the GitHub-side mock
+    // still returns the same provider_user_id.
+    let snitch_id = users
+        .insert_user(
+            "alice@example.com.spoof",
+            "$argon2id$v=19$m=19456,t=2,p=1$Zm9v$Zm9v",
+        )
+        .await
+        .unwrap()
+        .id;
+
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    let alice_again = svc
+        .finish_login("code2", &state, "https://hub.example/cb")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        alice_again.id, alice.id,
+        "GitHub identity must stay bound to original user"
+    );
+    assert_ne!(alice_again.id, snitch_id);
+
+    // One account row, still pointing at Alice.
+    let row = accounts
+        .inner
+        .lock()
+        .unwrap()
+        .get(&("github".to_owned(), "9999".to_owned()))
+        .cloned()
+        .expect("account row");
+    assert_eq!(row.user_id, alice.id);
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ use storage::{
     NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo, StorageError, UserRepo,
 };
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::AuthError;
 use crate::oauth::crypto::TokenCipher;
@@ -143,7 +144,21 @@ where
             .provider
             .exchange_and_fetch_profile(code, &pending.code_verifier, redirect_uri)
             .await?;
-        let user = self.link_or_create_user(&profile.email).await?;
+        // Identity-stability: if THIS provider identity is
+        // already linked to a user, that binding wins regardless
+        // of what email the provider now reports. Defends against
+        // an attacker who changes their provider-side email to
+        // match an existing victim's address — the email-based
+        // fallback would otherwise move the identity to them.
+        let user = if let Some(user_id) = self
+            .accounts
+            .find_user_id_by_provider_identity(self.provider.name(), &profile.provider_user_id)
+            .await?
+        {
+            self.lookup_user_or_internal(user_id).await?
+        } else {
+            self.link_or_create_user(&profile.email).await?
+        };
         let (access_ct, access_nonce) = self
             .cipher
             .encrypt(profile.access_token.as_bytes())
@@ -185,6 +200,23 @@ where
             })
             .await?;
         Ok(user)
+    }
+
+    /// Re-read a user by primary key, mapping `None` to
+    /// `AuthError::Internal` since the caller just verified
+    /// they existed.
+    async fn lookup_user_or_internal(&self, user_id: Uuid) -> Result<AuthenticatedUser, AuthError> {
+        let user = self.users.find_user_by_id(user_id).await?.ok_or_else(|| {
+            AuthError::Internal(format!(
+                "oauth_account references user {user_id} but the user row is gone"
+            ))
+        })?;
+        Ok(AuthenticatedUser {
+            id: user.id,
+            email: user.email,
+            email_verified_at: user.email_verified_at,
+            created_at: user.created_at,
+        })
     }
 
     /// Find a user by email or create a fresh one. The created
