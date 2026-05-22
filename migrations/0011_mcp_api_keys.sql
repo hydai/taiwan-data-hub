@@ -62,12 +62,16 @@ CREATE TABLE mcp_api_keys (
     -- authenticated request that carries this key. NULL for a
     -- freshly-minted key that has not yet been used. The audit
     -- timeline `created_at <= last_used_at` is monotonic
-    -- because (a) the auth crate captures one `Utc::now()` per
-    -- issue and reuses it for the row's `created_at`, and (b)
-    -- the middleware uses `GREATEST(last_used_at, $now)` to
-    -- defend against multi-instance clock skew so each
-    -- subsequent touch can only advance the column. Single
-    -- clock source + monotonic clamp = the invariant holds.
+    -- because the touch UPDATE clamps via
+    -- `GREATEST(COALESCE(last_used_at, $now), $now, created_at)`:
+    --
+    --   * Same-instance skew: `GREATEST(last_used_at, $now)`
+    --     prevents the column from rolling backwards.
+    --   * Cross-instance skew (first verify on a slightly-
+    --     behind instance after issue on a slightly-ahead
+    --     one): `GREATEST(..., created_at)` clamps the first
+    --     touch up to `created_at` so `last_used_at <
+    --     created_at` is unrepresentable.
     last_used_at    TIMESTAMPTZ,
     -- Set on revoke / rotate. A NULL value means the key is
     -- valid. The lookup predicate is `revoked_at IS NULL` so

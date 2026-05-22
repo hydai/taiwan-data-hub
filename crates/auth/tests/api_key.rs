@@ -111,14 +111,19 @@ impl ApiKeyRepo for InMemoryApiKeyRepo {
         if row.revoked_at.is_some() {
             return Ok(None);
         }
-        // Mirror the production `GREATEST(COALESCE(...), $2)`:
-        // last_used_at never moves backwards even under clock
-        // skew.
-        let next = match row.last_used_at {
+        // Mirror the production
+        // `GREATEST(COALESCE(last_used_at, $2), $2, created_at)`:
+        // (1) last_used_at never moves backwards under same-
+        // instance skew, AND (2) the very first touch is also
+        // clamped against `created_at` so a cross-instance
+        // skew (key issued on instance A's slightly-ahead
+        // clock, first verify on instance B's slightly-behind
+        // clock) cannot record `last_used_at < created_at`.
+        let candidate = match row.last_used_at {
             Some(prev) if prev > now => prev,
             _ => now,
         };
-        row.last_used_at = Some(next);
+        row.last_used_at = Some(candidate.max(row.created_at));
         Ok(Some(snapshot(row)))
     }
 
@@ -410,6 +415,46 @@ async fn issue_normalises_scopes_at_the_service_layer() {
         persisted.scopes,
         vec!["read".to_owned(), "write".to_owned()],
         "normalisation should trim, drop empties, dedup, and sort"
+    );
+}
+
+#[tokio::test]
+async fn verify_clamps_first_touch_to_created_at_under_cross_instance_skew() {
+    // Multi-instance failure mode the R13 fix targets: key
+    // issued on instance A whose clock was 30s AHEAD; first
+    // verify lands on instance B whose clock is now (so $now
+    // < created_at). Without `GREATEST(..., created_at)` the
+    // first touch would record `last_used_at < created_at`
+    // and violate the documented audit invariant. With the
+    // clamp, `last_used_at` is pinned to `created_at` for
+    // that first touch.
+    let (svc, repo) = build_service();
+    let user = fresh_user_id();
+    let issued = svc
+        .issue(user, "future-clock".into(), vec![], "free".into())
+        .await
+        .unwrap();
+    // Reach into the fake to simulate instance A's
+    // slightly-ahead clock: set `created_at` to 30 seconds
+    // in the future relative to wall-clock now.
+    let inflated_created_at = Utc::now() + chrono::Duration::seconds(30);
+    {
+        let mut inner = repo.inner.lock().unwrap();
+        let row = inner.get_mut(&issued.id).unwrap();
+        row.created_at = inflated_created_at;
+    }
+    // First verify lands while wall-clock is < created_at.
+    svc.verify(&issued.cleartext)
+        .await
+        .unwrap()
+        .expect("verifies");
+    let listed = svc.list_for_user(user).await.unwrap();
+    let row = listed.iter().find(|r| r.id == issued.id).unwrap();
+    assert!(
+        row.last_used_at.unwrap() >= row.created_at,
+        "last_used_at ({:?}) must clamp to created_at ({:?})",
+        row.last_used_at,
+        row.created_at
     );
 }
 

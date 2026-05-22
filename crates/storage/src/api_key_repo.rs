@@ -152,15 +152,31 @@ impl ApiKeyRepo for Storage {
         // Same single-statement pattern as the session repo:
         // validity check + touch + read in one UPDATE so a
         // concurrent revoke can't sneak a "valid" return past
-        // the predicate. `last_used_at` is wrapped in
-        // `GREATEST(last_used_at, $2)` so a request from a
-        // gateway instance with a slightly-trailing clock
-        // can't roll the audit timestamp backwards.
-        // `COALESCE` handles the NULL case for the very first
-        // request on a freshly-minted key.
+        // the predicate.
+        //
+        // `last_used_at` is clamped via
+        // `GREATEST(COALESCE(last_used_at, $2), $2, created_at)`
+        // — three guards composed in one expression:
+        //
+        //   * `COALESCE(last_used_at, $2)` handles the NULL
+        //     case for the very first request on a
+        //     freshly-minted key.
+        //   * `GREATEST(..., $2)` prevents a request from a
+        //     gateway instance with a slightly-trailing clock
+        //     from rolling the audit timestamp backwards.
+        //   * `GREATEST(..., created_at)` defends the cross-
+        //     instance skew case the previous two guards
+        //     miss: key minted on instance A with a slightly-
+        //     ahead clock; first verify on instance B with a
+        //     slightly-behind clock; `$2 < created_at` on B
+        //     and `last_used_at` is still NULL. Without this
+        //     guard the row would record `last_used_at <
+        //     created_at` and break the documented audit
+        //     invariant. With it, `last_used_at` is clamped
+        //     to `created_at` and the invariant holds.
         let row = sqlx::query_as::<_, ApiKeyRowSql>(
             "UPDATE mcp_api_keys
-                SET last_used_at = GREATEST(COALESCE(last_used_at, $2), $2)
+                SET last_used_at = GREATEST(COALESCE(last_used_at, $2), $2, created_at)
               WHERE key_hash = $1
                 AND revoked_at IS NULL
               RETURNING id, user_id, name, key_prefix, scopes,
