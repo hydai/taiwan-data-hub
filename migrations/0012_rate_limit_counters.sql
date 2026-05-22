@@ -5,10 +5,21 @@
 -- deployments, dev laptops, small self-hosts). The auth crate's
 -- `PgRateLimiter` uses `INSERT ... ON CONFLICT DO UPDATE` to
 -- atomically read-and-bump the current window's counter in a
--- single statement; rows older than the current window get
--- overwritten by the same UPSERT, so eventual table size is
--- bounded by the active key set during the most recent window
--- (plus rows that haven't been swept yet).
+-- single statement; the UPSERT overwrites stale window starts
+-- in-place for keys that keep getting traffic, but a key that
+-- stops being used leaves its row behind. Without a periodic
+-- sweep, table size therefore grows monotonically with the
+-- count of distinct keys (IPs, sessions, …) ever observed —
+-- not bounded by the active set.
+--
+-- GC: `RateLimitRepo::sweep_expired` deletes rows whose
+-- `window_start` is older than a caller-chosen cutoff. The
+-- scheduled job that calls it doesn't ship in this PR (no
+-- cron / task-scheduler wiring yet); operators running this
+-- backend should plan to invoke it on a periodic timer
+-- (recommended cadence: hourly with `cutoff = now - 1 hour`).
+-- A future ETL / housekeeping milestone wires the sweep
+-- automatically.
 --
 -- The key is a free-form TEXT shaped by the caller as
 -- `<kind>:<id>` (e.g. `ip:203.0.113.42`, `key:<uuid>`,
