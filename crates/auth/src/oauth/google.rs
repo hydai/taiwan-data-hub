@@ -242,16 +242,29 @@ impl GoogleProvider {
             .send()
             .await
             .map_err(|e| AuthError::OAuthExchange(format!("token POST failed: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(AuthError::OAuthExchange(format!(
-                "token endpoint returned {}",
-                resp.status()
-            )));
-        }
-        let body: GoogleTokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| AuthError::OAuthExchange(format!("token JSON decode failed: {e}")))?;
+        // Read the body BEFORE branching on status so an HTTP 4xx
+        // from Google still surfaces its OAuth-shaped error JSON
+        // (`{"error": "invalid_grant", "error_description": "..."}`)
+        // instead of being collapsed to "token endpoint returned
+        // 400". The `error` branch below covers both the
+        // 2xx-with-error-field and the 4xx-with-error-body cases.
+        let status = resp.status();
+        let body_text = resp.text().await.map_err(|e| {
+            AuthError::OAuthExchange(format!("token body read failed: {e} (status={status})"))
+        })?;
+        let body: GoogleTokenResponse = match serde_json::from_str(&body_text) {
+            Ok(body) => body,
+            Err(e) => {
+                // Non-JSON body: most informative thing we can do
+                // is include the status + a short body snippet so
+                // ops can diagnose. Truncate to keep the log line
+                // bounded if Google ever responds with HTML.
+                let snippet: String = body_text.chars().take(256).collect();
+                return Err(AuthError::OAuthExchange(format!(
+                    "token JSON decode failed: {e} (status={status}, body={snippet:?})"
+                )));
+            }
+        };
         if let Some(err) = body.error.as_deref() {
             let msg = match body.error_description.as_deref() {
                 Some(desc) if !desc.is_empty() => {
@@ -260,6 +273,16 @@ impl GoogleProvider {
                 _ => format!("Google rejected token exchange: {err}"),
             };
             return Err(AuthError::OAuthExchange(msg));
+        }
+        if !status.is_success() {
+            // Non-success with no `error` field — unusual but
+            // possible if Google returns a 5xx with an empty body
+            // or a non-OAuth-shaped error. Surface the status +
+            // body snippet so ops can debug.
+            let snippet: String = body_text.chars().take(256).collect();
+            return Err(AuthError::OAuthExchange(format!(
+                "token endpoint returned {status} with no error field (body={snippet:?})"
+            )));
         }
         if !matches!(body.token_type.as_deref(), Some("Bearer" | "bearer") | None) {
             return Err(AuthError::OAuthExchange(format!(

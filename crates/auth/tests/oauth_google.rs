@@ -743,3 +743,37 @@ async fn finish_login_persists_refresh_token_when_rotated() {
         "refresh_token plaintext must rotate on re-authorize"
     );
 }
+
+#[tokio::test]
+async fn finish_login_surfaces_oauth_error_json_from_4xx() {
+    // Regression for Copilot R2: when Google returns HTTP 4xx
+    // with an OAuth-shaped error body, the auth crate must
+    // surface the `error` / `error_description` instead of
+    // collapsing to "token endpoint returned 400". Without the
+    // body-first parse, ops would see no actionable detail.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_grant",
+            "error_description": "Bad Request"
+        })))
+        .mount(&server)
+        .await;
+
+    let (svc, _, _, _) = build_service(&server.uri());
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    let err = svc
+        .finish_login("test-code", &state, "https://hub.example/cb")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            AuthError::OAuthExchange(msg)
+                if msg.contains("invalid_grant") && msg.contains("Bad Request")
+        ),
+        "expected `invalid_grant (Bad Request)` to surface, got: {err:?}"
+    );
+}
