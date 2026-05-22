@@ -26,7 +26,7 @@ use mcp_core::rmcp::transport::streamable_http_server::{
 use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
 use object_store::{LocalFsObjectStore, ObjectStore, S3Credentials, S3ObjectStore};
 use serde::Serialize;
-use shared::Mode;
+use shared::{Mode, ModeParseError};
 use std::sync::Arc;
 use storage::Storage;
 use tokio::net::TcpListener;
@@ -389,13 +389,23 @@ fn non_empty_env(key: &str) -> Option<String> {
     }
 }
 
-/// Parse `GATEWAY_ADDR` from env (or the default) into a `SocketAddr`.
-/// Extracted so `serve` and `doctor` share the same error wording.
+/// Parse `GATEWAY_ADDR` into a `SocketAddr` (falling back to
+/// [`DEFAULT_ADDR`] when unset). Pure so `serve` and `doctor`
+/// share the same parse + error-wording path: `serve` calls
+/// [`read_gateway_addr`] which reads env and delegates here,
+/// `doctor` calls [`validate_gateway_addr`] which delegates here
+/// with the env value it already pulled into [`EnvSnapshot`].
+fn read_gateway_addr_value(raw: Option<&str>) -> anyhow::Result<SocketAddr> {
+    let raw = raw.unwrap_or(DEFAULT_ADDR);
+    raw.parse().with_context(|| {
+        format!("{raw:?}: GATEWAY_ADDR must be a valid socket address (host:port)")
+    })
+}
+
+/// Read `GATEWAY_ADDR` from process env (or the default) and parse
+/// it. Thin wrapper over [`read_gateway_addr_value`] for `serve`.
 fn read_gateway_addr() -> anyhow::Result<SocketAddr> {
-    std::env::var("GATEWAY_ADDR")
-        .unwrap_or_else(|_| DEFAULT_ADDR.to_owned())
-        .parse()
-        .context("GATEWAY_ADDR must be a valid socket address (host:port)")
+    read_gateway_addr_value(std::env::var("GATEWAY_ADDR").ok().as_deref())
 }
 
 /// Returns a render-ready string describing which routes require
@@ -468,7 +478,7 @@ impl DoctorReport {
 
     fn from_snapshot(env: &EnvSnapshot) -> Self {
         let mut report = Self::default();
-        report.push_entry(validate_mode(env.mode.as_deref()));
+        report.push_entry(validate_mode(&env.mode));
         report.push_entry(validate_gateway_addr(env.gateway_addr.as_deref()));
         report.push_entry(validate_database_url(env.database_url.as_deref()));
         report.push_entry(validate_object_store(
@@ -517,7 +527,7 @@ impl DoctorReport {
 /// `unsafe { std::env::set_var }`).
 #[derive(Debug, Default, Clone)]
 struct EnvSnapshot {
-    mode: Option<String>,
+    mode: ModeRaw,
     gateway_addr: Option<String>,
     database_url: Option<String>,
     object_store_base_url: Option<String>,
@@ -532,9 +542,7 @@ struct EnvSnapshot {
 impl EnvSnapshot {
     fn from_process_env() -> Self {
         Self {
-            // MODE keeps the env var raw (incl. blanks) — Mode::from_env_value
-            // does its own "set but blank == unset" normalisation.
-            mode: std::env::var(shared::MODE_ENV).ok(),
+            mode: ModeRaw::from_process_env(),
             gateway_addr: std::env::var("GATEWAY_ADDR").ok(),
             database_url: non_empty_env("DATABASE_URL"),
             object_store_base_url: non_empty_env("OBJECT_STORE_BASE_URL"),
@@ -548,6 +556,29 @@ impl EnvSnapshot {
     }
 }
 
+/// Tri-state for `MODE`: unset, set to a UTF-8 value, or set to bytes
+/// that are not valid UTF-8. Modeled explicitly so doctor surfaces
+/// the non-Unicode case as an error instead of silently collapsing
+/// it to "unset" — which would let doctor say `[ok] personal` while
+/// `serve` aborts with `ModeParseError::NonUnicode`.
+#[derive(Debug, Clone, Default)]
+enum ModeRaw {
+    #[default]
+    Unset,
+    Set(String),
+    NonUnicode,
+}
+
+impl ModeRaw {
+    fn from_process_env() -> Self {
+        match std::env::var(shared::MODE_ENV) {
+            Ok(s) => Self::Set(s),
+            Err(std::env::VarError::NotPresent) => Self::Unset,
+            Err(std::env::VarError::NotUnicode(_)) => Self::NonUnicode,
+        }
+    }
+}
+
 fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) -> DoctorEntry {
     DoctorEntry {
         label: label.to_owned(),
@@ -556,8 +587,13 @@ fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) ->
     }
 }
 
-fn validate_mode(raw: Option<&str>) -> DoctorEntry {
-    match Mode::from_env_value(raw) {
+fn validate_mode(raw: &ModeRaw) -> DoctorEntry {
+    let parsed = match raw {
+        ModeRaw::NonUnicode => Err(ModeParseError::NonUnicode),
+        ModeRaw::Unset => Mode::from_env_value(None),
+        ModeRaw::Set(s) => Mode::from_env_value(Some(s.as_str())),
+    };
+    match parsed {
         Ok(mode) => doctor_entry(
             "MODE",
             DoctorStatus::Ok,
@@ -572,14 +608,9 @@ fn validate_mode(raw: Option<&str>) -> DoctorEntry {
 }
 
 fn validate_gateway_addr(raw: Option<&str>) -> DoctorEntry {
-    let raw = raw.unwrap_or(DEFAULT_ADDR);
-    match raw.parse::<SocketAddr>() {
+    match read_gateway_addr_value(raw) {
         Ok(addr) => doctor_entry("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
-        Err(e) => doctor_entry(
-            "GATEWAY_ADDR",
-            DoctorStatus::Error,
-            format!("{raw:?}: GATEWAY_ADDR must be a valid socket address (host:port): {e}"),
-        ),
+        Err(e) => doctor_entry("GATEWAY_ADDR", DoctorStatus::Error, format!("{e:#}")),
     }
 }
 
@@ -949,21 +980,31 @@ mod tests {
 
     #[test]
     fn validate_mode_renders_resolved_routes() {
-        let entry = validate_mode(None);
+        let entry = validate_mode(&ModeRaw::Unset);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
         assert!(entry.detail.contains("gated: <none>"));
 
-        let entry = validate_mode(Some("multi-user"));
+        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()));
         assert!(entry.detail.contains("gated: <pending #4.5>"));
     }
 
     #[test]
     fn validate_mode_flags_unknown_value() {
-        let entry = validate_mode(Some("garbage"));
+        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()));
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("invalid MODE value"));
+    }
+
+    #[test]
+    fn validate_mode_flags_non_unicode_env() {
+        // The runtime errors on a non-Unicode MODE via Mode::from_env;
+        // doctor must surface the same condition rather than collapse
+        // it to "unset → personal".
+        let entry = validate_mode(&ModeRaw::NonUnicode);
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("not valid UTF-8"));
     }
 
     #[test]
