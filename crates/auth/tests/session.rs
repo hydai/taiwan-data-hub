@@ -460,3 +460,109 @@ async fn revoke_all_for_user_skips_already_expired_sessions() {
             .is_none()
     );
 }
+
+// --- retry-on-collision fake ----------------------------------------
+
+/// Wraps a real session repo and rejects the first N
+/// `insert_session` calls with `UniqueViolation`, then defers to
+/// the inner repo. Drives `SessionService::issue` down the retry
+/// path without needing `OsRng` to actually collide.
+struct CollidingRepo {
+    inner: Arc<InMemorySessionRepo>,
+    reject_until_attempt: Mutex<u32>,
+    attempts: Mutex<u32>,
+}
+
+#[async_trait]
+impl SessionRepo for CollidingRepo {
+    async fn insert_session(&self, new: NewSession) -> Result<(), StorageError> {
+        // Walk the counter + collision check inside a tight
+        // scope so neither MutexGuard crosses the await below.
+        let collide = {
+            let mut attempts = self.attempts.lock().unwrap();
+            *attempts += 1;
+            let limit = *self.reject_until_attempt.lock().unwrap();
+            *attempts <= limit
+        };
+        if collide {
+            return Err(StorageError::UniqueViolation("sessions_pkey".to_owned()));
+        }
+        self.inner.insert_session(new).await
+    }
+    async fn touch_and_authenticate(
+        &self,
+        id_hash: &[u8],
+        now: DateTime<Utc>,
+        new_expires_at: DateTime<Utc>,
+    ) -> Result<Option<AuthenticatedSession>, StorageError> {
+        self.inner
+            .touch_and_authenticate(id_hash, now, new_expires_at)
+            .await
+    }
+    async fn revoke_session(
+        &self,
+        id_hash: &[u8],
+        now: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        self.inner.revoke_session(id_hash, now).await
+    }
+    async fn revoke_all_sessions_for_user(
+        &self,
+        user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        self.inner.revoke_all_sessions_for_user(user_id, now).await
+    }
+}
+
+#[tokio::test]
+async fn issue_retries_on_pk_collision() {
+    // Regression for Copilot R3: `issue()` retries on
+    // `UniqueViolation`. The fake rejects the first attempt, so
+    // the second attempt (with a fresh OsRng token) succeeds —
+    // the caller sees a single Ok return.
+    let inner = Arc::new(InMemorySessionRepo::default());
+    let repo = Arc::new(CollidingRepo {
+        inner,
+        reject_until_attempt: Mutex::new(1),
+        attempts: Mutex::new(0),
+    });
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(60));
+    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
+    assert_eq!(
+        *repo.attempts.lock().unwrap(),
+        2,
+        "first attempt collides, second succeeds"
+    );
+    // Session landed in the inner repo.
+    assert!(
+        svc.authenticate(&issued.cookie_value)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn issue_surfaces_internal_error_after_max_collisions() {
+    // Regression for Copilot R3 (defective-RNG case): every
+    // attempt collides → `issue()` returns
+    // `AuthError::Internal` rather than spinning forever.
+    let inner = Arc::new(InMemorySessionRepo::default());
+    let repo = Arc::new(CollidingRepo {
+        inner,
+        reject_until_attempt: Mutex::new(u32::MAX),
+        attempts: Mutex::new(0),
+    });
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(60));
+    let err = svc.issue(fresh_user_id(), None, None).await.unwrap_err();
+    assert!(matches!(&err, auth::AuthError::Internal(msg) if msg.contains("PK collision")));
+    // Three attempts, then surface the error.
+    assert_eq!(*repo.attempts.lock().unwrap(), 3);
+}

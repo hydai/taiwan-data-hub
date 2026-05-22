@@ -46,7 +46,7 @@ use hmac::{Hmac, Mac};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
-use storage::{AuthenticatedSession, NewSession, SessionRepo};
+use storage::{AuthenticatedSession, NewSession, SessionRepo, StorageError};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
@@ -80,15 +80,24 @@ const MIN_HMAC_KEY_BYTES: usize = 32;
 /// value. `.` is base64url-safe and not used by either part.
 const COOKIE_TAG_SEPARATOR: char = '.';
 
+/// Max retries on `StorageError::UniqueViolation` during
+/// [`SessionService::issue`]. 32-byte entropy makes the
+/// collision probability ~2^-256 per attempt, so any practical
+/// collision implies a defective RNG; a small ceiling prevents
+/// an infinite loop in that pathological case.
+const ISSUE_MAX_ATTEMPTS: u32 = 3;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Result of [`SessionService::issue`] — what the gateway puts
 /// in the `Set-Cookie` header.
 #[derive(Debug, Clone)]
 pub struct IssuedSession {
-    /// `base64url(token)`. The full cookie value, ready for
-    /// `Set-Cookie`. The cleartext lives only here + in the
-    /// client browser; the DB has only `sha256(token)`.
+    /// `<base64url(token)>.<base64url(hmac_sha256(token, key))>`.
+    /// The full cookie value, ready for `Set-Cookie`. The
+    /// cleartext token lives only here + in the client browser;
+    /// the DB has only `sha256(token)`. The HMAC tag is what
+    /// makes this a "signed cookie" per the #4.5 spec.
     pub cookie_value: String,
     /// Initial expiry. Anchors the cookie's `Max-Age` attribute
     /// at issue time; the sliding-window refresh in
@@ -123,9 +132,14 @@ impl From<AuthenticatedSession> for ValidatedSession {
 ///
 /// Carries the session repo (for the SQL surface), the
 /// sliding/absolute durations, and the HMAC signing key. Cheap
-/// to clone (the repo is `Arc`-backed; durations are `Copy`;
-/// the key is a `Vec<u8>` that clones via `Arc` semantics under
-/// `Clone` since `Vec` is cheap-to-clone here).
+/// to clone:
+///
+/// - `sessions` is `Arc<dyn …>` (refcount bump).
+/// - `idle_ttl` + `absolute_max` are `Duration` (`Copy`).
+/// - `hmac_key` is `Arc<[u8]>` so the key bytes are NOT
+///   re-allocated on clone (refcount bump). Important because
+///   axum middleware shares the service via `State<Arc<…>>` +
+///   `Clone`-per-request.
 ///
 /// `Debug` is custom: the HMAC key is NEVER printed.
 #[derive(Clone)]
@@ -134,8 +148,9 @@ pub struct SessionService {
     idle_ttl: Duration,
     absolute_max: Duration,
     /// Symmetric HMAC key for cookie signing. Loaded from env at
-    /// startup; min length [`MIN_HMAC_KEY_BYTES`].
-    hmac_key: Vec<u8>,
+    /// startup; min length [`MIN_HMAC_KEY_BYTES`]. Stored as
+    /// `Arc<[u8]>` so `SessionService::clone` is O(1).
+    hmac_key: Arc<[u8]>,
 }
 
 impl std::fmt::Debug for SessionService {
@@ -154,7 +169,15 @@ impl SessionService {
     /// ([`DEFAULT_IDLE_TTL`] / [`DEFAULT_ABSOLUTE_MAX`]). Errors
     /// if `hmac_key` is shorter than [`MIN_HMAC_KEY_BYTES`] —
     /// configuration error, not a runtime case.
-    pub fn new(sessions: Arc<dyn SessionRepo>, hmac_key: Vec<u8>) -> Result<Self, AuthError> {
+    ///
+    /// The key is accepted as `impl Into<Arc<[u8]>>` so callers
+    /// can hand in either a `Vec<u8>` (env-loaded) or a literal
+    /// fixed-size byte slice (tests).
+    pub fn new(
+        sessions: Arc<dyn SessionRepo>,
+        hmac_key: impl Into<Arc<[u8]>>,
+    ) -> Result<Self, AuthError> {
+        let hmac_key = hmac_key.into();
         if hmac_key.len() < MIN_HMAC_KEY_BYTES {
             return Err(AuthError::InvalidConfig(format!(
                 "SESSION_HMAC_KEY must be >= {MIN_HMAC_KEY_BYTES} bytes, got {}",
@@ -194,7 +217,55 @@ impl SessionService {
     /// token, HMACs it under [`Self::hmac_key`], inserts the
     /// `sha256(token)` row, returns `<token>.<tag>` + the
     /// initial idle expiry.
+    ///
+    /// Retries up to [`ISSUE_MAX_ATTEMPTS`] times on
+    /// [`StorageError::UniqueViolation`] (PK collision on
+    /// `sha256(token)`). 32 bytes of `OsRng` entropy makes
+    /// a real collision astronomical (~2^-256 per try), so
+    /// hitting the retry path twice in a row implies a defective
+    /// RNG — surface that as an error rather than spinning.
     pub async fn issue(
+        &self,
+        user_id: Uuid,
+        user_agent: Option<String>,
+        ip_addr: Option<IpAddr>,
+    ) -> Result<IssuedSession, AuthError> {
+        for attempt in 1..=ISSUE_MAX_ATTEMPTS {
+            match self
+                .try_issue_once(user_id, user_agent.clone(), ip_addr)
+                .await
+            {
+                Ok(issued) => return Ok(issued),
+                Err(AuthError::Storage(StorageError::UniqueViolation(constraint))) => {
+                    // Final attempt failing on collision means
+                    // the RNG is busted (or the table is in a
+                    // genuinely impossible state). Either way,
+                    // surface as `Internal` rather than passing
+                    // the raw `UniqueViolation` up — the caller
+                    // can't do anything useful with the latter
+                    // and "tried N times" is the actionable bit.
+                    if attempt == ISSUE_MAX_ATTEMPTS {
+                        return Err(AuthError::Internal(format!(
+                            "session insert hit {ISSUE_MAX_ATTEMPTS} consecutive PK collisions \
+                            on {constraint} — likely a defective RNG"
+                        )));
+                    }
+                    tracing::warn!(
+                        attempt,
+                        constraint,
+                        "session insert hit PK collision; retrying with fresh token"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("loop bounds are 1..=ISSUE_MAX_ATTEMPTS and every iteration returns");
+    }
+
+    /// One attempt at minting + inserting a session. Returns the
+    /// `UniqueViolation` to the caller so [`Self::issue`] can
+    /// decide whether to retry.
+    async fn try_issue_once(
         &self,
         user_id: Uuid,
         user_agent: Option<String>,
