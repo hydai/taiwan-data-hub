@@ -144,9 +144,17 @@ impl SessionRepo for Storage {
         // The `LEAST(..., absolute_expires_at)` cap stops the
         // slide from ever exceeding the hard ceiling.
         // `absolute_expires_at` itself is never touched here.
+        //
+        // `last_seen_at` is also wrapped in `GREATEST` for the
+        // same reason: in a multi-instance deployment, a request
+        // whose handler observed a slightly-stale clock could
+        // otherwise push `last_seen_at` BACKWARDS, corrupting the
+        // audit timeline (and any "active sessions" UI that
+        // surfaces it). `GREATEST(last_seen_at, $2)` keeps the
+        // column monotonically non-decreasing.
         let row = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
             "UPDATE sessions
-                SET last_seen_at = $2,
+                SET last_seen_at = GREATEST(last_seen_at, $2),
                     expires_at   = LEAST(GREATEST($3, expires_at), absolute_expires_at)
               WHERE id = $1
                 AND revoked_at IS NULL

@@ -82,8 +82,11 @@ impl SessionRepo for InMemorySessionRepo {
         // `SET expires_at = LEAST(GREATEST($3, expires_at),
         // absolute_expires_at)`. `GREATEST` defends against a
         // racing earlier request from shrinking `expires_at`;
-        // `LEAST` enforces the hard cap.
-        row.last_seen_at = now;
+        // `LEAST` enforces the hard cap. `last_seen_at` gets the
+        // same monotonic guard (mirrors `last_seen_at =
+        // GREATEST(last_seen_at, $2)`) so audit data doesn't
+        // step backwards on a clock-skewed request.
+        row.last_seen_at = row.last_seen_at.max(now);
         row.expires_at = new_expires_at
             .max(row.expires_at)
             .min(row.absolute_expires_at);

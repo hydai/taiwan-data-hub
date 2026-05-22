@@ -192,6 +192,27 @@ mod tests {
     }
 
     #[test]
+    fn extracts_session_across_multiple_cookie_headers() {
+        // Some proxies and HTTP/2 / HTTP/3 implementations split
+        // the client's cookie set across multiple `Cookie:`
+        // header lines. `extract_session_cookie` walks every
+        // value via `headers.get_all(COOKIE)`; this guards
+        // against a regression back to `headers.get()`-only
+        // behaviour, which would only see the first line and
+        // miss the session.
+        let mut h = HeaderMap::new();
+        h.append(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("other=foo"),
+        );
+        h.append(
+            axum::http::header::COOKIE,
+            HeaderValue::from_static("tdh_session=abc123"),
+        );
+        assert_eq!(extract_session_cookie(&h), Some("abc123"));
+    }
+
+    #[test]
     fn returns_none_when_session_cookie_absent() {
         let h = header_map("other=foo; tracker=bar");
         assert_eq!(extract_session_cookie(&h), None);
