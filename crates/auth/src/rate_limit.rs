@@ -70,9 +70,13 @@ pub struct RateLimitOutcome {
     /// Remaining requests in the current window (saturating at
     /// 0 when over). Emitted as `X-RateLimit-Remaining`.
     pub remaining: u32,
-    /// Seconds until the current window resets — used for both
-    /// `Retry-After` (on 429) and `X-RateLimit-Reset`
-    /// (delta-seconds form). Always non-negative.
+    /// Delta-seconds until the current window resets. Surfaced
+    /// to clients as the `Retry-After` header (RFC 7231
+    /// delta-seconds form). The gateway also derives the
+    /// `X-RateLimit-Reset` ABSOLUTE Unix-epoch timestamp from
+    /// this value (`now + retry_after_seconds`), but that
+    /// composition is the gateway's job — this field itself
+    /// is the delta. Always non-negative.
     pub retry_after_seconds: u64,
 }
 

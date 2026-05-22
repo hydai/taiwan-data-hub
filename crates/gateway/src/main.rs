@@ -201,11 +201,15 @@ fn build_router(
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
-    // IP rate-limit middleware wraps the WHOLE router — applies
-    // to every route the gateway serves (`/healthz`, `/mcp`,
-    // and any merged subrouter). Mounting at the top level
-    // means the throttle still runs in personal-mode (no auth
-    // at all) and provides a defence in that posture.
+    // IP rate-limit middleware wraps the WHOLE router so it
+    // sees every route the gateway serves (`/mcp` and any
+    // merged subrouter). Mounting at the top level means the
+    // throttle still runs in personal-mode (no auth at all)
+    // and provides a defence in that posture. The middleware
+    // itself short-circuits on `/healthz` and `/readyz` —
+    // kubelet's per-second probes would otherwise share an
+    // IP-bucket with real traffic and self-inflict 429s; see
+    // `is_unthrottled_probe` in `rate_limit_middleware`.
     router.layer(axum::middleware::from_fn_with_state(
         rate_limiter,
         rate_limit_middleware::ip_rate_limit_middleware,
@@ -258,8 +262,10 @@ async fn serve() -> anyhow::Result<()> {
 
     // Single rate-limiter shared by the IP + per-key middleware
     // stacks. `PgRateLimiter` when Storage is available, in-
-    // memory fallback so personal-mode dev deploys still get IP
-    // throttling on `/healthz` / `/mcp`.
+    // memory fallback so personal-mode dev deploys still get
+    // IP throttling on `/mcp` and any merged subrouter. The
+    // infrastructure probes (`/healthz`, `/readyz`) bypass
+    // the throttle regardless of backend.
     let rate_limiter = build_rate_limiter(storage.clone());
 
     let cancel = CancellationToken::new();

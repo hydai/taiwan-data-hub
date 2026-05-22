@@ -3,14 +3,19 @@
 //! Two `axum::middleware::from_fn_with_state` middleware
 //! functions backed by an [`auth::RateLimiter`]:
 //!
-//!   * [`ip_rate_limit_middleware`] applies to every request the
-//!     gateway accepts and caps per-IP traffic at
-//!     [`auth::DEFAULT_IP_RPM`] (60/min). Client IP is read from
-//!     the request via [`extract_client_ip`], which honours
-//!     reverse-proxy headers ONLY when `TRUST_PROXY_HEADERS=1`
-//!     is set (the default is to use the connection peer
-//!     because a client behind no proxy can spoof
-//!     `X-Forwarded-For` to evade per-IP throttling).
+//!   * [`ip_rate_limit_middleware`] caps per-IP traffic at
+//!     [`auth::DEFAULT_IP_RPM`] (60/min) on EVERY route except
+//!     the infrastructure probes (`/healthz`, `/readyz`) —
+//!     those bypass the throttle so kubelet's per-second
+//!     liveness checks don't share an IP-bucket with real
+//!     traffic and self-inflict 429s on health probes (see
+//!     [`is_unthrottled_probe`] for the exact set). Client IP
+//!     is read from the request via [`extract_client_ip`],
+//!     which honours reverse-proxy headers ONLY when
+//!     `TRUST_PROXY_HEADERS=1` is set (the default is to use
+//!     the connection peer because a client behind no proxy
+//!     can spoof `X-Forwarded-For` to evade per-IP
+//!     throttling).
 //!   * [`session_rate_limit_middleware`] is mounted DOWNSTREAM
 //!     of the session middleware so it sees the
 //!     [`auth::ValidatedSession`] extension. It keys the limiter
