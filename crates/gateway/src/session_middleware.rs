@@ -88,20 +88,31 @@ pub async fn session_middleware(
 /// - No `tdh_session=` pair appears in the value, or its value
 ///   is empty.
 fn extract_session_cookie(headers: &HeaderMap) -> Option<&str> {
-    let header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    header.split(';').find_map(|pair| {
-        let pair = pair.trim();
-        let (name, value) = pair.split_once('=')?;
-        if name.trim() != SESSION_COOKIE_NAME {
-            return None;
-        }
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
-        }
-    })
+    // Walk every `Cookie:` header value the request carries. RFC
+    // 6265 §5.4 says clients SHOULD send one Cookie header, but
+    // some proxies (and h2/h3 implementations) legitimately
+    // split the cookie set across multiple header lines —
+    // checking only `headers.get` would miss the session in
+    // that case.
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|hv| hv.to_str().ok())
+        .find_map(|header| {
+            header.split(';').find_map(|pair| {
+                let pair = pair.trim();
+                let (name, value) = pair.split_once('=')?;
+                if name.trim() != SESSION_COOKIE_NAME {
+                    return None;
+                }
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+        })
 }
 
 /// Build the `Set-Cookie` header value for a freshly-issued
@@ -110,8 +121,14 @@ fn extract_session_cookie(headers: &HeaderMap) -> Option<&str> {
 /// always behind TLS in any non-`personal` deployment),
 /// `SameSite=Lax` (lets top-level GET redirects through, blocks
 /// cross-site POSTs), `Path=/`, `Max-Age=<ttl_seconds>`.
+///
+/// `max_age_seconds` is `u64` — RFC 6265 §5.2.2 defines
+/// `Max-Age` as a non-zero positive integer; a signed type would
+/// let a negative value through, which most browsers interpret
+/// as "delete the cookie immediately" and would silently log
+/// the user out the moment the cookie is set.
 #[must_use]
-pub fn build_session_cookie(cookie_value: &str, max_age_seconds: i64) -> String {
+pub fn build_session_cookie(cookie_value: &str, max_age_seconds: u64) -> String {
     format!(
         "{SESSION_COOKIE_NAME}={cookie_value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_seconds}"
     )

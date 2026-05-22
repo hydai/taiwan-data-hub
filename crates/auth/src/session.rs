@@ -35,9 +35,11 @@ use uuid::Uuid;
 
 use crate::error::AuthError;
 
-/// Default absolute session lifetime. Issue #4.5 spec: max 14
-/// days total. `expires_at` is fixed at issue time and NOT
-/// extended on access.
+/// Default sliding-window session TTL. Issue #4.5 spec:
+/// "Sliding window refresh on each request (max 14d total)" —
+/// every authenticated request extends `expires_at` to
+/// `now + DEFAULT_SESSION_TTL`. An active user effectively never
+/// logs out; an idle user gets cleaned up after 14d.
 pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Cookie name the gateway middleware reads. Documented here so
@@ -58,15 +60,18 @@ pub struct IssuedSession {
     /// `Set-Cookie`. The cleartext lives only here + in the
     /// client browser; the DB has only `sha256(token)`.
     pub cookie_value: String,
-    /// Absolute expiry. Matches the `Max-Age` / `Expires`
-    /// attribute the gateway sets on the cookie.
+    /// Initial expiry. Anchors the cookie's `Max-Age` attribute
+    /// at issue time; the sliding-window refresh in
+    /// [`SessionService::authenticate`] advances this on each
+    /// access (but the cookie itself isn't rewritten — the
+    /// gateway re-issues `Set-Cookie` only on login / logout).
     pub expires_at: DateTime<Utc>,
 }
 
 /// What [`SessionService::authenticate`] returns for a valid
 /// cookie. The gateway middleware inserts this into the request
 /// extensions; downstream handlers extract it via the axum
-/// `Extension<AuthenticatedSession>` extractor.
+/// `Extension<ValidatedSession>` extractor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedSession {
     pub user_id: Uuid,
@@ -124,10 +129,7 @@ impl SessionService {
         let cookie_value = URL_SAFE_NO_PAD.encode(token_bytes);
         let id_hash = Sha256::digest(token_bytes).to_vec();
         let now = Utc::now();
-        let expires_at = now
-            + chrono::Duration::from_std(self.ttl).map_err(|e| {
-                AuthError::InvalidConfig(format!("session ttl out of chrono range: {e}"))
-            })?;
+        let expires_at = now + self.chrono_ttl()?;
         self.sessions
             .insert_session(NewSession {
                 id_hash,
@@ -146,7 +148,10 @@ impl SessionService {
     /// Validate an inbound cookie value. Returns:
     ///
     /// - `Ok(Some(session))` for a live, unrevoked, unexpired
-    ///   session. `last_seen_at` is touched as a side effect.
+    ///   session. Side effects: `last_seen_at` is touched AND
+    ///   `expires_at` is slid forward to `now + ttl` (the
+    ///   sliding-window refresh per the #4.5 spec). The
+    ///   returned `expires_at` reflects the post-slide value.
     /// - `Ok(None)` for missing / revoked / expired / malformed
     ///   token. The caller treats all of these as "anonymous"
     ///   and clears the cookie.
@@ -162,11 +167,20 @@ impl SessionService {
             return Ok(None);
         };
         let now = Utc::now();
+        let new_expires_at = now + self.chrono_ttl()?;
         Ok(self
             .sessions
-            .touch_and_authenticate(&id_hash, now)
+            .touch_and_authenticate(&id_hash, now, new_expires_at)
             .await?
             .map(ValidatedSession::from))
+    }
+
+    /// `self.ttl` as a `chrono::Duration`. Shared by `issue` +
+    /// `authenticate` so the conversion error path is identical
+    /// at both call sites.
+    fn chrono_ttl(&self) -> Result<chrono::Duration, AuthError> {
+        chrono::Duration::from_std(self.ttl)
+            .map_err(|e| AuthError::InvalidConfig(format!("session ttl out of chrono range: {e}")))
     }
 
     /// Revoke a specific session by cookie value. Returns `true`

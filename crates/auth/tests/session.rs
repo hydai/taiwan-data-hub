@@ -17,6 +17,7 @@ use auth::{SessionService, ValidatedSession};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use storage::{AuthenticatedSession, NewSession, SessionRepo, StorageError};
 use uuid::Uuid;
 
@@ -65,6 +66,7 @@ impl SessionRepo for InMemorySessionRepo {
         &self,
         id_hash: &[u8],
         now: DateTime<Utc>,
+        new_expires_at: DateTime<Utc>,
     ) -> Result<Option<AuthenticatedSession>, StorageError> {
         let mut inner = self.inner.lock().unwrap();
         let Some(row) = inner.get_mut(id_hash) else {
@@ -73,7 +75,11 @@ impl SessionRepo for InMemorySessionRepo {
         if row.revoked_at.is_some() || row.expires_at <= now {
             return Ok(None);
         }
+        // Sliding-window refresh: extend `expires_at` to the
+        // service-provided new value (matches the production SQL
+        // `SET expires_at = $3`).
         row.last_seen_at = now;
+        row.expires_at = new_expires_at;
         Ok(Some(AuthenticatedSession {
             user_id: row.user_id,
             created_at: row.created_at,
@@ -105,7 +111,10 @@ impl SessionRepo for InMemorySessionRepo {
         let mut inner = self.inner.lock().unwrap();
         let mut count: u64 = 0;
         for row in inner.values_mut() {
-            if row.user_id == user_id && row.revoked_at.is_none() {
+            // Mirror the production WHERE: `revoked_at IS NULL
+            // AND expires_at > $now`. Already-expired rows stay
+            // un-touched.
+            if row.user_id == user_id && row.revoked_at.is_none() && row.expires_at > now {
                 row.revoked_at = Some(now);
                 count += 1;
             }
@@ -152,7 +161,10 @@ async fn issue_then_authenticate_round_trip() {
         .unwrap()
         .expect("session valid");
     assert_eq!(session.user_id, user_id);
-    assert_eq!(session.expires_at, issued.expires_at);
+    // Sliding window: authenticate touches the row and extends
+    // `expires_at`, so the validated value is >= the issued
+    // value (the second `Utc::now()` always >= the first).
+    assert!(session.expires_at >= issued.expires_at);
 
     // Audit metadata was persisted alongside the row.
     let inner = repo.inner.lock().unwrap();
@@ -276,5 +288,102 @@ async fn two_issued_sessions_get_distinct_cookies() {
             .unwrap()
             .unwrap()
             .user_id,
+    );
+}
+
+#[tokio::test]
+async fn authenticate_slides_expires_at_on_each_access() {
+    // Regression for Copilot R1 (sliding window): every
+    // authenticated request must push `expires_at` forward to
+    // `now + ttl`. Walk the stored row's `expires_at` BACKWARD
+    // (without touching `revoked_at` or pushing it past `now`)
+    // and re-authenticate — the expiry should be back to the
+    // freshly-extended value, not the pre-walk one.
+    let (svc, repo) = build_service(Duration::from_secs(60));
+    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
+    let original_expiry = issued.expires_at;
+
+    // Walk the row's `expires_at` backward by ~30s, still
+    // unexpired. After the next authenticate the expiry should
+    // jump forward to roughly `now + 60s` (well past the walked
+    // value).
+    {
+        let mut inner = repo.inner.lock().unwrap();
+        let row = inner.values_mut().next().unwrap();
+        row.expires_at = Utc::now() + chrono::Duration::seconds(30);
+    }
+    let validated = svc
+        .authenticate(&issued.cookie_value)
+        .await
+        .unwrap()
+        .expect("session still valid");
+    let walked_window_max = Utc::now() + chrono::Duration::seconds(30);
+    assert!(
+        validated.expires_at > walked_window_max,
+        "expires_at must slide forward to ~now+ttl, got {} (walked max {walked_window_max})",
+        validated.expires_at
+    );
+    // And the persisted row's expiry matches what the service
+    // returned.
+    let inner = repo.inner.lock().unwrap();
+    let row = inner.values().next().unwrap();
+    assert_eq!(row.expires_at, validated.expires_at);
+
+    // The original_expiry is still close in time to validated.
+    // expires_at because the TTL is the same — but they're not
+    // EQUAL, since `Utc::now()` advanced between the two issue
+    // points. We just need to prove the slide happened, not
+    // pin the exact value.
+    drop(inner);
+    assert_ne!(
+        original_expiry, validated.expires_at,
+        "even with the same TTL, the second `now` differs from the first"
+    );
+}
+
+#[tokio::test]
+async fn revoke_all_for_user_skips_already_expired_sessions() {
+    // Regression for Copilot R1 (`revoke_all_sessions_for_user`
+    // wording): the trait says "every active session"; the SQL
+    // (and matching fake) must NOT bump `revoked_at` on rows
+    // that are already expired — both because that's what
+    // "active" means and because the count returned would
+    // otherwise lie about new state changes.
+    let (svc, repo) = build_service(Duration::from_secs(60));
+    let user_id = fresh_user_id();
+    let live = svc.issue(user_id, None, None).await.unwrap();
+    let dead = svc.issue(user_id, None, None).await.unwrap();
+    // Backdate the `dead` row's expires_at so it's already
+    // expired. Identifying the row by hash (re-applying the
+    // sha256 the service used at insert time) avoids depending
+    // on HashMap iteration order.
+    let dead_hash = {
+        let bytes = URL_SAFE_NO_PAD.decode(&dead.cookie_value).unwrap();
+        Sha256::digest(&bytes).to_vec()
+    };
+    {
+        let mut inner = repo.inner.lock().unwrap();
+        let row = inner.get_mut(&dead_hash).unwrap();
+        row.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    }
+
+    // Only the live session counts toward the revoke.
+    let killed = svc.revoke_all_for_user(user_id).await.unwrap();
+    assert_eq!(killed, 1, "only the still-active session is revoked");
+
+    // Live → now anonymous.
+    assert!(
+        svc.authenticate(&live.cookie_value)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The dead row is unchanged (still revoked_at = None,
+    // expired) — re-authenticate it: also None (expired).
+    assert!(
+        svc.authenticate(&dead.cookie_value)
+            .await
+            .unwrap()
+            .is_none()
     );
 }

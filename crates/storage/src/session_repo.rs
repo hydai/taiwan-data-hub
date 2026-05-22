@@ -48,20 +48,25 @@ pub trait SessionRepo: Send + Sync {
     /// cleartext never lives in the DB.
     async fn insert_session(&self, new: NewSession) -> Result<(), StorageError>;
 
-    /// Look up the session by `id_hash`, touch `last_seen_at` to
-    /// `now`, and return the bound `(user_id, created_at,
-    /// expires_at)` IF the row is unexpired AND not revoked.
+    /// Look up the session by `id_hash`, touch `last_seen_at`
+    /// to `now`, **extend `expires_at` to `new_expires_at`**, and
+    /// return the bound `(user_id, created_at, expires_at)` IF
+    /// the row is unexpired AND not revoked.
     ///
-    /// `now` is taken as a parameter so the validity cutoff is
-    /// stable across test + production wall clocks. Returns
-    /// `Ok(None)` for: row missing, row revoked, row expired.
-    /// The discrimination is deliberately collapsed at the
-    /// trait surface — the caller treats all three the same
-    /// (clear the cookie, return anonymous).
+    /// The extension is the sliding-window refresh: each
+    /// authenticated request bumps the expiry forward by the
+    /// service-defined TTL. The caller computes
+    /// `new_expires_at` from its own clock so the storage layer
+    /// stays clock-agnostic. Returns `Ok(None)` for: row
+    /// missing, row revoked, row expired. The discrimination is
+    /// deliberately collapsed at the trait surface — the caller
+    /// treats all three the same (clear the cookie, return
+    /// anonymous).
     async fn touch_and_authenticate(
         &self,
         id_hash: &[u8],
         now: DateTime<Utc>,
+        new_expires_at: DateTime<Utc>,
     ) -> Result<Option<AuthenticatedSession>, StorageError>;
 
     /// Revoke a specific session. Returns `true` if a row was
@@ -111,16 +116,21 @@ impl SessionRepo for Storage {
         &self,
         id_hash: &[u8],
         now: DateTime<Utc>,
+        new_expires_at: DateTime<Utc>,
     ) -> Result<Option<AuthenticatedSession>, StorageError> {
-        // `UPDATE … RETURNING` does the touch + read in a single
-        // statement so a concurrent revoke between SELECT and
-        // UPDATE can't yield a stale "still valid" result.
-        // `revoked_at IS NULL AND expires_at > now` is the
-        // validity predicate; both checks live in the WHERE so
-        // a row that fails either is a NULL return.
+        // `UPDATE … RETURNING` does the validity check + touch +
+        // sliding-window expiry extension + read in a single
+        // statement. A concurrent revoke between SELECT and
+        // UPDATE can't yield a stale "still valid" result —
+        // the WHERE predicate (`revoked_at IS NULL AND
+        // expires_at > now`) IS the validity check, and the
+        // RETURNING reads back the just-extended `expires_at`
+        // so callers see the post-touch value (matches what
+        // they'd set on the cookie).
         let row = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
             "UPDATE sessions
-                SET last_seen_at = $2
+                SET last_seen_at = $2,
+                    expires_at   = $3
               WHERE id = $1
                 AND revoked_at IS NULL
                 AND expires_at > $2
@@ -128,6 +138,7 @@ impl SessionRepo for Storage {
         )
         .bind(id_hash)
         .bind(now)
+        .bind(new_expires_at)
         .fetch_optional(self.pool())
         .await?;
         Ok(
@@ -164,11 +175,17 @@ impl SessionRepo for Storage {
         user_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
+        // The doc says "active": unrevoked AND unexpired. Filter
+        // on `expires_at > now` so we don't bump `revoked_at` on
+        // rows that are already effectively dead — keeps the
+        // returned count meaningful (newly-revoked, not "rows
+        // touched including zombies").
         let result = sqlx::query(
             "UPDATE sessions
                 SET revoked_at = $2
               WHERE user_id = $1
-                AND revoked_at IS NULL",
+                AND revoked_at IS NULL
+                AND expires_at > $2",
         )
         .bind(user_id)
         .bind(now)
