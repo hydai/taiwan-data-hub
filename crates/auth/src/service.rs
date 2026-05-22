@@ -197,16 +197,36 @@ where
     /// Resend the verification link for a user who already
     /// registered but didn't click in time. Returns `Ok(())` even
     /// when no such user exists, so probing remains uninformative.
+    /// Send failures (cap reached, DB hiccup) are swallowed +
+    /// logged for the same reason — the response shape stays
+    /// uniform with the unknown-user path.
     pub async fn resend_verification(&self, email: &str) -> Result<(), AuthError> {
         if let Some(user) = self.users.find_user_by_email(email).await?
             && user.email_verified_at.is_none()
         {
-            self.send_verification_link(&user).await?;
+            if let Err(err) = self.send_verification_link(&user).await {
+                tracing::warn!(
+                    user_id = %user.id,
+                    error = %err,
+                    "resend_verification: send failed (swallowed for uniformity)",
+                );
+            }
         }
         Ok(())
     }
 
     async fn send_verification_link(&self, user: &User) -> Result<(), AuthError> {
+        // Acquire the send permit BEFORE persisting the token so we
+        // never end up with a row that has no corresponding spawned
+        // delivery. If the cap is full, the caller decides whether to
+        // bubble the error (register) or swallow it (resend).
+        let permit = self
+            .acquire_send_permit("verification", &user.email)
+            .ok_or_else(|| {
+                AuthError::Internal(
+                    "verification mail-send capacity exhausted; please retry".to_owned(),
+                )
+            })?;
         let token = generate_token();
         let expires = Utc::now()
             + chrono::Duration::from_std(self.verify_ttl).map_err(|e| {
@@ -216,14 +236,44 @@ where
             .insert_auth_token(user.id, AuthTokenKind::EmailVerify, &token.digest, expires)
             .await?;
         let link = magic_link(&self.public_base_url, "/auth/verify", &token.cleartext)?;
-        self.spawn_send_verification(user.email.clone(), link);
+        self.spawn_send_verification(user.email.clone(), link, permit);
         Ok(())
     }
 
-    fn spawn_send_verification(&self, to: String, link: Url) {
-        let Some(permit) = self.acquire_send_permit("verification", &to) else {
-            return;
-        };
+    async fn send_password_reset_link(&self, user: &User) -> Result<(), AuthError> {
+        // Same acquire-then-insert ordering as verification so a full
+        // semaphore can't leave an orphaned reset token in the DB.
+        let permit = self
+            .acquire_send_permit("password-reset", &user.email)
+            .ok_or_else(|| {
+                AuthError::Internal(
+                    "password-reset mail-send capacity exhausted; please retry".to_owned(),
+                )
+            })?;
+        let token = generate_token();
+        let expires = Utc::now()
+            + chrono::Duration::from_std(self.reset_ttl).map_err(|e| {
+                AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
+            })?;
+        self.tokens
+            .insert_auth_token(
+                user.id,
+                AuthTokenKind::PasswordReset,
+                &token.digest,
+                expires,
+            )
+            .await?;
+        let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
+        self.spawn_send_password_reset(user.email.clone(), link, permit);
+        Ok(())
+    }
+
+    fn spawn_send_verification(
+        &self,
+        to: String,
+        link: Url,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) {
         let mailer = Arc::clone(&self.mailer);
         let ttl = self.verify_ttl;
         tokio::spawn(async move {
@@ -237,10 +287,12 @@ where
         });
     }
 
-    fn spawn_send_password_reset(&self, to: String, link: Url) {
-        let Some(permit) = self.acquire_send_permit("password-reset", &to) else {
-            return;
-        };
+    fn spawn_send_password_reset(
+        &self,
+        to: String,
+        link: Url,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) {
         let mailer = Arc::clone(&self.mailer);
         let ttl = self.reset_ttl;
         tokio::spawn(async move {
@@ -327,26 +379,19 @@ where
 
     /// Email a password-reset magic link if the address is
     /// registered. Always returns `Ok(())` so probing the endpoint
-    /// reveals nothing about which emails exist.
+    /// reveals nothing about which emails exist. Send failures
+    /// (cap reached, DB hiccup) are swallowed + logged for the
+    /// same reason.
     pub async fn request_password_reset(&self, email: &str) -> Result<(), AuthError> {
-        let Some(user) = self.users.find_user_by_email(email).await? else {
-            return Ok(());
-        };
-        let token = generate_token();
-        let expires = Utc::now()
-            + chrono::Duration::from_std(self.reset_ttl).map_err(|e| {
-                AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
-            })?;
-        self.tokens
-            .insert_auth_token(
-                user.id,
-                AuthTokenKind::PasswordReset,
-                &token.digest,
-                expires,
-            )
-            .await?;
-        let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
-        self.spawn_send_password_reset(user.email.clone(), link);
+        if let Some(user) = self.users.find_user_by_email(email).await?
+            && let Err(err) = self.send_password_reset_link(&user).await
+        {
+            tracing::warn!(
+                user_id = %user.id,
+                error = %err,
+                "request_password_reset: send failed (swallowed for uniformity)",
+            );
+        }
         Ok(())
     }
 
