@@ -287,16 +287,16 @@ pub trait CacheState: Send + Sync + 'static {
     async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError>;
 
     /// Compute the cache hit ratio over the last `window_days` of
-    /// `query_rows` usage. "Hit" = the dataset is `cached = true`
-    /// **at query time** (when this method runs), not at the
-    /// original call time — the join is against the *current*
-    /// `datasets.cached` flag because there's no per-row
-    /// historical snapshot. In practice cache state only changes
-    /// via the #3.6 pipeline so the ratio is correct on average;
-    /// a perfectly historical ratio would need a
-    /// `cached_at_call` column on `usage_records` (v0.2
-    /// enhancement). Surfaces as a Prometheus gauge once
-    /// #2.10 telemetry lands.
+    /// `query_rows` usage. **"Hit"** = `cached = true` **at the
+    /// time this method runs** (when the `cache_pipeline` tick
+    /// calls into us), *not* at the original `query_rows` call
+    /// time — there's no per-row snapshot in `usage_records`.
+    /// In practice that's accurate on average because cache
+    /// state only changes via the #3.6 pipeline; short bursts
+    /// of churn between two 6h ticks could mis-attribute rows.
+    /// A perfectly historical ratio needs a `cached_at_call`
+    /// column on `usage_records` (v0.2 enhancement). Surfaces
+    /// as a Prometheus gauge once #2.10 telemetry lands.
     async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError>;
 }
 
@@ -1110,15 +1110,21 @@ impl Storage {
 
     /// #3.6 hot-cache pipeline: aggregate cache hit ratio for a
     /// `query_rows` window. A "hit" is a `query_rows` invocation
-    /// against a dataset that was `cached = true` at the time of
-    /// the call.
+    /// against a dataset whose `cached` flag is `true` **at the
+    /// time this aggregation runs** (i.e. when `cache_hit_ratio`
+    /// is called), not at the time of the original
+    /// `query_rows` call.
     ///
-    /// The join is against the *current* `datasets.cached` flag —
-    /// in practice a dataset's cache state only changes via this
-    /// pipeline, so the join is correct on average. A perfectly
-    /// historical hit ratio would need a separate `cached_at_call`
-    /// column on `usage_records`; v0.2 enhancement if telemetry
-    /// drift becomes a concern.
+    /// The join is against the *current* `datasets.cached` flag
+    /// because `usage_records` has no per-row snapshot of the
+    /// cache state at call time. In practice a dataset's cache
+    /// state only changes via this pipeline (which runs every
+    /// 6 hours), so the ratio is accurate on average — but a
+    /// short burst of churn between two ticks could mis-attribute
+    /// individual rows. A perfectly historical hit ratio would
+    /// need a separate `cached_at_call` column on
+    /// `usage_records`; v0.2 enhancement if telemetry drift
+    /// becomes a concern.
     pub async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
         let row: CacheHitRatio = sqlx::query_as(
             "SELECT \
