@@ -46,6 +46,10 @@ services:
       dockerfile: docker/Dockerfile.gateway
     environment:
       GATEWAY_ADDR: 0.0.0.0:8080
+      # `personal` (default) leaves every route open; `multi-user` will
+      # gate API-key + contribution endpoints once #4.5 lands. Boot log
+      # echoes which routes are public vs gated per mode.
+      MODE: ${MODE:-personal}
       # DATABASE_URL is intentionally NOT set until M0 #0.8 wires the
       # sqlx pool; /readyz returns 503 with checks.database=null until
       # then. Compose's healthcheck below targets /healthz instead so

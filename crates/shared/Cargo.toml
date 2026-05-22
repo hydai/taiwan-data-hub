@@ -13,3 +13,4 @@ description = "Cross-crate primitives: error, config, telemetry, i18n loader"
 workspace = true
 
 [dependencies]
+thiserror = { workspace = true }

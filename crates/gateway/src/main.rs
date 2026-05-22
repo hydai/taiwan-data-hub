@@ -5,12 +5,20 @@
 //! backward-compat SSE upgrade). The MCP dispatcher is shared with the
 //! stdio shim: both transports talk to the same `mcp_core::McpServer`, so
 //! tools register once and reach every client.
+//!
+//! Two subcommands are exposed via clap (#4.1):
+//!
+//! - `serve` (default) — long-running HTTP listener
+//! - `doctor` — parses every env knob the binary reads, reports what
+//!   would and would not be wired, and exits non-zero on a hard config
+//!   error so operators can catch typos before a redeploy.
 
 use std::net::SocketAddr;
 
 use anyhow::Context;
 use axum::http::{HeaderName, Method, header};
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
+use clap::{Parser, Subcommand};
 use mcp_core::rmcp::model::Implementation;
 use mcp_core::rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -18,6 +26,7 @@ use mcp_core::rmcp::transport::streamable_http_server::{
 use mcp_core::{Dispatcher, DispatcherBuilder, McpServer};
 use object_store::{LocalFsObjectStore, ObjectStore, S3Credentials, S3ObjectStore};
 use serde::Serialize;
+use shared::{Mode, ModeParseError};
 use std::sync::Arc;
 use storage::Storage;
 use tokio::net::TcpListener;
@@ -38,6 +47,34 @@ const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 /// Custom header per the MCP 2025-11-25 Streamable HTTP spec — used to bind
 /// a session across multiple HTTP requests.
 const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
+
+/// HTTP routes the gateway always exposes without auth. The `serve`
+/// boot log prints this list so operators can sanity-check what is
+/// reachable; the `doctor` subcommand reuses the same source of truth
+/// so the two outputs cannot disagree.
+const PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+
+#[derive(Parser, Debug)]
+#[command(
+    version = PKG_VERSION,
+    about = "Taiwan Data Hub HTTP + MCP gateway",
+    long_about = None,
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the long-lived HTTP + MCP gateway (default if no
+    /// subcommand is given).
+    Serve,
+    /// Validate every env var the gateway reads and print a
+    /// human-readable report. Exits 0 when the config is consistent,
+    /// 1 when a hard error is detected.
+    Doctor,
+}
 
 #[derive(Serialize)]
 struct HealthBody {
@@ -79,7 +116,7 @@ async fn healthz() -> impl IntoResponse {
 /// check is stubbed until M0 #0.3 + #0.8 wire up the real sqlx pool —
 /// see `dependency_ready`.
 async fn readyz() -> impl IntoResponse {
-    let database = dependency_ready(std::env::var("DATABASE_URL").ok().as_deref());
+    let database = dependency_ready(non_empty_env("DATABASE_URL").as_deref());
     let all_ready = database.unwrap_or(false);
 
     let body = ReadyBody {
@@ -162,10 +199,23 @@ async fn main() -> anyhow::Result<()> {
         .compact()
         .init();
 
-    let addr: SocketAddr = std::env::var("GATEWAY_ADDR")
-        .unwrap_or_else(|_| DEFAULT_ADDR.to_owned())
-        .parse()
-        .context("GATEWAY_ADDR must be a valid socket address (host:port)")?;
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => serve().await,
+        Command::Doctor => doctor(),
+    }
+}
+
+async fn serve() -> anyhow::Result<()> {
+    let mode = Mode::from_env().context("invalid MODE env var")?;
+    let addr = read_gateway_addr()?;
+
+    info!(
+        mode = mode.as_str(),
+        public_routes = PUBLIC_ROUTES.join(","),
+        gated_routes = gated_route_list(mode),
+        "operating mode resolved"
+    );
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
@@ -202,6 +252,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validates the gateway's env knobs and prints a human-readable
+/// report. Connection probes are deliberately out of scope: doctor
+/// must run usefully in CI and on a fresh laptop where Postgres /
+/// `SeaweedFS` aren't reachable. What it catches:
+///
+/// - invalid `MODE` value
+/// - malformed `GATEWAY_ADDR`
+/// - malformed object-store URLs
+/// - partially-configured S3 credentials (some set, some missing)
+///
+/// Exits 1 on any hard error so a CI smoke test can `--fail-fast`
+/// before a redeploy.
+fn doctor() -> anyhow::Result<()> {
+    let report = DoctorReport::collect();
+    println!("{report}");
+    let err_count = report.error_count();
+    if err_count > 0 {
+        anyhow::bail!("doctor found {err_count} config error(s); see report above");
+    }
+    Ok(())
+}
+
 /// Register Postgres-backed tools when `DATABASE_URL` is set and a
 /// pool can be established. Mirrors the policy in `mcp-stdio` so
 /// both transports share the same view of which tools are available.
@@ -210,7 +282,11 @@ async fn main() -> anyhow::Result<()> {
 /// for ops, and personal-mode installs without Postgres still get a
 /// working MCP server with `list_domains`.
 async fn wire_db_tools_if_available(builder: DispatcherBuilder) -> DispatcherBuilder {
-    let Ok(url) = std::env::var("DATABASE_URL") else {
+    // Use the same blank==unset normalisation as `readyz` and the
+    // doctor so all three observers report the same configuration
+    // state instead of disagreeing on whether `DATABASE_URL=` (set
+    // but empty) means "configured".
+    let Some(url) = non_empty_env("DATABASE_URL") else {
         tracing::info!("DATABASE_URL unset; DB-backed tools disabled (list_domains still works)");
         return builder;
     };
@@ -313,6 +389,38 @@ fn non_empty_env(key: &str) -> Option<String> {
     }
 }
 
+/// Parse `GATEWAY_ADDR` into a `SocketAddr` (falling back to
+/// [`DEFAULT_ADDR`] when unset). Pure so `serve` and `doctor`
+/// share the same parse + error-wording path: `serve` calls
+/// [`read_gateway_addr`] which reads env and delegates here,
+/// `doctor` calls [`validate_gateway_addr`] which delegates here
+/// with the env value it already pulled into [`EnvSnapshot`].
+fn read_gateway_addr_value(raw: Option<&str>) -> anyhow::Result<SocketAddr> {
+    let raw = raw.unwrap_or(DEFAULT_ADDR);
+    raw.parse().with_context(|| {
+        format!("{raw:?}: GATEWAY_ADDR must be a valid socket address (host:port)")
+    })
+}
+
+/// Read `GATEWAY_ADDR` from process env (or the default) and parse
+/// it. Thin wrapper over [`read_gateway_addr_value`] for `serve`.
+fn read_gateway_addr() -> anyhow::Result<SocketAddr> {
+    read_gateway_addr_value(std::env::var("GATEWAY_ADDR").ok().as_deref())
+}
+
+/// Returns a render-ready string describing which routes require
+/// auth in the given mode. Auth middleware lands in #4.5 — until
+/// then both modes serve every route publicly, so this returns
+/// `"<none>"` for `Personal` and `"<pending #4.5>"` for `MultiUser`.
+/// Callers (`serve`'s boot log and `doctor`'s report) embed the
+/// returned string verbatim so the two outputs always agree.
+fn gated_route_list(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Personal => "<none>",
+        Mode::MultiUser => "<pending #4.5>",
+    }
+}
+
 /// Returns when the process receives SIGINT or SIGTERM. Cancels the shared
 /// MCP cancellation token first so any in-flight `/mcp` sessions abort
 /// cleanly, then lets axum drain HTTP requests.
@@ -328,6 +436,338 @@ async fn shutdown_signal(cancel: CancellationToken) {
     }
 
     cancel.cancel();
+}
+
+// -------- doctor report ------------------------------------------------
+
+/// Findings from one `doctor` run. Held as data (not printed
+/// inline) so the report struct can be unit-tested without
+/// capturing stdout.
+#[derive(Debug, Default)]
+struct DoctorReport {
+    entries: Vec<DoctorEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorEntry {
+    label: String,
+    status: DoctorStatus,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorStatus {
+    /// Config is valid and ready to use — either set explicitly or
+    /// resolved from a documented default (e.g. [`DEFAULT_ADDR`]).
+    Ok,
+    /// Config is absent but the binary tolerates that (e.g. no
+    /// `DATABASE_URL` in a personal-mode install). Always rendered
+    /// `info`, never an error.
+    Info,
+    /// Config is present but malformed, partial, or contradictory.
+    /// Counts toward [`DoctorReport::error_count`] so the process
+    /// exits non-zero.
+    Error,
+}
+
+impl DoctorReport {
+    fn collect() -> Self {
+        let env = EnvSnapshot::from_process_env();
+        Self::from_snapshot(&env)
+    }
+
+    fn from_snapshot(env: &EnvSnapshot) -> Self {
+        let mut report = Self::default();
+        report.push_entry(validate_mode(&env.mode));
+        report.push_entry(validate_gateway_addr(env.gateway_addr.as_deref()));
+        report.push_entry(validate_database_url(env.database_url.as_deref()));
+        report.push_entry(validate_object_store(
+            env.object_store_base_url.as_deref(),
+            env.object_store_signing_secret.as_deref(),
+        ));
+        report.push_entry(validate_s3(
+            env.s3_endpoint.as_deref(),
+            env.s3_region.as_deref(),
+            env.s3_access_key_id.as_deref(),
+            env.s3_secret_access_key.as_deref(),
+            env.s3_session_token.as_deref(),
+        ));
+        report
+    }
+
+    fn error_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.status == DoctorStatus::Error)
+            .count()
+    }
+
+    #[cfg(test)]
+    fn has_errors(&self) -> bool {
+        self.error_count() > 0
+    }
+
+    #[cfg(test)]
+    fn push(&mut self, label: &str, status: DoctorStatus, detail: impl Into<String>) {
+        self.push_entry(DoctorEntry {
+            label: label.to_owned(),
+            status,
+            detail: detail.into(),
+        });
+    }
+
+    fn push_entry(&mut self, entry: DoctorEntry) {
+        self.entries.push(entry);
+    }
+}
+
+/// Snapshot of every env var the doctor inspects. Held as data so
+/// the pure validators below can be unit-tested without touching
+/// process env (which would require the forbidden
+/// `unsafe { std::env::set_var }`).
+#[derive(Debug, Default, Clone)]
+struct EnvSnapshot {
+    mode: ModeRaw,
+    gateway_addr: Option<String>,
+    database_url: Option<String>,
+    object_store_base_url: Option<String>,
+    object_store_signing_secret: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_region: Option<String>,
+    s3_access_key_id: Option<String>,
+    s3_secret_access_key: Option<String>,
+    s3_session_token: Option<String>,
+}
+
+impl EnvSnapshot {
+    fn from_process_env() -> Self {
+        Self {
+            mode: ModeRaw::from_process_env(),
+            gateway_addr: std::env::var("GATEWAY_ADDR").ok(),
+            database_url: non_empty_env("DATABASE_URL"),
+            object_store_base_url: non_empty_env("OBJECT_STORE_BASE_URL"),
+            object_store_signing_secret: non_empty_env("OBJECT_STORE_SIGNING_SECRET"),
+            s3_endpoint: non_empty_env("S3_ENDPOINT"),
+            s3_region: non_empty_env("S3_REGION"),
+            s3_access_key_id: non_empty_env("S3_ACCESS_KEY_ID"),
+            s3_secret_access_key: non_empty_env("S3_SECRET_ACCESS_KEY"),
+            s3_session_token: non_empty_env("S3_SESSION_TOKEN"),
+        }
+    }
+}
+
+/// Tri-state for `MODE`: unset, set to a UTF-8 value, or set to bytes
+/// that are not valid UTF-8. Modeled explicitly so doctor surfaces
+/// the non-Unicode case as an error instead of silently collapsing
+/// it to "unset" — which would let doctor say `[ok] personal` while
+/// `serve` aborts with `ModeParseError::NonUnicode`.
+#[derive(Debug, Clone, Default)]
+enum ModeRaw {
+    #[default]
+    Unset,
+    Set(String),
+    NonUnicode,
+}
+
+impl ModeRaw {
+    fn from_process_env() -> Self {
+        match std::env::var(shared::MODE_ENV) {
+            Ok(s) => Self::Set(s),
+            Err(std::env::VarError::NotPresent) => Self::Unset,
+            Err(std::env::VarError::NotUnicode(_)) => Self::NonUnicode,
+        }
+    }
+}
+
+fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) -> DoctorEntry {
+    DoctorEntry {
+        label: label.to_owned(),
+        status,
+        detail: detail.into(),
+    }
+}
+
+fn validate_mode(raw: &ModeRaw) -> DoctorEntry {
+    let parsed = match raw {
+        ModeRaw::NonUnicode => Err(ModeParseError::NonUnicode),
+        ModeRaw::Unset => Mode::from_env_value(None),
+        ModeRaw::Set(s) => Mode::from_env_value(Some(s.as_str())),
+    };
+    match parsed {
+        Ok(mode) => doctor_entry(
+            "MODE",
+            DoctorStatus::Ok,
+            format!(
+                "{mode} (public: {}; gated: {})",
+                PUBLIC_ROUTES.join(","),
+                gated_route_list(mode),
+            ),
+        ),
+        Err(e) => doctor_entry("MODE", DoctorStatus::Error, e.to_string()),
+    }
+}
+
+fn validate_gateway_addr(raw: Option<&str>) -> DoctorEntry {
+    match read_gateway_addr_value(raw) {
+        Ok(addr) => doctor_entry("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
+        Err(e) => doctor_entry("GATEWAY_ADDR", DoctorStatus::Error, format!("{e:#}")),
+    }
+}
+
+fn validate_database_url(raw: Option<&str>) -> DoctorEntry {
+    match raw {
+        None => doctor_entry(
+            "DATABASE_URL",
+            DoctorStatus::Info,
+            "unset — DB-backed tools will be disabled",
+        ),
+        Some(raw) => match Url::parse(raw) {
+            Err(e) => doctor_entry(
+                "DATABASE_URL",
+                DoctorStatus::Error,
+                format!("not a valid URL: {e}"),
+            ),
+            Ok(url) => match url.scheme() {
+                "postgres" | "postgresql" => doctor_entry(
+                    "DATABASE_URL",
+                    DoctorStatus::Ok,
+                    "<set> (connection probe skipped; run `cargo test --release -p storage -- --ignored` for end-to-end)",
+                ),
+                other => doctor_entry(
+                    "DATABASE_URL",
+                    DoctorStatus::Error,
+                    format!(
+                        "scheme {other:?} is not supported by sqlx::PgPool; expected `postgres` or `postgresql`"
+                    ),
+                ),
+            },
+        },
+    }
+}
+
+fn validate_object_store(base: Option<&str>, secret: Option<&str>) -> DoctorEntry {
+    match (base, secret) {
+        (None, None) => doctor_entry(
+            "OBJECT_STORE_*",
+            DoctorStatus::Info,
+            "unset — file:// URIs unavailable",
+        ),
+        (Some(_), None) | (None, Some(_)) => doctor_entry(
+            "OBJECT_STORE_*",
+            DoctorStatus::Error,
+            "partial config: both OBJECT_STORE_BASE_URL and OBJECT_STORE_SIGNING_SECRET must be set together",
+        ),
+        (Some(b), Some(s)) => match Url::parse(b) {
+            Err(e) => doctor_entry(
+                "OBJECT_STORE_BASE_URL",
+                DoctorStatus::Error,
+                format!("not a valid URL: {e}"),
+            ),
+            // Mirror runtime wiring exactly: a syntactically-valid URL
+            // can still be rejected by `LocalFsObjectStore::new` for
+            // origin/secret-length reasons. Construct and discard so
+            // doctor catches what the runtime would warn-and-skip.
+            Ok(url) => match LocalFsObjectStore::new(url, s.as_bytes().to_vec()) {
+                Ok(_) => doctor_entry("OBJECT_STORE_*", DoctorStatus::Ok, format!("base={b}")),
+                Err(e) => doctor_entry(
+                    "OBJECT_STORE_*",
+                    DoctorStatus::Error,
+                    format!("invalid config: {e}"),
+                ),
+            },
+        },
+    }
+}
+
+fn validate_s3(
+    endpoint: Option<&str>,
+    region: Option<&str>,
+    key: Option<&str>,
+    secret: Option<&str>,
+    session_token: Option<&str>,
+) -> DoctorEntry {
+    let required = [endpoint, region, key, secret];
+    let required_any = required.iter().any(Option::is_some);
+    let required_all = required.iter().all(Option::is_some);
+    let token_set = session_token.is_some();
+
+    if !required_any && !token_set {
+        return doctor_entry("S3_*", DoctorStatus::Info, "unset — s3:// URIs unavailable");
+    }
+    if !required_all {
+        // Either a required field is missing, or only S3_SESSION_TOKEN
+        // was set — both are partial configs the runtime can't wire.
+        return doctor_entry(
+            "S3_*",
+            DoctorStatus::Error,
+            "partial config: S3_ENDPOINT, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY must be set together (S3_SESSION_TOKEN is optional)",
+        );
+    }
+    let endpoint = endpoint.expect("checked above");
+    let region = region.expect("checked above");
+    let key = key.expect("checked above");
+    let secret = secret.expect("checked above");
+    let token_note = if token_set {
+        " (with session token)"
+    } else {
+        ""
+    };
+    match Url::parse(endpoint) {
+        Err(e) => doctor_entry(
+            "S3_ENDPOINT",
+            DoctorStatus::Error,
+            format!("not a valid URL: {e}"),
+        ),
+        // Mirror runtime wiring: `S3ObjectStore::new` rejects endpoints
+        // that carry a path/query/fragment because the path is later
+        // overwritten with `/{bucket}/{key}` and any prefix would
+        // silently disappear from the signature. Construct and discard
+        // so doctor catches the same misconfig the runtime warn-skips.
+        Ok(url) => {
+            let creds = S3Credentials {
+                access_key_id: key.to_owned(),
+                secret_access_key: secret.to_owned(),
+                session_token: session_token.map(str::to_owned),
+            };
+            match S3ObjectStore::new(url, region.to_owned(), creds) {
+                Ok(_) => doctor_entry(
+                    "S3_*",
+                    DoctorStatus::Ok,
+                    format!("endpoint={endpoint}{token_note}"),
+                ),
+                Err(e) => doctor_entry("S3_*", DoctorStatus::Error, format!("invalid config: {e}")),
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for DoctorReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use CARGO_PKG_NAME so the banner matches what clap prints
+        // for `--help` (and what operators actually invoked).
+        writeln!(
+            f,
+            "{bin} doctor (v{PKG_VERSION})",
+            bin = env!("CARGO_PKG_NAME"),
+        )?;
+        writeln!(f, "build_sha={GIT_SHA}")?;
+        writeln!(f, "---")?;
+        for entry in &self.entries {
+            let marker = match entry.status {
+                DoctorStatus::Ok => "[ok]",
+                DoctorStatus::Info => "[info]",
+                DoctorStatus::Error => "[error]",
+            };
+            writeln!(f, "{marker} {}: {}", entry.label, entry.detail)?;
+        }
+        let err_count = self.error_count();
+        writeln!(f, "---")?;
+        if err_count == 0 {
+            writeln!(f, "all checks passed")
+        } else {
+            writeln!(f, "{err_count} error(s) — fix and re-run")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -501,6 +941,243 @@ mod tests {
         assert!(
             session.is_some(),
             "Mcp-Session-Id must be set on the initialize response"
+        );
+    }
+
+    #[test]
+    fn gated_route_list_distinguishes_modes() {
+        assert_eq!(gated_route_list(Mode::Personal), "<none>");
+        assert_eq!(gated_route_list(Mode::MultiUser), "<pending #4.5>");
+    }
+
+    #[test]
+    fn doctor_report_marks_partial_s3_as_error() {
+        let mut report = DoctorReport::default();
+        report.push("S3_*", DoctorStatus::Error, "partial config");
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn doctor_report_with_only_ok_and_info_does_not_error() {
+        let mut report = DoctorReport::default();
+        report.push("MODE", DoctorStatus::Ok, "personal");
+        report.push("DATABASE_URL", DoctorStatus::Info, "unset");
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn doctor_report_display_renders_markers_and_summary() {
+        let mut report = DoctorReport::default();
+        report.push("MODE", DoctorStatus::Ok, "personal");
+        report.push("X", DoctorStatus::Info, "unset");
+        report.push("Y", DoctorStatus::Error, "boom");
+        let rendered = format!("{report}");
+        assert!(rendered.contains("[ok] MODE: personal"));
+        assert!(rendered.contains("[info] X: unset"));
+        assert!(rendered.contains("[error] Y: boom"));
+        assert!(rendered.contains("1 error"));
+    }
+
+    #[test]
+    fn validate_mode_renders_resolved_routes() {
+        let entry = validate_mode(&ModeRaw::Unset);
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(entry.detail.starts_with("personal "));
+        assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        assert!(entry.detail.contains("gated: <none>"));
+
+        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()));
+        assert!(entry.detail.contains("gated: <pending #4.5>"));
+    }
+
+    #[test]
+    fn validate_mode_flags_unknown_value() {
+        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("invalid MODE value"));
+    }
+
+    #[test]
+    fn validate_mode_flags_non_unicode_env() {
+        // The runtime errors on a non-Unicode MODE via Mode::from_env;
+        // doctor must surface the same condition rather than collapse
+        // it to "unset → personal".
+        let entry = validate_mode(&ModeRaw::NonUnicode);
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn validate_gateway_addr_uses_default_when_unset() {
+        let entry = validate_gateway_addr(None);
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert_eq!(entry.detail, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn validate_gateway_addr_rejects_malformed() {
+        let entry = validate_gateway_addr(Some("not-an-addr"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("\"not-an-addr\""));
+    }
+
+    /// A signing secret long enough to satisfy `LocalFsObjectStore`'s
+    /// 32-byte minimum without leaking a real key into tests.
+    const TEST_SIGNING_SECRET: &str = "test-only-signing-secret-32-bytes-min";
+
+    #[test]
+    fn validate_database_url_distinguishes_unset_set_and_bad() {
+        assert_eq!(validate_database_url(None).status, DoctorStatus::Info);
+        assert_eq!(
+            validate_database_url(Some("postgres://x:y@h/db")).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(
+            validate_database_url(Some("postgresql://x:y@h/db")).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(
+            validate_database_url(Some("not a url")).status,
+            DoctorStatus::Error,
+        );
+    }
+
+    #[test]
+    fn validate_database_url_rejects_non_postgres_scheme() {
+        let entry = validate_database_url(Some("https://example.invalid/db"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("\"https\""));
+    }
+
+    #[test]
+    fn validate_object_store_partial_is_error() {
+        assert_eq!(
+            validate_object_store(Some("http://localhost:8080"), None).status,
+            DoctorStatus::Error,
+        );
+        assert_eq!(
+            validate_object_store(None, Some(TEST_SIGNING_SECRET)).status,
+            DoctorStatus::Error,
+        );
+        assert_eq!(
+            validate_object_store(Some("http://localhost:8080"), Some(TEST_SIGNING_SECRET)).status,
+            DoctorStatus::Ok,
+        );
+        assert_eq!(validate_object_store(None, None).status, DoctorStatus::Info);
+    }
+
+    #[test]
+    fn validate_object_store_rejects_malformed_url() {
+        let entry = validate_object_store(Some("not-a-url"), Some(TEST_SIGNING_SECRET));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert_eq!(entry.label, "OBJECT_STORE_BASE_URL");
+    }
+
+    #[test]
+    fn validate_object_store_rejects_short_signing_secret() {
+        // `LocalFsObjectStore::new` requires 32+ bytes; doctor must
+        // surface that as an Error rather than rubber-stamp the URL.
+        let entry = validate_object_store(Some("http://localhost:8080"), Some("too-short"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("32 bytes"));
+    }
+
+    #[test]
+    fn validate_object_store_rejects_base_url_with_path() {
+        // Origin-only constraint from `LocalFsObjectStore::new`.
+        let entry = validate_object_store(
+            Some("http://localhost:8080/prefix"),
+            Some(TEST_SIGNING_SECRET),
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("origin"));
+    }
+
+    #[test]
+    fn validate_s3_unset_is_info() {
+        let entry = validate_s3(None, None, None, None, None);
+        assert_eq!(entry.status, DoctorStatus::Info);
+    }
+
+    #[test]
+    fn validate_s3_partial_required_is_error() {
+        let entry = validate_s3(Some("https://s3.example.invalid"), None, None, None, None);
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("partial config"));
+    }
+
+    #[test]
+    fn validate_s3_session_token_alone_is_partial_error() {
+        let entry = validate_s3(None, None, None, None, Some("tok"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+    }
+
+    #[test]
+    fn validate_s3_complete_required_is_ok_and_notes_token() {
+        let entry = validate_s3(
+            Some("https://s3.example.invalid"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(!entry.detail.contains("session token"));
+
+        let entry = validate_s3(
+            Some("https://s3.example.invalid"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            Some("tok"),
+        );
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(entry.detail.contains("with session token"));
+    }
+
+    #[test]
+    fn validate_s3_rejects_malformed_endpoint() {
+        let entry = validate_s3(
+            Some("not-a-url"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert_eq!(entry.label, "S3_ENDPOINT");
+    }
+
+    #[test]
+    fn validate_s3_rejects_endpoint_with_path() {
+        // Origin-only constraint from `S3ObjectStore::new`.
+        let entry = validate_s3(
+            Some("https://s3.example.invalid/prefix"),
+            Some("us-east-1"),
+            Some("AKIA"),
+            Some("SECRET"),
+            None,
+        );
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("origin"));
+    }
+
+    #[test]
+    fn doctor_report_from_snapshot_threads_through_all_validators() {
+        let env = EnvSnapshot::default();
+        let report = DoctorReport::from_snapshot(&env);
+        assert_eq!(report.entries.len(), 5);
+        assert_eq!(report.error_count(), 0);
+        let labels: Vec<&str> = report.entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "MODE",
+                "GATEWAY_ADDR",
+                "DATABASE_URL",
+                "OBJECT_STORE_*",
+                "S3_*"
+            ],
         );
     }
 }
