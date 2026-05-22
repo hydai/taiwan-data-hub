@@ -27,7 +27,7 @@ pub mod provider;
 pub mod service;
 pub mod state;
 
-pub use crypto::{TokenCipher, TokenCipherError};
+pub use crypto::{TokenCipher, TokenCipherError, account_aad};
 pub use github::GitHubProvider;
 pub use pkce::{PkcePair, generate_pkce};
 pub use provider::{OAuthProvider, ProviderProfile};

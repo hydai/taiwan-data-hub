@@ -32,7 +32,13 @@ CREATE TABLE oauth_states (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT oauth_states_provider_known CHECK (provider IN ('github', 'google')),
-    CONSTRAINT oauth_states_state_hash_sha256 CHECK (octet_length(state_hash) = 32)
+    CONSTRAINT oauth_states_state_hash_sha256 CHECK (octet_length(state_hash) = 32),
+    -- RFC 7636 mandates 43–128 ASCII chars for `code_verifier`.
+    -- The app always emits 43 (32-byte OsRng → base64url-no-pad);
+    -- the CHECK catches a future bug that persists a shorter or
+    -- absurdly long value before the row can ever be redeemed.
+    CONSTRAINT oauth_states_code_verifier_len
+        CHECK (char_length(code_verifier) BETWEEN 43 AND 128)
 );
 
 CREATE INDEX oauth_states_expires_idx

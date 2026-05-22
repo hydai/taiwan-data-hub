@@ -23,7 +23,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::error::AuthError;
-use crate::oauth::crypto::TokenCipher;
+use crate::oauth::crypto::{TokenCipher, account_aad};
 use crate::oauth::pkce::generate_pkce;
 use crate::oauth::provider::OAuthProvider;
 use crate::oauth::state::{generate_state, hash_state};
@@ -159,31 +159,42 @@ where
         } else {
             self.link_or_create_user(&profile.email).await?
         };
+        // AAD binds the ciphertext to the row's identity so an
+        // attacker who can write to the DB can't swap a row's
+        // ciphertext+nonce with another row and have a later
+        // decrypt succeed. The decrypt path passes the same
+        // bytes; mismatch fails the GCM tag.
+        let aad = account_aad(self.provider.name(), &profile.provider_user_id);
         let (access_ct, access_nonce) = self
             .cipher
-            .encrypt(profile.access_token.as_bytes())
+            .encrypt(profile.access_token.as_bytes(), &aad)
             .map_err(|e| AuthError::Internal(format!("access-token encrypt failed: {e}")))?;
         let (refresh_ct, refresh_nonce) = match profile.refresh_token.as_deref() {
             Some(rt) => {
-                let (ct, n) = self.cipher.encrypt(rt.as_bytes()).map_err(|e| {
+                let (ct, n) = self.cipher.encrypt(rt.as_bytes(), &aad).map_err(|e| {
                     AuthError::Internal(format!("refresh-token encrypt failed: {e}"))
                 })?;
                 (Some(ct), Some(n.to_vec()))
             }
             None => (None, None),
         };
-        // A provider-supplied `expires_in` that doesn't fit in
-        // `chrono::Duration` is malformed — silently coercing to
-        // zero would mark the freshly-issued token as already
-        // expired. Surface as `OAuthExchange` so the caller can
-        // retry and ops can see the upstream bug.
+        // `expires_in` is relative to when the provider issued
+        // the token, not to the start of `finish_login` — the
+        // network round-trip can take seconds, so anchor on a
+        // fresh wall clock taken AFTER the exchange returns.
+        // A provider-supplied value that doesn't fit in
+        // `chrono::Duration` surfaces as `OAuthExchange` so ops
+        // see the upstream bug rather than a silently-immediate-
+        // expiry token.
+        let exchange_completed_at = Utc::now();
         let expires_at = match profile.expires_in {
             Some(d) => Some(
-                now + chrono::Duration::from_std(d).map_err(|e| {
-                    AuthError::OAuthExchange(format!(
-                        "provider returned expires_in outside chrono::Duration range: {e}"
-                    ))
-                })?,
+                exchange_completed_at
+                    + chrono::Duration::from_std(d).map_err(|e| {
+                        AuthError::OAuthExchange(format!(
+                            "provider returned expires_in outside chrono::Duration range: {e}"
+                        ))
+                    })?,
             ),
             None => None,
         };
