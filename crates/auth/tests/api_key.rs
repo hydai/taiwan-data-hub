@@ -295,14 +295,9 @@ async fn issue_validates_tier() {
     }
     // Sanity: every nominal tier is accepted.
     for tier in ALLOWED_TIERS {
-        svc.issue(
-            fresh_user_id(),
-            "test".into(),
-            vec![],
-            (*tier).to_owned(),
-        )
-        .await
-        .unwrap_or_else(|e| panic!("tier {tier} should pass: {e:?}"));
+        svc.issue(fresh_user_id(), "test".into(), vec![], (*tier).to_owned())
+            .await
+            .unwrap_or_else(|e| panic!("tier {tier} should pass: {e:?}"));
     }
 }
 
@@ -336,7 +331,12 @@ async fn issue_surfaces_internal_after_max_collisions() {
     // many collisions so the loop exits the retry path.
     repo.force_collisions(3);
     let err = svc
-        .issue(fresh_user_id(), "always-collides".into(), vec![], "free".into())
+        .issue(
+            fresh_user_id(),
+            "always-collides".into(),
+            vec![],
+            "free".into(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, AuthError::Internal(_)), "got {err:?}");
@@ -350,11 +350,7 @@ async fn rotate_revokes_old_and_returns_new() {
         .issue(user, "ci".into(), vec!["read".into()], "pro".into())
         .await
         .unwrap();
-    let rotated = svc
-        .rotate(original.id, user)
-        .await
-        .unwrap()
-        .expect("Some");
+    let rotated = svc.rotate(original.id, user).await.unwrap().expect("Some");
     // New key carries the same metadata as the old.
     let listed = svc.list_for_user(user).await.unwrap();
     let new_row = listed.iter().find(|r| r.id == rotated.id).unwrap();

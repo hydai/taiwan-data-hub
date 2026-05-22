@@ -208,11 +208,8 @@ async fn rotate_api_key(
 /// error in body", which would be a leaky abstraction across
 /// the route surface.
 fn parse_key_id(raw: &str) -> Result<Uuid, ApiError> {
-    Uuid::parse_str(raw).map_err(|_| {
-        ApiError::Validation(format!(
-            "api key id `{raw}` is not a valid UUID"
-        ))
-    })
+    Uuid::parse_str(raw)
+        .map_err(|_| ApiError::Validation(format!("api key id `{raw}` is not a valid UUID")))
 }
 
 /// Internal error type for the api-keys subrouter. Maps to
@@ -272,7 +269,14 @@ impl IntoResponse for ApiError {
                 )
             }
         };
-        (status, Json(ErrorBody { error: code, message })).into_response()
+        (
+            status,
+            Json(ErrorBody {
+                error: code,
+                message,
+            }),
+        )
+            .into_response()
     }
 }
 

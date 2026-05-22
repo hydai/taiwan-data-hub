@@ -308,11 +308,7 @@ impl ApiKeyService {
     /// OR doesn't belong to `user_id` (both flatten to the same
     /// response so an attacker probing for valid key ids can't
     /// tell "wrong user" from "wrong id").
-    pub async fn revoke(
-        &self,
-        id: Uuid,
-        user_id: Uuid,
-    ) -> Result<Option<ApiKeyRow>, AuthError> {
+    pub async fn revoke(&self, id: Uuid, user_id: Uuid) -> Result<Option<ApiKeyRow>, AuthError> {
         self.keys
             .revoke(id, user_id, Utc::now())
             .await
@@ -337,11 +333,7 @@ impl ApiKeyService {
     /// trip wide, and (c) if the final revoke itself fails the
     /// caller still gets `Ok(Some(new_key))` so they're not
     /// stuck without access, with a `warn!` logged for ops.
-    pub async fn rotate(
-        &self,
-        id: Uuid,
-        user_id: Uuid,
-    ) -> Result<Option<IssuedApiKey>, AuthError> {
+    pub async fn rotate(&self, id: Uuid, user_id: Uuid) -> Result<Option<IssuedApiKey>, AuthError> {
         // Peek at the source row's metadata BEFORE issuing —
         // `list_for_user` returns every row owned by this user
         // (including revoked) so we filter on `revoked_at` to
@@ -363,7 +355,12 @@ impl ApiKeyService {
         // Issue first — if this fails the original key is still
         // valid because we haven't touched the source row yet.
         let issued = self
-            .issue(user_id, existing.name, existing.scopes, existing.rate_limit_tier)
+            .issue(
+                user_id,
+                existing.name,
+                existing.scopes,
+                existing.rate_limit_tier,
+            )
             .await?;
         // Best-effort revoke of the source row. We do NOT
         // propagate the error: the new key has been minted and

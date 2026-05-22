@@ -429,8 +429,8 @@ fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
     // every handler receives `Option<Extension<ValidatedSession>>`
     // and can return 401 instead of letting axum 500 on a missing
     // extractor when the cookie was missing / expired / revoked.
-    let router = api_keys_routes::router(api_key_service)
-        .layer(axum::middleware::from_fn_with_state(
+    let router =
+        api_keys_routes::router(api_key_service).layer(axum::middleware::from_fn_with_state(
             session_service,
             session_middleware::session_middleware,
         ));
