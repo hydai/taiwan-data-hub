@@ -174,6 +174,23 @@ fn build_service() -> (Svc, MemoryMailer) {
     (svc, mailer)
 }
 
+/// Wait until `mailer` has recorded at least `expected` sends, or
+/// panic after 2 seconds. `AuthService` now spawns the SMTP send so
+/// the caller-visible response doesn't leak SMTP latency; the test
+/// has to give the runtime a chance to drive the spawned task to
+/// completion before asserting on `mailer.sent()`.
+async fn wait_for_mailer(mailer: &MemoryMailer, expected: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while mailer.sent().len() < expected {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for mailer to record {expected} sends (got {})",
+            mailer.sent().len(),
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 fn token_from_link(link: &Url) -> String {
     link.query_pairs()
         .find(|(k, _)| k == "token")
@@ -189,6 +206,7 @@ async fn register_creates_user_and_sends_verification_link() {
     svc.register("alice@example.com", "very-long-passphrase")
         .await
         .unwrap();
+    wait_for_mailer(&mailer, 1).await;
 
     let sent = mailer.sent();
     assert_eq!(sent.len(), 1);
@@ -219,6 +237,7 @@ async fn register_with_taken_email_surfaces_email_taken() {
 async fn verify_email_consumes_token_and_marks_user_verified() {
     let (svc, mailer) = build_service();
     svc.register("bob@example.com", "passphrase").await.unwrap();
+    wait_for_mailer(&mailer, 1).await;
     let token = token_from_link(&mailer.sent()[0].link);
 
     svc.verify_email(&token).await.unwrap();
@@ -299,9 +318,10 @@ async fn login_with_unknown_email_returns_invalid_credentials_not_email_taken() 
 async fn request_password_reset_sends_link_for_known_user() {
     let (svc, mailer) = build_service();
     svc.register("eve@example.com", "passphrase").await.unwrap();
-    // Drop the verification mail so we only see the reset.
+    wait_for_mailer(&mailer, 1).await;
     let pre = mailer.sent().len();
     svc.request_password_reset("eve@example.com").await.unwrap();
+    wait_for_mailer(&mailer, pre + 1).await;
     let sent = mailer.sent();
     assert_eq!(sent.len() - pre, 1);
     let last = sent.last().unwrap();
@@ -316,10 +336,14 @@ async fn request_password_reset_sends_link_for_known_user() {
 #[tokio::test]
 async fn request_password_reset_returns_ok_for_unknown_user() {
     let (svc, mailer) = build_service();
-    // Unknown email — must return Ok and NOT send mail.
+    // Unknown email — must return Ok and NOT send mail. Yield twice
+    // so any (incorrectly) spawned mail send would have a chance to
+    // run and trip the assertion.
     svc.request_password_reset("nobody@example.com")
         .await
         .unwrap();
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     assert!(mailer.sent().is_empty());
 }
 
@@ -368,9 +392,11 @@ async fn reset_password_consumes_token_and_updates_hash() {
     svc.register("frank@example.com", "old-passphrase")
         .await
         .unwrap();
+    wait_for_mailer(&mailer, 1).await;
     svc.request_password_reset("frank@example.com")
         .await
         .unwrap();
+    wait_for_mailer(&mailer, 2).await;
     let reset_link = mailer
         .sent()
         .into_iter()
@@ -403,15 +429,22 @@ async fn reset_password_consumes_token_and_updates_hash() {
 async fn resend_verification_is_silent_for_unknown_or_verified_users() {
     let (svc, mailer) = build_service();
     svc.resend_verification("ghost@example.com").await.unwrap();
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     assert!(mailer.sent().is_empty(), "no mail for unknown user");
 
     svc.register("grace@example.com", "passphrase")
         .await
         .unwrap();
+    wait_for_mailer(&mailer, 1).await;
     let token = token_from_link(&mailer.sent()[0].link);
     svc.verify_email(&token).await.unwrap();
     let before = mailer.sent().len();
     svc.resend_verification("grace@example.com").await.unwrap();
+    // No mail should arrive — a yield twice gives a stray spawn a
+    // chance to trip the assertion below.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     assert_eq!(
         mailer.sent().len(),
         before,

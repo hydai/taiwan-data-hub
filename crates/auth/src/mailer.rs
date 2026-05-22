@@ -21,6 +21,7 @@
 //! endpoint, so a single `SMTP_URL` env knob covers every provider.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use lettre::message::Mailbox;
@@ -33,19 +34,39 @@ use url::Url;
 use crate::error::AuthError;
 
 /// The two transactional emails #4.2 needs.
+///
+/// Both methods take `expires_in` so the body's "expires in N
+/// hours" copy stays accurate when the caller overrides the
+/// service-level TTL via `AuthService::with_verify_ttl` or
+/// `with_reset_ttl`.
 #[async_trait]
 pub trait Mailer: Send + Sync {
     /// Send the email-verification magic link to a newly-registered
-    /// user.
-    async fn send_verification(&self, to: &str, link: &Url) -> Result<(), AuthError>;
-    /// Send the password-reset magic link.
-    async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), AuthError>;
+    /// user. `expires_in` is rendered into the email body.
+    async fn send_verification(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError>;
+    /// Send the password-reset magic link. `expires_in` is rendered
+    /// into the email body.
+    async fn send_password_reset(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError>;
 }
 
-/// Address used as the `From:` and `Reply-To:` on outgoing mail.
+/// Address used as the `From:` on outgoing mail.
+///
 /// Held separately from the transport so a single transport (e.g.
 /// a shared Postmark account) can serve multiple `Mailer`
-/// instances with different sender identities.
+/// instances with different sender identities. The `Reply-To:`
+/// header is intentionally NOT set — transactional mail bounces
+/// back to the `From:` mailbox, and a separate reply-to channel
+/// is not part of the #4.2 surface.
 #[derive(Debug, Clone)]
 pub struct MailFrom {
     pub address: String,
@@ -113,13 +134,24 @@ impl SmtpMailer {
 
 #[async_trait]
 impl Mailer for SmtpMailer {
-    async fn send_verification(&self, to: &str, link: &Url) -> Result<(), AuthError> {
-        self.send(to, "Verify your email", verification_body(link))
+    async fn send_verification(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
+        self.send(to, "Verify your email", verification_body(link, expires_in))
             .await
     }
 
-    async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), AuthError> {
-        self.send(to, "Reset your password", reset_body(link)).await
+    async fn send_password_reset(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
+        self.send(to, "Reset your password", reset_body(link, expires_in))
+            .await
     }
 }
 
@@ -130,19 +162,31 @@ pub struct LogMailer;
 
 #[async_trait]
 impl Mailer for LogMailer {
-    async fn send_verification(&self, to: &str, link: &Url) -> Result<(), AuthError> {
+    async fn send_verification(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
         warn!(
             recipient = to,
             link = %link,
+            expires_in = ?expires_in,
             "SMTP not configured; printing verification link to logs"
         );
         Ok(())
     }
 
-    async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), AuthError> {
+    async fn send_password_reset(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
         warn!(
             recipient = to,
             link = %link,
+            expires_in = ?expires_in,
             "SMTP not configured; printing password-reset link to logs"
         );
         Ok(())
@@ -150,12 +194,14 @@ impl Mailer for LogMailer {
 }
 
 /// One recorded send. Held by [`MemoryMailer`] so tests can assert
-/// "was a verification email sent to X" and inspect the link.
+/// "was a verification email sent to X" and inspect the link +
+/// effective TTL.
 #[derive(Debug, Clone)]
 pub struct SentMessage {
     pub to: String,
     pub kind: MailKind,
     pub link: Url,
+    pub expires_in: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,56 +244,89 @@ impl MemoryMailer {
 
 #[async_trait]
 impl Mailer for MemoryMailer {
-    async fn send_verification(&self, to: &str, link: &Url) -> Result<(), AuthError> {
+    async fn send_verification(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
         self.record(SentMessage {
             to: to.to_owned(),
             kind: MailKind::Verification,
             link: link.clone(),
+            expires_in,
         });
         Ok(())
     }
 
-    async fn send_password_reset(&self, to: &str, link: &Url) -> Result<(), AuthError> {
+    async fn send_password_reset(
+        &self,
+        to: &str,
+        link: &Url,
+        expires_in: Duration,
+    ) -> Result<(), AuthError> {
         self.record(SentMessage {
             to: to.to_owned(),
             kind: MailKind::PasswordReset,
             link: link.clone(),
+            expires_in,
         });
         Ok(())
     }
 }
 
-fn verification_body(link: &Url) -> String {
+fn verification_body(link: &Url, expires_in: Duration) -> String {
+    let when = humanise_duration(expires_in);
     format!(
         "Welcome to Taiwan Data Hub.\n\n\
          To finish creating your account, open the link below.\n\
-         The link is single-use and will expire in 24 hours.\n\n\
+         The link is single-use and will expire in {when}.\n\n\
          {link}\n\n\
          If you didn't sign up, you can safely ignore this email."
     )
 }
 
-fn reset_body(link: &Url) -> String {
+fn reset_body(link: &Url, expires_in: Duration) -> String {
+    let when = humanise_duration(expires_in);
     format!(
         "Someone (hopefully you) requested a password reset for your\n\
          Taiwan Data Hub account. Open the link below to choose a new\n\
-         password. The link is single-use and expires in 1 hour.\n\n\
+         password. The link is single-use and expires in {when}.\n\n\
          {link}\n\n\
          If you didn't request a reset, you can ignore this email —\n\
          your existing password will keep working."
     )
 }
 
+/// Render a `Duration` as the lowest-precision plain-English string
+/// that loses no information: "24 hours", "30 minutes", "45 seconds".
+/// Used by the email-body templates so the "expires in N" copy
+/// always matches the effective TTL.
+fn humanise_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 && secs % 3600 == 0 {
+        let h = secs / 3600;
+        return format!("{h} hour{}", if h == 1 { "" } else { "s" });
+    }
+    if secs >= 60 && secs % 60 == 0 {
+        let m = secs / 60;
+        return format!("{m} minute{}", if m == 1 { "" } else { "s" });
+    }
+    format!("{secs} second{}", if secs == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
     #[tokio::test]
     async fn memory_mailer_records_verification_send() {
         let mailer = MemoryMailer::new();
         let link = Url::parse("https://hub.example/verify?token=abc").unwrap();
         mailer
-            .send_verification("u@example.com", &link)
+            .send_verification("u@example.com", &link, TEST_TTL)
             .await
             .unwrap();
         let sent = mailer.sent();
@@ -255,6 +334,7 @@ mod tests {
         assert_eq!(sent[0].to, "u@example.com");
         assert_eq!(sent[0].kind, MailKind::Verification);
         assert_eq!(sent[0].link, link);
+        assert_eq!(sent[0].expires_in, TEST_TTL);
     }
 
     #[tokio::test]
@@ -262,12 +342,13 @@ mod tests {
         let mailer = MemoryMailer::new();
         let link = Url::parse("https://hub.example/reset?token=def").unwrap();
         mailer
-            .send_password_reset("u@example.com", &link)
+            .send_password_reset("u@example.com", &link, Duration::from_secs(3600))
             .await
             .unwrap();
         let sent = mailer.sent();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].kind, MailKind::PasswordReset);
+        assert_eq!(sent[0].expires_in, Duration::from_secs(3600));
     }
 
     #[tokio::test]
@@ -275,13 +356,32 @@ mod tests {
         let mailer = LogMailer;
         let link = Url::parse("https://hub.example/verify?token=abc").unwrap();
         mailer
-            .send_verification("u@example.com", &link)
+            .send_verification("u@example.com", &link, TEST_TTL)
             .await
             .unwrap();
         mailer
-            .send_password_reset("u@example.com", &link)
+            .send_password_reset("u@example.com", &link, TEST_TTL)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn humanise_duration_picks_lowest_precision() {
+        assert_eq!(humanise_duration(Duration::from_secs(3600)), "1 hour");
+        assert_eq!(humanise_duration(Duration::from_secs(86_400)), "24 hours");
+        assert_eq!(humanise_duration(Duration::from_secs(60)), "1 minute");
+        assert_eq!(humanise_duration(Duration::from_secs(900)), "15 minutes");
+        assert_eq!(humanise_duration(Duration::from_secs(45)), "45 seconds");
+        assert_eq!(humanise_duration(Duration::from_secs(1)), "1 second");
+    }
+
+    #[test]
+    fn verification_body_uses_provided_ttl() {
+        let link = Url::parse("https://hub.example/verify?token=t").unwrap();
+        assert!(verification_body(&link, Duration::from_secs(3600)).contains("expire in 1 hour"));
+        assert!(
+            verification_body(&link, Duration::from_secs(86_400)).contains("expire in 24 hours")
+        );
     }
 
     #[test]

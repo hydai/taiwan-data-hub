@@ -16,9 +16,12 @@ use crate::{Storage, StorageError};
 
 /// Discriminator stored in `auth_tokens.kind`.
 ///
-/// Kept as a Rust enum + a `from_str` boundary so a typo in a
-/// future migration can be caught at decode time instead of
-/// producing silently-wrong behavior at redemption.
+/// Kept as a Rust enum + a single [`Self::as_str`] write-side
+/// boundary so callers cannot insert a typo. The column never
+/// round-trips back through Rust on the read path — `consume_auth_token`
+/// returns only the owning `user_id` — so a `FromStr` decoder
+/// would have no caller; if a future flow needs to read `kind`
+/// back, add `FromStr` then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthTokenKind {
     /// Newly-registered user clicking the verify-your-email link.

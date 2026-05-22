@@ -25,6 +25,13 @@
 //!   unknown".
 //! - `request_password_reset` looks up the user but ALWAYS returns
 //!   `Ok(())`, so a probe can't tell which addresses are registered.
+//! - SMTP send for verification + password-reset happens in a
+//!   `tokio::spawn` background task, so the caller-visible response
+//!   time does not depend on whether the recipient address exists
+//!   (which would otherwise leak via SMTP latency variance). The
+//!   tiny remaining timing edge is the `auth_tokens` insert that
+//!   only happens for known users — a job queue in v0.2 will
+//!   absorb that too.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,10 +83,14 @@ pub const DEFAULT_RESET_TTL: Duration = Duration::from_secs(60 * 60);
 /// in `InMemoryUserRepo` etc. without a real Postgres. Wrapped in
 /// `Arc` at call sites so the gateway can clone it cheaply for
 /// each request.
+///
+/// The mailer is held in an `Arc<M>` internally so the SMTP send
+/// can be `tokio::spawn`-ed without requiring `M: Clone`. Callers
+/// pass a bare `M` to `new`; the wrap is invisible.
 pub struct AuthService<R, T, M> {
     users: R,
     tokens: T,
-    mailer: M,
+    mailer: Arc<M>,
     public_base_url: Url,
     verify_ttl: Duration,
     reset_ttl: Duration,
@@ -89,7 +100,7 @@ impl<R, T, M> AuthService<R, T, M>
 where
     R: UserRepo,
     T: AuthTokenRepo,
-    M: Mailer,
+    M: Mailer + 'static,
 {
     /// Build a service that mints magic links relative to
     /// `public_base_url` (e.g. `https://hub.example`). Verify
@@ -99,7 +110,7 @@ where
         Self {
             users,
             tokens,
-            mailer,
+            mailer: Arc::new(mailer),
             public_base_url,
             verify_ttl: DEFAULT_VERIFY_TTL,
             reset_ttl: DEFAULT_RESET_TTL,
@@ -157,7 +168,34 @@ where
             .insert_auth_token(user.id, AuthTokenKind::EmailVerify, &token.digest, expires)
             .await?;
         let link = magic_link(&self.public_base_url, "/auth/verify", &token.cleartext)?;
-        self.mailer.send_verification(&user.email, &link).await
+        self.spawn_send_verification(user.email.clone(), link);
+        Ok(())
+    }
+
+    fn spawn_send_verification(&self, to: String, link: Url) {
+        let mailer = Arc::clone(&self.mailer);
+        let ttl = self.verify_ttl;
+        tokio::spawn(async move {
+            if let Err(err) = mailer.send_verification(&to, &link, ttl).await {
+                tracing::error!(
+                    error = %err,
+                    "background verification mail send failed",
+                );
+            }
+        });
+    }
+
+    fn spawn_send_password_reset(&self, to: String, link: Url) {
+        let mailer = Arc::clone(&self.mailer);
+        let ttl = self.reset_ttl;
+        tokio::spawn(async move {
+            if let Err(err) = mailer.send_password_reset(&to, &link, ttl).await {
+                tracing::error!(
+                    error = %err,
+                    "background password-reset mail send failed",
+                );
+            }
+        });
     }
 
     /// Redeem a verification token. Sets `email_verified_at = now()`
@@ -228,7 +266,8 @@ where
             )
             .await?;
         let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
-        self.mailer.send_password_reset(&user.email, &link).await
+        self.spawn_send_password_reset(user.email.clone(), link);
+        Ok(())
     }
 
     /// Redeem a password-reset token + set a new password. The
