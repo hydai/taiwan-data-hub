@@ -16,6 +16,9 @@ pub mod canonical;
 pub mod canonical_tool;
 pub mod date;
 pub mod date_tools;
+pub mod dictionaries;
+pub mod dictionary_tools;
+pub mod json_helpers;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;
@@ -32,6 +35,18 @@ pub use date_tools::{
     TOOL_IS_NATIONAL_HOLIDAY as TW_IS_NATIONAL_HOLIDAY_TOOL_NAME,
     TOOL_ROC_TO_GREGORIAN as TW_ROC_TO_GREGORIAN_TOOL_NAME,
     TOOL_SOLAR_TERM_FOR_DATE as TW_SOLAR_TERM_FOR_DATE_TOOL_NAME,
+};
+pub use dictionary_tools::{
+    TOOL_ADMIN_LOOKUP as TW_LOOKUP_ADMIN_CODE_TOOL_NAME,
+    TOOL_ADMIN_SEARCH as TW_SEARCH_ADMIN_CODE_TOOL_NAME,
+    TOOL_BANK_LOOKUP as TW_LOOKUP_BANK_CODE_TOOL_NAME,
+    TOOL_BANK_SEARCH as TW_SEARCH_BANK_CODE_TOOL_NAME,
+    TOOL_COUNTY_LOOKUP as TW_LOOKUP_COUNTY_CODE_TOOL_NAME,
+    TOOL_COUNTY_SEARCH as TW_SEARCH_COUNTY_CODE_TOOL_NAME,
+    TOOL_MRT_LOOKUP as TW_LOOKUP_MRT_STATION_TOOL_NAME,
+    TOOL_MRT_SEARCH as TW_SEARCH_MRT_STATION_TOOL_NAME,
+    TOOL_POSTAL_LOOKUP as TW_LOOKUP_POSTAL_CODE_TOOL_NAME,
+    TOOL_POSTAL_SEARCH as TW_SEARCH_POSTAL_CODE_TOOL_NAME,
 };
 pub use normalize_address_tool::{
     NormalizeAddressTool, TOOL_NAME as TW_NORMALIZE_ADDRESS_TOOL_NAME,
@@ -55,4 +70,14 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(SolarTermForDateTool)
         .register(IsNationalHolidayTool)
         .register(CanonicalCityDistrictTool)
+        .register(dictionary_tools::ADMIN_DIVISION_GET_TOOL)
+        .register(dictionary_tools::ADMIN_DIVISION_SEARCH_TOOL)
+        .register(dictionary_tools::MRT_STATION_GET_TOOL)
+        .register(dictionary_tools::MRT_STATION_SEARCH_TOOL)
+        .register(dictionary_tools::BANK_CODE_GET_TOOL)
+        .register(dictionary_tools::BANK_CODE_SEARCH_TOOL)
+        .register(dictionary_tools::POSTAL_CODE_GET_TOOL)
+        .register(dictionary_tools::POSTAL_CODE_SEARCH_TOOL)
+        .register(dictionary_tools::COUNTY_CODE_GET_TOOL)
+        .register(dictionary_tools::COUNTY_CODE_SEARCH_TOOL)
 }

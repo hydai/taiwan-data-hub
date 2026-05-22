@@ -11,6 +11,7 @@ use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use serde_json::{Map, Value, json};
 
 use crate::canonical::{Canonical, CountyCode, DistrictCode, canonicalize};
+use crate::json_helpers::kind_of;
 
 pub const TOOL_NAME: &str = "tw_canonical_city_district";
 
@@ -99,17 +100,6 @@ fn parse_args(args: &Value) -> Result<(String, Option<String>), ToolError> {
         }
     };
     Ok((county, district))
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
 }
 
 fn input_schema() -> Map<String, Value> {

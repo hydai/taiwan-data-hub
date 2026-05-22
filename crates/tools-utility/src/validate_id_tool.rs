@@ -27,6 +27,7 @@ use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use serde_json::{Map, Value, json};
 
+use crate::json_helpers::kind_of;
 use crate::{national_id, passport, tax_id};
 
 pub const TOOL_NAME: &str = "tw_validate_id";
@@ -216,17 +217,6 @@ fn parse_strict(args: &Value) -> Result<bool, ToolError> {
             "`strict` must be a boolean, got {}",
             kind_of(other)
         ))),
-    }
-}
-
-fn kind_of(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
     }
 }
 
