@@ -352,8 +352,14 @@ fn is_valid_iban(s: &str) -> bool {
     if !compact.chars().all(|c| c.is_ascii_alphanumeric()) {
         return false;
     }
-    // Country code (first 2 chars) must be letters.
+    // ISO 13616 fixes the first 4 chars: 2 letter country code,
+    // 2 digit check digits. Validate both before mod-97 — without
+    // this guard an IBAN like "GBXX..." that happens to mod-97
+    // to 1 would erroneously pass.
     if !compact.chars().take(2).all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !compact.chars().skip(2).take(2).all(|c| c.is_ascii_digit()) {
         return false;
     }
     let rearranged: String = format!("{}{}", &compact[4..], &compact[..4]);
@@ -608,6 +614,18 @@ mod tests {
     fn iban_rejects_short_or_long() {
         check(FormatKind::Iban, "GB82", false);
         check(FormatKind::Iban, &"A".repeat(40), false);
+    }
+
+    /// R6 fix: ISO 13616 mandates positions 3-4 are check digits
+    /// (0-9). A pathological IBAN with letters in those positions
+    /// could happen to mod-97 to 1, sneaking past the algorithmic
+    /// check. The pre-check rejects this shape outright.
+    #[test]
+    fn iban_rejects_letters_in_check_digit_positions() {
+        // Letters where the 2 check digits should be — any such
+        // string must be rejected even if it would otherwise
+        // mod-97 to 1.
+        check(FormatKind::Iban, "GBXXWEST12345698765432", false);
     }
 
     #[test]
