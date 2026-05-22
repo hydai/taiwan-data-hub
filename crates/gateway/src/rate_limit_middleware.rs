@@ -37,7 +37,7 @@
 //! dispatcher that doesn't ship in this PR.
 
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use auth::{DEFAULT_IP_RPM, RateLimitOutcome, RateLimiter, ValidatedSession, tier_rpm};
 use axum::extract::{ConnectInfo, Extension, Request, State};
@@ -221,15 +221,20 @@ pub fn extract_client_ip(
     peer.ip()
 }
 
-/// Read the `TRUST_PROXY_HEADERS` env var. Any non-empty value
-/// counts as "trust" — operators behind a real proxy set this
-/// to `1` once at deploy time and forget about it. Reading
-/// the env var per request is cheap (the OS caches it) and
-/// avoids plumbing config through every middleware layer.
+/// Read the `TRUST_PROXY_HEADERS` env var ONCE on first
+/// request and cache the parsed boolean for the lifetime of
+/// the process. Any non-empty value counts as "trust" —
+/// operators behind a real proxy set this to `1` at deploy
+/// time and never change it inside a running binary, so
+/// caching is correct (and a `std::env::var` lock + String
+/// allocation per request would otherwise be hot-path waste).
 fn trust_proxy_headers() -> bool {
-    std::env::var(ENV_TRUST_PROXY_HEADERS)
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(ENV_TRUST_PROXY_HEADERS)
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
+    })
 }
 
 /// Build the canonical 429 response. Single source of truth so
@@ -251,9 +256,12 @@ pub fn build_rate_limit_response(outcome: RateLimitOutcome) -> Response {
     response
 }
 
-/// Attach the IETF-draft `X-RateLimit-*` headers to `headers`.
-/// Used on both the allowed and rejected paths so clients can
-/// pace themselves before they hit the cap.
+/// Attach the legacy `X-RateLimit-*` headers to `headers`
+/// (the IETF draft uses un-prefixed `RateLimit-*`; see the
+/// per-header constants above for why this emits the
+/// X-prefixed variants). Used on both the allowed and
+/// rejected paths so clients can pace themselves before they
+/// hit the cap.
 fn attach_rate_limit_headers(headers: &mut HeaderMap, outcome: RateLimitOutcome) {
     insert_numeric(headers, HEADER_LIMIT, outcome.limit.into());
     insert_numeric(headers, HEADER_REMAINING, outcome.remaining.into());
