@@ -52,8 +52,11 @@ pub const DEFAULT_DEMOTION_INACTIVE_DAYS: i32 = 30;
 /// quiet hour spikes the gauge.
 pub const DEFAULT_HIT_RATIO_WINDOW_DAYS: i32 = 1;
 
-/// Summary of one pipeline tick. All counters are i32 so the tick
-/// log can be parsed by external monitoring without ambiguity.
+/// Summary of one pipeline tick. Counter widths:
+///  - `hot_candidate_count` / `demoted_count`: `usize` (Vec
+///    lengths from the storage layer; never negative).
+///  - `hit_ratio_hits` / `hit_ratio_total`: `i64` (Postgres
+///    `COUNT` result type).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheTickReport {
     pub hot_candidate_count: usize,

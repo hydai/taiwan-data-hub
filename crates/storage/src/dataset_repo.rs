@@ -261,11 +261,15 @@ pub trait CacheState: Send + Sync + 'static {
         hit_threshold: i64,
     ) -> Result<Vec<CacheCandidate>, StorageError>;
 
-    /// Datasets currently `cached = true` whose last query is
-    /// older than `inactive_days`. These are candidates for cache
-    /// demotion — the worker calls [`demote_dataset`] on each.
-    /// Platinum / gold tiers are excluded so editorially-pinned
-    /// datasets don't churn out.
+    /// Datasets currently `cached = true` with **zero**
+    /// `query_rows` invocations in the last `inactive_days`.
+    /// `get_dataset` / `materialize_dataset` calls do *not* keep
+    /// a dataset warm — `query_rows` is the signal of "users are
+    /// reading rows" that justifies a parquet cache. These are
+    /// candidates for demotion — the worker calls
+    /// [`Self::demote_dataset`] on each. Platinum / gold tiers
+    /// are excluded so editorially-pinned datasets don't churn
+    /// out.
     async fn cold_candidates(
         &self,
         inactive_days: i32,
@@ -278,9 +282,16 @@ pub trait CacheState: Send + Sync + 'static {
     async fn demote_dataset(&self, dataset_id: Uuid) -> Result<(), StorageError>;
 
     /// Compute the cache hit ratio over the last `window_days` of
-    /// `query_rows` usage. "Hit" = the dataset was `cached = true`
-    /// when the call was recorded. Surfaces as a Prometheus
-    /// gauge once #2.10 telemetry lands.
+    /// `query_rows` usage. "Hit" = the dataset is `cached = true`
+    /// **at query time** (when this method runs), not at the
+    /// original call time — the join is against the *current*
+    /// `datasets.cached` flag because there's no per-row
+    /// historical snapshot. In practice cache state only changes
+    /// via the #3.6 pipeline so the ratio is correct on average;
+    /// a perfectly historical ratio would need a
+    /// `cached_at_call` column on `usage_records` (v0.2
+    /// enhancement). Surfaces as a Prometheus gauge once
+    /// #2.10 telemetry lands.
     async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError>;
 }
 
@@ -977,9 +988,10 @@ impl Storage {
     /// `window_days`. Already-cached datasets are excluded — re-
     /// materialisation is a separate operation.
     ///
-    /// Returned in deterministic order (tier rank desc, then hit
-    /// count desc, then slug asc) so a worker can checkpoint
-    /// progress within the candidate list.
+    /// Returned in deterministic order (tier rank asc — platinum
+    /// first, then gold, silver, bronze; then hit count desc;
+    /// then slug asc) so a worker can checkpoint progress within
+    /// the candidate list.
     pub async fn hot_candidates(
         &self,
         window_days: i32,
