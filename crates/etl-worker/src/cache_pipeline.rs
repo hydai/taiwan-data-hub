@@ -15,9 +15,13 @@
 //!   `cache_path` on datasets that haven't been queried in
 //!   `inactive_days`. The object-store lifecycle policy garbage-
 //!   collects the abandoned parquet file.
-//! - **Telemetry**: computes the cache hit ratio over the same
-//!   window and emits it as a structured `tracing::info!`. The
-//!   Prometheus exporter (#2.10) will wire this onto the
+//! - **Telemetry**: computes the cache hit ratio over its own
+//!   short window (default 1 day via
+//!   `DEFAULT_HIT_RATIO_WINDOW_DAYS`) — *not* the 7-day
+//!   promotion lookback — so the gauge tracks recent traffic
+//!   without being smoothed over a week. Emitted as a
+//!   structured `tracing::info!`; the Prometheus exporter
+//!   (#2.10) will wire this onto the
 //!   `taiwan_data_hub_cache_hit_ratio` gauge.
 //!
 //! ## Selection rules (Definition of Done #3.6)

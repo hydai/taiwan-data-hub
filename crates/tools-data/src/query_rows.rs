@@ -46,7 +46,7 @@ use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
 use polars::prelude::*;
 use polars::sql::SQLContext;
 use serde_json::{Map, Value, json};
-use storage::{CacheRef, DatasetCacheLookup, DatasetKey};
+use storage::{CacheRef, DatasetCacheLookup, DatasetKey, NewUsageRecord, UsageRecorder};
 use uuid::Uuid;
 
 use crate::sql_guard::{self, ALLOWED_TABLE, DEFAULT_MAX_LIMIT};
@@ -61,20 +61,40 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Reads from any [`DatasetCacheLookup`]; production code plugs in a
 /// `storage::Storage`, tests plug in an in-memory stub.
+///
+/// `recorder` is optional: when supplied, every successful call
+/// writes a `usage_records` row with `tool = 'query_rows'`. The
+/// #3.6 hot-cache pipeline relies on these rows to detect
+/// frequently-queried datasets (≥ 50 hits / 7 days). Callers
+/// that don't care about telemetry (in-memory tests) can leave
+/// it `None`.
 #[derive(Clone)]
 pub struct QueryRowsTool {
     lookup: Arc<dyn DatasetCacheLookup>,
+    recorder: Option<Arc<dyn UsageRecorder>>,
 }
 
 impl QueryRowsTool {
     pub fn new<L: DatasetCacheLookup>(lookup: L) -> Self {
         Self {
             lookup: Arc::new(lookup),
+            recorder: None,
         }
     }
 
     pub fn from_arc(lookup: Arc<dyn DatasetCacheLookup>) -> Self {
-        Self { lookup }
+        Self {
+            lookup,
+            recorder: None,
+        }
+    }
+
+    /// Builder for production wiring: attach a usage recorder so
+    /// the #3.6 cache pipeline sees `query_rows` hits.
+    #[must_use]
+    pub fn with_recorder(mut self, recorder: Arc<dyn UsageRecorder>) -> Self {
+        self.recorder = Some(recorder);
+        self
     }
 }
 
@@ -160,6 +180,32 @@ impl ToolHandler for QueryRowsTool {
                 )));
             }
         };
+
+        // #3.6: record usage so the hot-cache pipeline can detect
+        // frequently-queried datasets. Recording is best-effort —
+        // a failure here is a telemetry loss, not a query
+        // failure, so we log and continue with the rendered
+        // response (same pattern as materialize_dataset).
+        if let Some(recorder) = &self.recorder {
+            if let Err(e) = recorder
+                .record_usage(&NewUsageRecord {
+                    dataset_id: cache.id,
+                    dataset_version_id: None,
+                    tool: TOOL_NAME,
+                    format: None,
+                    principal_kind: "anonymous",
+                    principal_id: None,
+                    byte_size: None,
+                })
+                .await
+            {
+                tracing::warn!(
+                    slug = %cache.slug,
+                    usage_error = %e,
+                    "query_rows usage recording failed (telemetry only)",
+                );
+            }
+        }
 
         Ok(render_dataframe(&df, effective_limit))
     }
