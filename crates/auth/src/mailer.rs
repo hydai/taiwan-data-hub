@@ -220,8 +220,13 @@ impl Mailer for LogMailer {
         link: &Url,
         expires_in: Duration,
     ) -> Result<(), AuthError> {
+        // `recipient_hash` (not raw `to`) for the same reason as
+        // `acquire_send_permit`: even in personal-mode dev the log
+        // line should not record PII, and an attacker who can
+        // trigger LogMailer should not be able to enumerate
+        // registered addresses via log access.
         warn!(
-            recipient = to,
+            recipient_hash = %crate::redact::email(to),
             link = %self.rendered_link(link),
             expires_in = ?expires_in,
             reveal_token = self.reveal_token,
@@ -237,7 +242,7 @@ impl Mailer for LogMailer {
         expires_in: Duration,
     ) -> Result<(), AuthError> {
         warn!(
-            recipient = to,
+            recipient_hash = %crate::redact::email(to),
             link = %self.rendered_link(link),
             expires_in = ?expires_in,
             reveal_token = self.reveal_token,

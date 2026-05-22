@@ -342,7 +342,7 @@ where
             // recording addresses.
             tracing::warn!(
                 kind,
-                recipient_hash = %redact_email(to),
+                recipient_hash = %crate::redact::email(to),
                 "in-flight mail-send cap reached; dropping send",
             );
             None
@@ -446,26 +446,6 @@ where
         }
         Ok(())
     }
-}
-
-/// Short hex prefix of `sha256(email)` for log correlation
-/// without recording the address. 8 bytes (16 hex chars) is
-/// well past the birthday bound for any reasonable log volume.
-fn redact_email(email: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(email.as_bytes());
-    let digest = hasher.finalize();
-    hex_lower(&digest[..8])
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        write!(out, "{b:02x}").expect("writing to a String never fails");
-    }
-    out
 }
 
 /// Build a `<base>/<path>?token=<cleartext>` magic-link URL.

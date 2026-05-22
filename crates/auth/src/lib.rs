@@ -18,6 +18,7 @@
 mod error;
 mod mailer;
 mod password;
+mod redact;
 mod service;
 mod token;
 
