@@ -256,6 +256,12 @@ fn build_service() -> (Svc, MemoryMailer) {
 /// the caller-visible response doesn't leak SMTP latency; the test
 /// has to give the runtime a chance to drive the spawned task to
 /// completion before asserting on `mailer.sent()`.
+///
+/// Uses a short `sleep` between checks instead of `yield_now` —
+/// a tight yield loop kept the runtime fully busy and could also
+/// re-clone `MemoryMailer::sent()`'s `Vec` thousands of times per
+/// test. 5ms is small relative to the 2s deadline but stops the
+/// loop from spinning the CPU.
 async fn wait_for_mailer(mailer: &MemoryMailer, expected: usize) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while mailer.sent().len() < expected {
@@ -264,7 +270,7 @@ async fn wait_for_mailer(mailer: &MemoryMailer, expected: usize) {
             "timed out waiting for mailer to record {expected} sends (got {})",
             mailer.sent().len(),
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 

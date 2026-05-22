@@ -373,7 +373,19 @@ where
             .consume_auth_token(AuthTokenKind::EmailVerify, &digest, Utc::now())
             .await?
             .ok_or(AuthError::InvalidToken)?;
-        let _ = self.users.mark_email_verified(user_id).await?;
+        // `mark_email_verified` returns Ok(false) in two distinct
+        // cases: the user is already verified (idempotent — fine),
+        // or the user row is gone (invariant violation — surface).
+        // Disambiguate with a follow-up lookup. The already-verified
+        // path is benign — the token has been consumed and the user
+        // is already in the desired state.
+        if !self.users.mark_email_verified(user_id).await?
+            && self.users.find_user_by_id(user_id).await?.is_none()
+        {
+            return Err(AuthError::Internal(format!(
+                "verify_email consumed a token for user {user_id} but the user row is gone"
+            )));
+        }
         Ok(())
     }
 
