@@ -259,11 +259,14 @@ where
         // discard the plaintext — meaning even a future offline
         // crack of one row yields a useless one-off secret, not a
         // shared backdoor across every OAuth-only account.
-        let user = match self
-            .users
-            .insert_user(email, &unguessable_password_hash().await?)
-            .await
-        {
+        //
+        // Bind the hash to a local before borrowing it across the
+        // `.await`. The temporary-lifetime rules technically extend
+        // a tail temporary through the await, but the explicit
+        // binding documents intent and stops a future refactor
+        // from accidentally introducing a use-after-drop.
+        let placeholder_hash = unguessable_password_hash().await?;
+        let user = match self.users.insert_user(email, &placeholder_hash).await {
             Ok(user) => user,
             Err(StorageError::UniqueViolation(_)) => {
                 // Raced with another `link_or_create_user` for the
@@ -310,9 +313,15 @@ async fn unguessable_password_hash() -> Result<String, AuthError> {
     OsRng
         .try_fill_bytes(&mut bytes)
         .expect("OsRng must provide entropy for OAuth password placeholder");
-    // The plaintext is the random bytes encoded as base64. The
-    // bytes themselves go out of scope at the end of the await;
-    // only the resulting argon2id hash is ever returned.
+    // `plaintext` is the random bytes encoded as base64. Both the
+    // `bytes` array and the `plaintext` `String` live in this
+    // future's state machine across the `.await` below and drop
+    // when the function returns — we do NOT zeroize them. That's
+    // fine for v0.1: the secret is single-use per row, never
+    // returned to a caller, and the resulting argon2id hash is
+    // the only thing that survives. If a future threat model
+    // demands defence against memory disclosure (e.g. coredumps),
+    // wrap these in `zeroize::Zeroizing` here.
     let plaintext = STANDARD_NO_PAD.encode(bytes);
     crate::password::hash_password(plaintext).await
 }
