@@ -1,5 +1,8 @@
 //! Canonicalize free-form 縣市 / 鄉鎮市區 strings into stable
-//! identifier codes (e.g. `ROC_CITY_NEW_TAIPEI`, `DIST_BANQIAO`).
+//! identifier codes (e.g. `ROC_CITY_NEW_TAIPEI`,
+//! `DIST_NTPE_BANQIAO`). District codes carry a county-specific
+//! prefix to disambiguate identically-named districts across
+//! counties (e.g. 中山區 appears in 台北 / 基隆 / 高雄).
 //!
 //! Per the #3.10 Definition of Done:
 //!  - Counties: every input form (post-改制 or pre-改制 alias,
@@ -120,7 +123,8 @@ impl CountyCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DistrictCode {
     /// District resolved to one of the baked codes (e.g.
-    /// `"DIST_BANQIAO"`).
+    /// `"DIST_NTPE_BANQIAO"`, `"DIST_TPE_XINYI"`). The
+    /// county-specific prefix avoids cross-county collisions.
     Known(&'static str),
     /// District wasn't in our v0.1 table — county still resolved
     /// correctly. Caller has the raw input via the

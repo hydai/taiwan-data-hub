@@ -27,7 +27,8 @@ impl ToolHandler for CanonicalCityDistrictTool {
                           aliases (e.g. 台北縣 → 新北市), and traditional 臺 forms. \
                           v0.1 bakes district codes for the 6 直轄市 (台北 / 新北 / 桃園 \
                           / 台中 / 台南 / 高雄) — other counties resolve the county \
-                          code but the district falls through to `unknown`."
+                          code while `district_code` returns null (with the raw \
+                          input preserved in `district_raw` for caller fallback)."
                 .to_string(),
             input_schema: input_schema(),
             output_schema: Some(output_schema()),

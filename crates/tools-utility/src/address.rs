@@ -152,9 +152,8 @@ pub fn normalize_address(input: &str) -> AddressParts {
 /// Counties / 直轄市 in their canonical (post-改制) form. The
 /// longest entry first so prefix-matching is deterministic when a
 /// shorter prefix could otherwise win (e.g. 新北市 vs hypothetical
-/// 新北). Crate-private — the canonicalizer (`crate::canonical`)
-/// reads it through the explicit accessor below; nothing else in
-/// the public API references it.
+/// 新北). Crate-private; used by both `strip_county_prefix` here
+/// and indirectly by `crate::canonical` via that helper.
 pub(crate) const COUNTIES: &[&str] = &[
     "台北市",
     "新北市",
@@ -182,7 +181,8 @@ pub(crate) const COUNTIES: &[&str] = &[
 
 /// Pre-改制 county names that map to the post-改制 canonical form.
 /// Keyed on the input form, valued on the canonical form.
-/// Crate-private — see [`COUNTIES`].
+/// Crate-private; `crate::canonical::county_aliases()` is the
+/// public accessor that re-exposes this list to MCP-tool callers.
 pub(crate) const COUNTY_ALIASES: &[(&str, &str)] = &[
     ("台中縣", "台中市"),
     ("台南縣", "台南市"),
