@@ -15,12 +15,14 @@
 //!     tool names at the HTTP middleware boundary). Keyed by
 //!     `tool:query_rows:<uuid>`.
 //!
-//! Production backend is `DragonflyDB` (Redis-compatible) for
-//! shared counter state across multi-instance gateways; the
-//! [`PgRateLimiter`] impl below is the "small deploy without
-//! Redis" fallback the spec calls out. An in-memory impl is
-//! exported for tests so the service surface can be exercised
-//! without a real DB.
+//! Eventual production backend is `DragonflyDB` (Redis-
+//! compatible) for shared counter state across multi-instance
+//! gateways; that impl is NOT in this PR. Until it lands, the
+//! [`PgRateLimiter`] impl below is the default production
+//! path AND the "small deploy without Redis" fallback the
+//! spec calls out. An in-memory impl is exported for tests
+//! AND used as the personal-mode fallback so the service
+//! surface can be exercised without a real DB.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -95,8 +97,9 @@ pub trait RateLimiter: Send + Sync {
 }
 
 /// `PostgreSQL`-backed [`RateLimiter`]. Used as the default
-/// production path until `DragonflyDB` is wired in; serves as
-/// the documented fallback for small deploys without Redis.
+/// production path until the `DragonflyDB`-backed impl lands;
+/// serves as the documented fallback for small deploys
+/// without Redis.
 pub struct PgRateLimiter {
     repo: Arc<dyn RateLimitRepo>,
 }
@@ -127,12 +130,26 @@ impl RateLimiter for PgRateLimiter {
 }
 
 /// In-memory [`RateLimiter`] used by tests AND as the
-/// personal-mode fallback when no `Storage` is available. The
-/// `Mutex<HashMap>` is cheap-enough at the rates we cap to;
-/// the bigger reason for in-memory mode is so single-instance
-/// dev deploys without Postgres still get IP throttling on the
-/// public endpoints (one of the few defences that works
-/// without auth wired up).
+/// personal-mode fallback when no `Storage` is available.
+///
+/// `std::sync::Mutex` is the deliberate choice over
+/// `tokio::sync::Mutex` for two reasons: (1) the critical
+/// section is two `HashMap` operations with no `.await` —
+/// blocking on contention is microseconds, not milliseconds;
+/// (2) `tokio::sync::Mutex` carries async-runtime baggage
+/// (futures, polling) that's overkill for a path the spec
+/// itself describes as best-effort. Under sustained heavy
+/// contention switch to `DashMap` or `parking_lot::Mutex`;
+/// that's a follow-up if profiling actually shows the
+/// blocking-worker concern materialise.
+///
+/// The lock is also poison-tolerant: a panic in one task
+/// no longer permanently breaks rate limiting in-process —
+/// the next call recovers the inner data via
+/// `PoisonError::into_inner` and continues. We don't expect
+/// any panic on the critical-section path (it's two `HashMap`
+/// ops), so this is a belt-and-suspenders defence rather than
+/// a known failure mode.
 #[derive(Default)]
 pub struct InMemoryRateLimiter {
     inner: Mutex<HashMap<String, CounterTick>>,
@@ -147,7 +164,10 @@ impl RateLimiter for InMemoryRateLimiter {
         now: DateTime<Utc>,
     ) -> Result<RateLimitOutcome, AuthError> {
         let window_start = floor_to_window(now);
-        let mut inner = self.inner.lock().expect("rate-limit mutex poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tick = match inner.get(key).copied() {
             Some(existing) if existing.window_start >= window_start => CounterTick {
                 count: existing.count.saturating_add(1),

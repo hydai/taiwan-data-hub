@@ -456,9 +456,12 @@ fn build_auth_router_if_available(
     //
     //   1. Session middleware — sets `ValidatedSession` when the
     //      cookie validates, otherwise leaves it absent.
-    //   2. API-key rate-limit middleware — runs DOWNSTREAM of
+    //   2. Session rate-limit middleware — runs DOWNSTREAM of
     //      session so it can read the extension to key the
-    //      limiter by user / api-key id.
+    //      limiter by session user id (`session:<uuid>`). The
+    //      "per-API-key" terminology lands when api-key-bearer
+    //      auth wires the active key + tier into the request
+    //      context (separate PR).
     //
     // The api-keys handlers run after both layers and see the
     // session extension + the `X-RateLimit-*` headers added by
@@ -466,7 +469,7 @@ fn build_auth_router_if_available(
     let router = api_keys_routes::router(api_key_service)
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter,
-            rate_limit_middleware::api_key_rate_limit_middleware,
+            rate_limit_middleware::session_rate_limit_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             session_service,

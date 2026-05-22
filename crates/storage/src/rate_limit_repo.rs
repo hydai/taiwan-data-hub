@@ -1,10 +1,13 @@
 //! `rate_limit_counters` repository (#4.7).
 //!
 //! Fixed-window counter storage for the PG-backed
-//! `RateLimitService` impl. The `DragonflyDB`-backed impl in
-//! the auth crate is the production path; this storage is the
-//! "small deploys without Redis" fallback documented in the
-//! #4.7 definition of done.
+//! `RateLimitService` impl. The spec calls for `DragonflyDB`
+//! as the eventual production backend (shared counter state
+//! across multi-instance gateways via Redis); that impl is
+//! NOT in this PR. This storage is the "small deploys without
+//! Redis" fallback documented in the #4.7 definition of done,
+//! and is the default production path until the
+//! `DragonflyDB`-backed impl lands.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
