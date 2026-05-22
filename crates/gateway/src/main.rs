@@ -309,7 +309,20 @@ async fn connect_storage_if_available() -> Option<Storage> {
     // doctor so all three observers report the same configuration
     // state instead of disagreeing on whether `DATABASE_URL=` (set
     // but empty) means "configured".
-    let url = non_empty_env("DATABASE_URL")?;
+    let Some(url) = non_empty_env("DATABASE_URL") else {
+        // Log explicitly here, not just in
+        // `build_auth_router_if_available`'s "no Storage" branch
+        // — the docstring there promises "the underlying reason
+        // was logged at its own boundary", and that's only true
+        // if this line fires. Personal-mode boots without
+        // `DATABASE_URL` set deliberately, so `info!` (not
+        // `warn!`) is the right level.
+        tracing::info!(
+            "DATABASE_URL unset; DB-backed tools + api-keys subrouter disabled \
+             (list_domains and other in-process tools still work)"
+        );
+        return None;
+    };
     match Storage::connect(&url).await {
         Ok(storage) => {
             // Logged narrowly: only the DB-tools side is enabled
