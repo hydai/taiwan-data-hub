@@ -189,15 +189,19 @@ pub fn lookup_county(name: &str) -> Option<CountyCode> {
 #[must_use]
 pub fn canonicalize(county_input: &str, district_input: Option<&str>) -> Canonical {
     let county = lookup_county(county_input);
-    let (district_code, district_raw) = match (county, district_input) {
-        (Some(c), Some(raw)) if !raw.trim().is_empty() => {
-            let raw_stripped = strip_whitespace(raw);
-            let code = lookup_district(c, &raw_stripped);
-            (code, Some(raw_stripped))
+    // Strip first, then check empty — `,` / `，` / `,  ` all
+    // strip to "" and should be treated as "no district given"
+    // rather than "empty district passed through". This keeps
+    // district_raw honest (always Some(non-empty) or None).
+    let stripped = district_input
+        .map(strip_whitespace)
+        .filter(|s| !s.is_empty());
+    let (district_code, district_raw) = match (county, stripped) {
+        (Some(c), Some(raw)) => {
+            let code = lookup_district(c, &raw);
+            (code, Some(raw))
         }
-        (_, Some(raw)) if !raw.trim().is_empty() => {
-            (DistrictCode::Unknown, Some(strip_whitespace(raw)))
-        }
+        (_, Some(raw)) => (DistrictCode::Unknown, Some(raw)),
         _ => (DistrictCode::Unknown, None),
     };
     Canonical {
@@ -576,6 +580,20 @@ mod tests {
             out_pre_reorg.district_code.as_code(),
             Some("DIST_KHH_FENGSHAN")
         );
+    }
+
+    /// R4 fix: comma-only / whitespace-comma district inputs used
+    /// to pass the `.trim()`-based guard but strip to `""`
+    /// downstream, surfacing `district_raw: Some("")` which was
+    /// misleading. Now they collapse to `district_raw: None`.
+    #[test]
+    fn comma_only_district_collapses_to_none() {
+        for junk in [",", "，", " ,  ", "  ，  ，  "] {
+            let out = canonicalize("台北市", Some(junk));
+            assert_eq!(out.county_code, Some(CountyCode::Taipei));
+            assert_eq!(out.district_code, DistrictCode::Unknown);
+            assert_eq!(out.district_raw, None, "junk={junk:?}");
+        }
     }
 
     #[test]
