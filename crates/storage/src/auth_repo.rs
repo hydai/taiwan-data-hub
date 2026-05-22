@@ -177,7 +177,7 @@ impl UserRepo for Storage {
         .bind(password_hash)
         .fetch_one(self.pool())
         .await
-        .map_err(map_insert_user_error)?;
+        .map_err(crate::sqlx_errors::map_unique_violation)?;
         let user = User::from_row(&row).map_err(StorageError::from)?;
         Ok(user)
     }
@@ -344,22 +344,4 @@ impl AuthTokenRepo for Storage {
         tx.commit().await?;
         Ok(invalidated.rows_affected())
     }
-}
-
-fn map_insert_user_error(err: sqlx::Error) -> StorageError {
-    // sqlx surfaces the Postgres unique-violation as
-    // `Error::Database(_)` with SQLSTATE `23505`. We map that to a
-    // typed variant so the auth crate doesn't have to know about
-    // SQLSTATE values.
-    //
-    // The payload is the constraint name (e.g. `users_email_key`)
-    // rather than `db_err.message()`. The full Postgres message
-    // can echo the conflicting `email` value — that would leak
-    // a registered address into logs / telemetry / error responses.
-    if let sqlx::Error::Database(db_err) = &err
-        && db_err.code().as_deref() == Some("23505")
-    {
-        return StorageError::UniqueViolation(db_err.constraint().unwrap_or("unknown").to_owned());
-    }
-    StorageError::from(err)
 }
