@@ -13,3 +13,21 @@ description = "Email + OAuth 2.1 + Dynamic Client Registration + session managem
 workspace = true
 
 [dependencies]
+storage = { path = "../storage" }
+argon2 = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+lettre = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# `tokio::spawn` decouples the SMTP send from the auth flow so the
+# response time doesn't leak SMTP latency (#4.2 R3); `tokio::sync::
+# Semaphore` caps the in-flight send count (#4.2 R6). The workspace
+# definition already enables `rt-multi-thread` + `sync` so both
+# call sites work.
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
