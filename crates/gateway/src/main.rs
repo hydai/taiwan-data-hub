@@ -13,7 +13,7 @@
 //!   would and would not be wired, and exits non-zero on a hard config
 //!   error so operators can catch typos before a redeploy.
 
-use std::net::{AddrParseError, SocketAddr};
+use std::net::SocketAddr;
 
 use anyhow::Context;
 use axum::http::{HeaderName, Method, header};
@@ -395,14 +395,15 @@ fn read_gateway_addr() -> anyhow::Result<SocketAddr> {
         .context("GATEWAY_ADDR must be a valid socket address (host:port)")
 }
 
-/// Returns the comma-separated list of routes that require auth in
-/// the given mode. Auth middleware lands in #4.5 — until then both
-/// modes serve every route publicly, so this returns `""` for
-/// `Personal` and `"<pending #4.5>"` for `MultiUser`. The string is
-/// stable enough to grep for in operator logs.
+/// Returns a render-ready string describing which routes require
+/// auth in the given mode. Auth middleware lands in #4.5 — until
+/// then both modes serve every route publicly, so this returns
+/// `"<none>"` for `Personal` and `"<pending #4.5>"` for `MultiUser`.
+/// Callers (`serve`'s boot log and `doctor`'s report) embed the
+/// returned string verbatim so the two outputs always agree.
 fn gated_route_list(mode: Mode) -> &'static str {
     match mode {
-        Mode::Personal => "",
+        Mode::Personal => "<none>",
         Mode::MultiUser => "<pending #4.5>",
     }
 }
@@ -494,10 +495,7 @@ impl DoctorReport {
                 format!(
                     "{mode} (public: {}; gated: {})",
                     PUBLIC_ROUTES.join(","),
-                    match gated_route_list(mode) {
-                        "" => "<none>",
-                        s => s,
-                    }
+                    gated_route_list(mode),
                 ),
             ),
             Err(e) => self.push("MODE", DoctorStatus::Error, e.to_string()),
@@ -505,14 +503,9 @@ impl DoctorReport {
     }
 
     fn check_gateway_addr(&mut self) {
-        let raw = std::env::var("GATEWAY_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned());
-        match raw.parse::<SocketAddr>() {
+        match read_gateway_addr() {
             Ok(addr) => self.push("GATEWAY_ADDR", DoctorStatus::Ok, addr.to_string()),
-            Err(e) => self.push(
-                "GATEWAY_ADDR",
-                DoctorStatus::Error,
-                format_addr_error(&raw, &e),
-            ),
+            Err(e) => self.push("GATEWAY_ADDR", DoctorStatus::Error, format!("{e:#}")),
         }
     }
 
@@ -623,10 +616,6 @@ impl std::fmt::Display for DoctorReport {
             writeln!(f, "{err_count} error(s) — fix and re-run")
         }
     }
-}
-
-fn format_addr_error(raw: &str, e: &AddrParseError) -> String {
-    format!("{raw:?}: {e}")
 }
 
 #[cfg(test)]
@@ -805,7 +794,7 @@ mod tests {
 
     #[test]
     fn gated_route_list_distinguishes_modes() {
-        assert_eq!(gated_route_list(Mode::Personal), "");
+        assert_eq!(gated_route_list(Mode::Personal), "<none>");
         assert_eq!(gated_route_list(Mode::MultiUser), "<pending #4.5>");
     }
 

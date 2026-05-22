@@ -39,7 +39,8 @@ impl Mode {
     /// - unset, or set to a string that trims to empty → `Ok(Mode::Personal)`
     /// - case-insensitive match for `personal` / `multi-user`
     ///   (with `multiuser` and `multi_user` aliases) → `Ok(_)`
-    /// - any other value → `Err(ModeParseError)`
+    /// - non-Unicode value → `Err(ModeParseError::NonUnicode)`
+    /// - any other value → `Err(ModeParseError::Invalid { value })`
     ///
     /// Treating "set but blank" the same as "unset" mirrors the
     /// gateway's `non_empty_env` helper so a stray `MODE=` in a
@@ -55,9 +56,7 @@ impl Mode {
                 }
             }
             Err(env::VarError::NotPresent) => Ok(Self::default()),
-            Err(env::VarError::NotUnicode(_)) => Err(ModeParseError {
-                value: "<non-unicode>".to_owned(),
-            }),
+            Err(env::VarError::NotUnicode(_)) => Err(ModeParseError::NonUnicode),
         }
     }
 
@@ -91,22 +90,37 @@ impl FromStr for Mode {
         match s.trim().to_ascii_lowercase().as_str() {
             "personal" => Ok(Self::Personal),
             "multi-user" | "multiuser" | "multi_user" => Ok(Self::MultiUser),
-            other => Err(ModeParseError {
+            other => Err(ModeParseError::Invalid {
                 value: other.to_owned(),
             }),
         }
     }
 }
 
-/// Returned when [`MODE_ENV`] is set to a value that is neither
-/// `personal` nor `multi-user` (under any accepted alias).
+/// Returned when [`MODE_ENV`] cannot be resolved to a [`Mode`].
+///
+/// Two distinct failure shapes share one type so callers can
+/// surface them differently without losing the original Unicode
+/// signal:
+///
+/// - [`ModeParseError::Invalid`] — the value parsed as UTF-8 but is
+///   neither `personal` nor `multi-user` (under any accepted alias).
+///   The `value` field is the offending input, lowercased and
+///   trimmed.
+/// - [`ModeParseError::NonUnicode`] — the env var contained bytes
+///   that do not form valid UTF-8, so there is no input string to
+///   echo back.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error(
-    "invalid MODE value {value:?}: expected `personal` or `multi-user` (aliases: multiuser, multi_user)"
-)]
-pub struct ModeParseError {
-    /// The offending value, lowercased and trimmed.
-    pub value: String,
+pub enum ModeParseError {
+    /// Value parsed as UTF-8 but didn't match any known mode.
+    /// `value` is the offending input, lowercased and trimmed.
+    #[error(
+        "invalid MODE value {value:?}: expected `personal` or `multi-user` (aliases: multiuser, multi_user)"
+    )]
+    Invalid { value: String },
+    /// Env var bytes were not valid UTF-8.
+    #[error("MODE env var is not valid UTF-8")]
+    NonUnicode,
 }
 
 #[cfg(test)]
@@ -139,7 +153,12 @@ mod tests {
     #[test]
     fn parse_rejects_unknown_values() {
         let err = "single-user".parse::<Mode>().unwrap_err();
-        assert_eq!(err.value, "single-user");
+        assert_eq!(
+            err,
+            ModeParseError::Invalid {
+                value: "single-user".to_owned(),
+            }
+        );
     }
 
     #[test]
