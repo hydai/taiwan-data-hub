@@ -13,11 +13,20 @@
 --     unlike a stateless JWT where the only way to invalidate a
 --     pre-expiry token is a blocklist.
 --
--- Absolute lifetime is encoded in `expires_at` (set at insert to
--- `created_at + ttl`); each authenticated request updates
--- `last_seen_at` for audit / idle-session analytics. The DoD for
--- #4.5 says "max 14d total", so `expires_at` is NOT extended on
--- access — the session simply expires N days after first issue.
+-- Two expiry columns capture the spec's "sliding window refresh
+-- on each request (max 14d total)":
+--
+--   * `expires_at` — sliding-window idle expiry. Updated on each
+--     authenticated request to `min(now + idle_ttl,
+--     absolute_expires_at)`. An idle user is cleaned up after
+--     idle_ttl elapses without activity.
+--   * `absolute_expires_at` — hard cap on session lifetime.
+--     Set at insert (`created_at + absolute_max`), never extended.
+--     Even an actively-used session gets killed at this point.
+--
+-- `last_seen_at` is touched on each request for audit /
+-- idle-session analytics; the validity predicate keys on
+-- `expires_at` + `absolute_expires_at` + `revoked_at`.
 
 CREATE TABLE sessions (
     -- 32-byte SHA-256 of the cleartext opaque token. The CHECK
@@ -28,9 +37,15 @@ CREATE TABLE sessions (
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
     last_seen_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    -- Absolute expiry (created_at + ttl). Not extended on each
-    -- access — matches the DoD's "max 14d total" requirement.
+    -- Sliding-window idle expiry. The auth crate touches this on
+    -- each authenticated request to `min(now + idle_ttl,
+    -- absolute_expires_at)` — never past the hard cap below.
     expires_at        TIMESTAMPTZ  NOT NULL,
+    -- Hard cap on session lifetime. Set at insert
+    -- (`created_at + absolute_max`); NEVER extended. Even an
+    -- actively-used session dies once `now > absolute_expires_at`.
+    -- Spec ("max 14d total") lives here.
+    absolute_expires_at TIMESTAMPTZ NOT NULL,
     -- Set on logout / forced revocation. A NULL value means the
     -- session is still valid (subject to expires_at). The lookup
     -- predicate filters on `revoked_at IS NULL AND expires_at >

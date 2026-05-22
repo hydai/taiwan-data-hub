@@ -23,9 +23,15 @@ pub struct NewSession {
     /// request that mints it.
     pub id_hash: Vec<u8>,
     pub user_id: Uuid,
-    /// Absolute expiry. Not extended on access — `created_at +
-    /// ttl` once, then immutable.
+    /// Sliding-window idle expiry. Set initially to `min(now +
+    /// idle_ttl, absolute_expires_at)`; [`SessionRepo::
+    /// touch_and_authenticate`] then advances this on each
+    /// request, always capped at `absolute_expires_at`.
     pub expires_at: DateTime<Utc>,
+    /// Hard cap on session lifetime. Set once at insert
+    /// (`now + absolute_max`); NEVER extended. Even active
+    /// sessions die at this point.
+    pub absolute_expires_at: DateTime<Utc>,
     /// Best-effort audit fields. `None` when the gateway can't
     /// determine the value (no proxy header, missing UA).
     pub user_agent: Option<String>,
@@ -94,12 +100,14 @@ impl SessionRepo for Storage {
     async fn insert_session(&self, new: NewSession) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO sessions
-                (id, user_id, expires_at, user_agent, ip_addr)
-             VALUES ($1, $2, $3, $4, $5)",
+                (id, user_id, expires_at, absolute_expires_at,
+                 user_agent, ip_addr)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&new.id_hash)
         .bind(new.user_id)
         .bind(new.expires_at)
+        .bind(new.absolute_expires_at)
         .bind(new.user_agent.as_deref())
         .bind(new.ip_addr)
         .execute(self.pool())
@@ -119,21 +127,26 @@ impl SessionRepo for Storage {
         new_expires_at: DateTime<Utc>,
     ) -> Result<Option<AuthenticatedSession>, StorageError> {
         // `UPDATE … RETURNING` does the validity check + touch +
-        // sliding-window expiry extension + read in a single
-        // statement. A concurrent revoke between SELECT and
-        // UPDATE can't yield a stale "still valid" result —
-        // the WHERE predicate (`revoked_at IS NULL AND
-        // expires_at > now`) IS the validity check, and the
-        // RETURNING reads back the just-extended `expires_at`
-        // so callers see the post-touch value (matches what
-        // they'd set on the cookie).
+        // sliding-window slide + absolute cap + read in a single
+        // statement. Three things have to be true for a hit:
+        //
+        //   * `revoked_at IS NULL`  — not logged out.
+        //   * `expires_at > $now`   — idle window hasn't expired.
+        //   * `absolute_expires_at > $now` — hard cap not exceeded.
+        //
+        // The SLIDE is `LEAST($new_expires_at, absolute_expires_at)`
+        // so the idle window never extends past the hard cap.
+        // `absolute_expires_at` itself is never touched here.
+        // The RETURNING reads the post-slide value so the caller
+        // can mirror it on the cookie if desired.
         let row = sqlx::query_as::<_, (Uuid, DateTime<Utc>, DateTime<Utc>)>(
             "UPDATE sessions
                 SET last_seen_at = $2,
-                    expires_at   = $3
+                    expires_at   = LEAST($3, absolute_expires_at)
               WHERE id = $1
                 AND revoked_at IS NULL
                 AND expires_at > $2
+                AND absolute_expires_at > $2
               RETURNING user_id, created_at, expires_at",
         )
         .bind(id_hash)

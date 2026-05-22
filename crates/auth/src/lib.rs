@@ -37,7 +37,8 @@ pub use service::{
     DEFAULT_VERIFY_TTL, into_arc,
 };
 pub use session::{
-    DEFAULT_SESSION_TTL, IssuedSession, SESSION_COOKIE_NAME, SessionService, ValidatedSession,
+    DEFAULT_ABSOLUTE_MAX, DEFAULT_IDLE_TTL, IssuedSession, SESSION_COOKIE_NAME, SessionService,
+    ValidatedSession,
 };
 pub use token::{
     GeneratedToken, TOKEN_ENTROPY_BYTES, TOKEN_HASH_BYTES, digest_token, generate_token,

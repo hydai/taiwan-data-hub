@@ -1,8 +1,8 @@
 //! Server-side session issuance + validation (#4.5).
 //!
-//! The cookie carries an OPAQUE 32-byte token (base64url-no-pad
-//! encoded, 43 chars). The DB primary key is `sha256(token)`.
-//! That gives us:
+//! The cookie carries an OPAQUE 32-byte token + an HMAC tag:
+//! `base64url(token).base64url(hmac_sha256(token, key))`. The DB
+//! primary key is `sha256(token)`. That gives us:
 //!
 //! - **No JWT trust boundary**: every request validates against
 //!   the DB, so revocation is immediate. A stolen JWT-style
@@ -10,15 +10,30 @@
 //!   killed at the next request after `revoke`.
 //! - **DB leak ≠ token leak**: a dump yields only hashes, not
 //!   working tokens.
-//! - **Cookie-format stability**: the wire format is just
-//!   `base64url(token)`; we don't carry an HMAC because the
-//!   sha256-lookup IS the unforgeability boundary. An attacker
-//!   would need to find a 32-byte preimage of a stored hash,
-//!   which is computationally infeasible.
+//! - **Signed cookie**: the HMAC tag lets the gateway reject
+//!   malformed / tampered cookies cheaply (no DB roundtrip).
+//!   Forging a valid pair without the HMAC key is
+//!   computationally infeasible, and even with a forged pair an
+//!   attacker would still need to find a token whose
+//!   `sha256` matches a stored row.
 //!
-//! The auth service produces [`IssuedSession`] (cookie value +
-//! expiry) at login time and verifies inbound cookies via
-//! [`SessionService::authenticate`].
+//! ## Sliding window + absolute cap
+//!
+//! Per the #4.5 spec ("Sliding window refresh on each request
+//! (max 14d total)"), the service carries TWO durations:
+//!
+//! - `idle_ttl` — how far the idle window slides on each access.
+//!   Default [`DEFAULT_IDLE_TTL`].
+//! - `absolute_max` — hard cap on session lifetime from creation.
+//!   Default [`DEFAULT_ABSOLUTE_MAX`].
+//!
+//! `expires_at` advances on each authenticated request to
+//! `min(now + idle_ttl, absolute_expires_at)`. With the defaults
+//! equal, that collapses to "fixed `absolute_max` from creation"
+//! (matches the literal spec wording). Setting
+//! `idle_ttl < absolute_max` gives the canonical Gmail-style
+//! sliding-with-cap behavior — actively-used sessions live up to
+//! `absolute_max`; idle sessions die after `idle_ttl`.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -27,20 +42,24 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use storage::{AuthenticatedSession, NewSession, SessionRepo};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::error::AuthError;
 
-/// Default sliding-window session TTL. Issue #4.5 spec:
-/// "Sliding window refresh on each request (max 14d total)" —
-/// every authenticated request extends `expires_at` to
-/// `now + DEFAULT_SESSION_TTL`. An active user effectively never
-/// logs out; an idle user gets cleaned up after 14d.
-pub const DEFAULT_SESSION_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// Default idle-window TTL — how far `expires_at` slides on each
+/// authenticated request.
+pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Default absolute lifetime cap — `absolute_expires_at` is set
+/// to `now + DEFAULT_ABSOLUTE_MAX` at issue time and never
+/// extended. Matches the spec's "max 14d total".
+pub const DEFAULT_ABSOLUTE_MAX: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// Cookie name the gateway middleware reads. Documented here so
 /// the auth crate is the single source of truth even if the
@@ -51,6 +70,17 @@ pub const SESSION_COOKIE_NAME: &str = "tdh_session";
 /// 256 bits of entropy → infeasible to brute-force the sha256
 /// preimage.
 const TOKEN_ENTROPY_BYTES: usize = 32;
+
+/// Minimum acceptable HMAC key length, in bytes. 32 bytes
+/// matches the cookie token's entropy and the SHA-256 block
+/// size, so the HMAC output isn't the bottleneck.
+const MIN_HMAC_KEY_BYTES: usize = 32;
+
+/// Separator between the token and the HMAC tag in the cookie
+/// value. `.` is base64url-safe and not used by either part.
+const COOKIE_TAG_SEPARATOR: char = '.';
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Result of [`SessionService::issue`] — what the gateway puts
 /// in the `Set-Cookie` header.
@@ -89,33 +119,81 @@ impl From<AuthenticatedSession> for ValidatedSession {
     }
 }
 
-/// Composition root for the session lifecycle. Holds a session
-/// repo (for the SQL surface) + the absolute TTL. Cheap to clone
-/// (`Arc`-backed repo).
+/// Composition root for the session lifecycle.
+///
+/// Carries the session repo (for the SQL surface), the
+/// sliding/absolute durations, and the HMAC signing key. Cheap
+/// to clone (the repo is `Arc`-backed; durations are `Copy`;
+/// the key is a `Vec<u8>` that clones via `Arc` semantics under
+/// `Clone` since `Vec` is cheap-to-clone here).
+///
+/// `Debug` is custom: the HMAC key is NEVER printed.
 #[derive(Clone)]
 pub struct SessionService {
     sessions: Arc<dyn SessionRepo>,
-    ttl: Duration,
+    idle_ttl: Duration,
+    absolute_max: Duration,
+    /// Symmetric HMAC key for cookie signing. Loaded from env at
+    /// startup; min length [`MIN_HMAC_KEY_BYTES`].
+    hmac_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for SessionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionService")
+            .field("idle_ttl", &self.idle_ttl)
+            .field("absolute_max", &self.absolute_max)
+            // HMAC key length only — never the bytes themselves.
+            .field("hmac_key_len", &self.hmac_key.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionService {
-    pub fn new(sessions: Arc<dyn SessionRepo>) -> Self {
-        Self {
-            sessions,
-            ttl: DEFAULT_SESSION_TTL,
+    /// Build a service with default `idle_ttl` + `absolute_max`
+    /// ([`DEFAULT_IDLE_TTL`] / [`DEFAULT_ABSOLUTE_MAX`]). Errors
+    /// if `hmac_key` is shorter than [`MIN_HMAC_KEY_BYTES`] —
+    /// configuration error, not a runtime case.
+    pub fn new(sessions: Arc<dyn SessionRepo>, hmac_key: Vec<u8>) -> Result<Self, AuthError> {
+        if hmac_key.len() < MIN_HMAC_KEY_BYTES {
+            return Err(AuthError::InvalidConfig(format!(
+                "SESSION_HMAC_KEY must be >= {MIN_HMAC_KEY_BYTES} bytes, got {}",
+                hmac_key.len()
+            )));
         }
+        Ok(Self {
+            sessions,
+            idle_ttl: DEFAULT_IDLE_TTL,
+            absolute_max: DEFAULT_ABSOLUTE_MAX,
+            hmac_key,
+        })
     }
 
     #[must_use]
-    pub fn with_ttl(mut self, ttl: Duration) -> Self {
-        self.ttl = ttl;
+    pub fn with_idle_ttl(mut self, ttl: Duration) -> Self {
+        self.idle_ttl = ttl;
         self
     }
 
+    #[must_use]
+    pub fn with_absolute_max(mut self, max: Duration) -> Self {
+        self.absolute_max = max;
+        self
+    }
+
+    /// Cookie `Max-Age` value the gateway should emit. The
+    /// browser-side cookie lifetime tracks the hard cap so
+    /// eviction happens at the same time the server stops
+    /// accepting the session — never before.
+    #[must_use]
+    pub fn cookie_max_age_seconds(&self) -> u64 {
+        self.absolute_max.as_secs()
+    }
+
     /// Mint a fresh session for `user_id`. Generates the opaque
-    /// token, inserts the `sha256(token)` row, returns the
-    /// cookie value + expiry for the gateway to set on the
-    /// response.
+    /// token, HMACs it under [`Self::hmac_key`], inserts the
+    /// `sha256(token)` row, returns `<token>.<tag>` + the
+    /// initial idle expiry.
     pub async fn issue(
         &self,
         user_id: Uuid,
@@ -126,15 +204,18 @@ impl SessionService {
         OsRng
             .try_fill_bytes(&mut token_bytes)
             .expect("OsRng must provide entropy for session token");
-        let cookie_value = URL_SAFE_NO_PAD.encode(token_bytes);
         let id_hash = Sha256::digest(token_bytes).to_vec();
+        let cookie_value = self.sign_token_bytes(&token_bytes);
         let now = Utc::now();
-        let expires_at = now + self.chrono_ttl()?;
+        let absolute_expires_at = now + Self::chrono_duration(self.absolute_max)?;
+        let idle_expiry = now + Self::chrono_duration(self.idle_ttl)?;
+        let expires_at = idle_expiry.min(absolute_expires_at);
         self.sessions
             .insert_session(NewSession {
                 id_hash,
                 user_id,
                 expires_at,
+                absolute_expires_at,
                 user_agent,
                 ip_addr,
             })
@@ -148,26 +229,28 @@ impl SessionService {
     /// Validate an inbound cookie value. Returns:
     ///
     /// - `Ok(Some(session))` for a live, unrevoked, unexpired
-    ///   session. Side effects: `last_seen_at` is touched AND
-    ///   `expires_at` is slid forward to `now + ttl` (the
-    ///   sliding-window refresh per the #4.5 spec). The
-    ///   returned `expires_at` reflects the post-slide value.
-    /// - `Ok(None)` for missing / revoked / expired / malformed
-    ///   token. The caller treats all of these as "anonymous"
-    ///   and clears the cookie.
+    ///   session that ALSO passes the HMAC tag check. Side
+    ///   effects: `last_seen_at` is touched AND `expires_at` is
+    ///   slid forward to `min(now + idle_ttl,
+    ///   absolute_expires_at)` (the sliding-window refresh with
+    ///   absolute cap per the #4.5 spec).
+    /// - `Ok(None)` for missing / revoked / expired / malformed /
+    ///   tampered-tag token. The caller treats all of these as
+    ///   "anonymous" and clears the cookie.
     ///
-    /// A malformed cookie (bad base64, wrong length) does NOT
-    /// surface as an error — the client may have stale data; we
-    /// just want the request to land as anonymous.
+    /// A malformed cookie (bad base64, wrong length, bad HMAC)
+    /// does NOT surface as an error — the client may have stale
+    /// data; we just want the request to land as anonymous.
     pub async fn authenticate(
         &self,
         cookie_value: &str,
     ) -> Result<Option<ValidatedSession>, AuthError> {
-        let Some(id_hash) = hash_cookie(cookie_value) else {
+        let Some(token_bytes) = self.verify_cookie(cookie_value) else {
             return Ok(None);
         };
+        let id_hash = Sha256::digest(token_bytes).to_vec();
         let now = Utc::now();
-        let new_expires_at = now + self.chrono_ttl()?;
+        let new_expires_at = now + Self::chrono_duration(self.idle_ttl)?;
         Ok(self
             .sessions
             .touch_and_authenticate(&id_hash, now, new_expires_at)
@@ -175,12 +258,55 @@ impl SessionService {
             .map(ValidatedSession::from))
     }
 
-    /// `self.ttl` as a `chrono::Duration`. Shared by `issue` +
-    /// `authenticate` so the conversion error path is identical
-    /// at both call sites.
-    fn chrono_ttl(&self) -> Result<chrono::Duration, AuthError> {
-        chrono::Duration::from_std(self.ttl)
-            .map_err(|e| AuthError::InvalidConfig(format!("session ttl out of chrono range: {e}")))
+    /// A `Duration` as `chrono::Duration`. Folds the conversion
+    /// error to `InvalidConfig` so callers don't need to know
+    /// about the `OutOfRange` shape.
+    fn chrono_duration(d: Duration) -> Result<chrono::Duration, AuthError> {
+        chrono::Duration::from_std(d)
+            .map_err(|e| AuthError::InvalidConfig(format!("session duration out of range: {e}")))
+    }
+
+    /// HMAC-SHA-256 of `token_bytes` under [`Self::hmac_key`],
+    /// returned as a base64url-no-pad string.
+    fn hmac_tag(&self, token_bytes: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(&self.hmac_key)
+            .expect("HmacSha256 accepts any key length we accept at construction");
+        mac.update(token_bytes);
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    }
+
+    /// `<base64url(token)>.<base64url(hmac)>` — the wire format.
+    fn sign_token_bytes(&self, token_bytes: &[u8]) -> String {
+        let token = URL_SAFE_NO_PAD.encode(token_bytes);
+        let tag = self.hmac_tag(token_bytes);
+        format!("{token}{COOKIE_TAG_SEPARATOR}{tag}")
+    }
+
+    /// Parse, decode, and HMAC-verify a cookie value. Returns
+    /// the raw 32-byte token on success, `None` on any
+    /// malformation (wrong shape, bad base64, wrong length,
+    /// invalid tag).
+    fn verify_cookie(&self, cookie_value: &str) -> Option<[u8; TOKEN_ENTROPY_BYTES]> {
+        let (token_b64, tag_b64) = cookie_value.split_once(COOKIE_TAG_SEPARATOR)?;
+        let token_bytes = URL_SAFE_NO_PAD.decode(token_b64).ok()?;
+        if token_bytes.len() != TOKEN_ENTROPY_BYTES {
+            return None;
+        }
+        let supplied_tag = URL_SAFE_NO_PAD.decode(tag_b64).ok()?;
+        let expected_tag = {
+            let mut mac = HmacSha256::new_from_slice(&self.hmac_key).expect("hmac key valid");
+            mac.update(&token_bytes);
+            mac.finalize().into_bytes()
+        };
+        // Constant-time compare via `subtle` — defends against
+        // timing attacks that walk the tag byte-by-byte.
+        if supplied_tag.ct_eq(expected_tag.as_slice()).into() {
+            let mut out = [0u8; TOKEN_ENTROPY_BYTES];
+            out.copy_from_slice(&token_bytes);
+            Some(out)
+        } else {
+            None
+        }
     }
 
     /// Revoke a specific session by cookie value. Returns `true`
@@ -188,9 +314,10 @@ impl SessionService {
     /// returns `false`). A malformed cookie returns `false`
     /// without touching the DB.
     pub async fn revoke(&self, cookie_value: &str) -> Result<bool, AuthError> {
-        let Some(id_hash) = hash_cookie(cookie_value) else {
+        let Some(token_bytes) = self.verify_cookie(cookie_value) else {
             return Ok(false);
         };
+        let id_hash = Sha256::digest(token_bytes).to_vec();
         let now = Utc::now();
         Ok(self.sessions.revoke_session(&id_hash, now).await?)
     }
@@ -207,46 +334,116 @@ impl SessionService {
     }
 }
 
-/// Decode + hash a cookie value into the DB lookup key. Returns
-/// `None` for any malformed input so the caller treats it
-/// uniformly as "no session" rather than a hard error.
-fn hash_cookie(cookie_value: &str) -> Option<Vec<u8>> {
-    let bytes = URL_SAFE_NO_PAD.decode(cookie_value).ok()?;
-    if bytes.len() != TOKEN_ENTROPY_BYTES {
-        return None;
-    }
-    Some(Sha256::digest(&bytes).to_vec())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use storage::{AuthenticatedSession, StorageError};
 
-    #[test]
-    fn hash_cookie_rejects_wrong_length() {
-        // Empty, too short, too long all reject.
-        assert!(hash_cookie("").is_none());
-        // 16 bytes (`AAAA...` is base64 for zero bytes; need 22
-        // chars to encode 16 bytes no-pad).
-        assert!(hash_cookie(&"A".repeat(22)).is_none());
-        // 64 bytes → 86 chars no-pad.
-        assert!(hash_cookie(&"A".repeat(86)).is_none());
+    /// Bare-bones session repo for the cookie-format unit tests.
+    /// The full integration tests in `tests/session.rs` use a
+    /// richer fake; here we just need something that satisfies
+    /// the trait bound so we can construct a `SessionService`.
+    #[derive(Default)]
+    struct NullRepo;
+    #[async_trait::async_trait]
+    impl SessionRepo for NullRepo {
+        async fn insert_session(&self, _: NewSession) -> Result<(), StorageError> {
+            Ok(())
+        }
+        async fn touch_and_authenticate(
+            &self,
+            _: &[u8],
+            _: DateTime<Utc>,
+            _: DateTime<Utc>,
+        ) -> Result<Option<AuthenticatedSession>, StorageError> {
+            Ok(None)
+        }
+        async fn revoke_session(&self, _: &[u8], _: DateTime<Utc>) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+        async fn revoke_all_sessions_for_user(
+            &self,
+            _: Uuid,
+            _: DateTime<Utc>,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+    }
+
+    fn svc() -> SessionService {
+        SessionService::new(Arc::new(NullRepo), vec![7u8; MIN_HMAC_KEY_BYTES])
+            .expect("hmac key valid")
     }
 
     #[test]
-    fn hash_cookie_rejects_non_base64() {
-        // Padding char `=` is rejected by URL_SAFE_NO_PAD.
-        assert!(hash_cookie(&format!("{}=", "A".repeat(42))).is_none());
-        // Non-base64 char.
-        assert!(hash_cookie(&"!".repeat(43)).is_none());
+    fn rejects_hmac_key_shorter_than_minimum() {
+        let err =
+            SessionService::new(Arc::new(NullRepo), vec![7u8; MIN_HMAC_KEY_BYTES - 1]).unwrap_err();
+        assert!(matches!(err, AuthError::InvalidConfig(_)));
     }
 
     #[test]
-    fn hash_cookie_round_trips_a_valid_token() {
-        let token = URL_SAFE_NO_PAD.encode([7u8; 32]);
-        let h = hash_cookie(&token).expect("valid token hashes");
-        assert_eq!(h.len(), 32, "sha256 → 32 bytes");
-        // Stable digest — same input → same hash.
-        assert_eq!(h, hash_cookie(&token).unwrap());
+    fn verify_cookie_round_trips_signed_token() {
+        let s = svc();
+        let token_bytes = [42u8; TOKEN_ENTROPY_BYTES];
+        let cookie = s.sign_token_bytes(&token_bytes);
+        let recovered = s.verify_cookie(&cookie).expect("valid cookie verifies");
+        assert_eq!(recovered, token_bytes);
+    }
+
+    #[test]
+    fn verify_cookie_rejects_tampered_tag() {
+        let s = svc();
+        let cookie = s.sign_token_bytes(&[42u8; TOKEN_ENTROPY_BYTES]);
+        // Flip one char in the tag; HMAC compare must fail.
+        let mut bad = cookie.clone();
+        let last = bad.pop().unwrap();
+        bad.push(if last == 'A' { 'B' } else { 'A' });
+        assert!(s.verify_cookie(&bad).is_none());
+    }
+
+    #[test]
+    fn verify_cookie_rejects_tampered_token_with_old_tag() {
+        let s = svc();
+        let cookie = s.sign_token_bytes(&[42u8; TOKEN_ENTROPY_BYTES]);
+        let (token_b64, tag_b64) = cookie.split_once('.').unwrap();
+        // Different token, same tag — HMAC mismatch.
+        let other_token = URL_SAFE_NO_PAD.encode([0u8; TOKEN_ENTROPY_BYTES]);
+        let bad = format!("{other_token}.{tag_b64}");
+        let _ = token_b64;
+        assert!(s.verify_cookie(&bad).is_none());
+    }
+
+    #[test]
+    fn verify_cookie_rejects_missing_tag_separator() {
+        let s = svc();
+        assert!(s.verify_cookie("nosepheretokencheck").is_none());
+        // Empty.
+        assert!(s.verify_cookie("").is_none());
+    }
+
+    #[test]
+    fn verify_cookie_rejects_wrong_token_length() {
+        let s = svc();
+        // 16 bytes of token (22 b64 chars) + a (now-mismatched)
+        // tag fails the length check before the HMAC compare.
+        let short_token = URL_SAFE_NO_PAD.encode([0u8; 16]);
+        let tag = "AAAA";
+        let bad = format!("{short_token}.{tag}");
+        assert!(s.verify_cookie(&bad).is_none());
+    }
+
+    #[test]
+    fn verify_cookie_rejects_non_base64() {
+        let s = svc();
+        // `!` is not a base64url char.
+        assert!(
+            s.verify_cookie(&format!("!!!.{}", "A".repeat(43)))
+                .is_none()
+        );
+        assert!(
+            s.verify_cookie(&format!("{}.!!!", "A".repeat(43)))
+                .is_none()
+        );
     }
 }

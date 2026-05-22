@@ -34,6 +34,7 @@ struct Row {
     created_at: DateTime<Utc>,
     last_seen_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    absolute_expires_at: DateTime<Utc>,
     revoked_at: Option<DateTime<Utc>>,
     user_agent: Option<String>,
     ip_addr: Option<IpAddr>,
@@ -54,6 +55,7 @@ impl SessionRepo for InMemorySessionRepo {
                 created_at: now,
                 last_seen_at: now,
                 expires_at: new.expires_at,
+                absolute_expires_at: new.absolute_expires_at,
                 revoked_at: None,
                 user_agent: new.user_agent,
                 ip_addr: new.ip_addr,
@@ -72,14 +74,14 @@ impl SessionRepo for InMemorySessionRepo {
         let Some(row) = inner.get_mut(id_hash) else {
             return Ok(None);
         };
-        if row.revoked_at.is_some() || row.expires_at <= now {
+        if row.revoked_at.is_some() || row.expires_at <= now || row.absolute_expires_at <= now {
             return Ok(None);
         }
-        // Sliding-window refresh: extend `expires_at` to the
-        // service-provided new value (matches the production SQL
-        // `SET expires_at = $3`).
+        // Sliding-window refresh capped at the absolute expiry —
+        // mirrors the production SQL `SET expires_at =
+        // LEAST($3, absolute_expires_at)`.
         row.last_seen_at = now;
-        row.expires_at = new_expires_at;
+        row.expires_at = new_expires_at.min(row.absolute_expires_at);
         Ok(Some(AuthenticatedSession {
             user_id: row.user_id,
             created_at: row.created_at,
@@ -127,7 +129,15 @@ impl SessionRepo for InMemorySessionRepo {
 
 fn build_service(ttl: Duration) -> (SessionService, Arc<InMemorySessionRepo>) {
     let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
-    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>).with_ttl(ttl);
+    // Idle == absolute by default so the existing tests treat the
+    // session as "valid up to `ttl` from creation" without
+    // needing the more nuanced sliding-with-cap semantics. The
+    // dedicated `authenticate_slides_*` test below overrides the
+    // pair explicitly.
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .expect("hmac key valid")
+        .with_idle_ttl(ttl)
+        .with_absolute_max(ttl);
     (svc, repo)
 }
 
@@ -150,8 +160,11 @@ async fn issue_then_authenticate_round_trip() {
         .await
         .unwrap();
 
-    // Cookie value is 43 chars (base64url of 32 random bytes).
-    assert_eq!(issued.cookie_value.len(), 43);
+    // Cookie value is `<base64url(token)>.<base64url(hmac)>` —
+    // 43 chars (32 random bytes) + `.` + 43 chars (sha256 tag).
+    let (token, tag) = issued.cookie_value.split_once('.').unwrap();
+    assert_eq!(token.len(), 43, "token base64url is 43 chars");
+    assert_eq!(tag.len(), 43, "HMAC-SHA256 tag base64url is 43 chars");
     assert!(issued.expires_at > Utc::now());
 
     // Authenticate the cookie back to the same user.
@@ -175,10 +188,30 @@ async fn issue_then_authenticate_round_trip() {
 
 #[tokio::test]
 async fn authenticate_returns_none_for_unknown_cookie() {
-    let (svc, _) = build_service(Duration::from_secs(60));
-    // A perfectly-shaped but never-issued token.
-    let bogus = URL_SAFE_NO_PAD.encode([7u8; 32]);
-    assert!(svc.authenticate(&bogus).await.unwrap().is_none());
+    // Two services that share an HMAC key but NOT a session
+    // repo. A cookie issued by `victim` won't be in `attacker`'s
+    // repo, so even though the HMAC check passes the DB lookup
+    // fails — which proves the unforgeability isn't relying on
+    // HMAC alone.
+    let victim_repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let attacker_repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let key = vec![7u8; 32];
+    let victim = SessionService::new(victim_repo.clone() as Arc<dyn SessionRepo>, key.clone())
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(60));
+    let attacker = SessionService::new(attacker_repo as Arc<dyn SessionRepo>, key)
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(60));
+    let issued = victim.issue(fresh_user_id(), None, None).await.unwrap();
+    assert!(
+        attacker
+            .authenticate(&issued.cookie_value)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -293,51 +326,87 @@ async fn two_issued_sessions_get_distinct_cookies() {
 
 #[tokio::test]
 async fn authenticate_slides_expires_at_on_each_access() {
-    // Regression for Copilot R1 (sliding window): every
-    // authenticated request must push `expires_at` forward to
-    // `now + ttl`. Walk the stored row's `expires_at` BACKWARD
-    // (without touching `revoked_at` or pushing it past `now`)
-    // and re-authenticate — the expiry should be back to the
-    // freshly-extended value, not the pre-walk one.
-    let (svc, repo) = build_service(Duration::from_secs(60));
+    // Regression for Copilot R1 (sliding window) + R2 (cap):
+    // when `idle_ttl < absolute_max`, every authenticated
+    // request must push `expires_at` forward by ~idle_ttl,
+    // capped at `absolute_expires_at`. Walk the stored row's
+    // `expires_at` BACKWARD (without expiring it) and
+    // re-authenticate — the expiry should bounce back to the
+    // freshly-extended value.
+    let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        .with_idle_ttl(Duration::from_secs(60))
+        .with_absolute_max(Duration::from_secs(3600));
     let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
     let original_expiry = issued.expires_at;
 
-    // Walk the row's `expires_at` backward by ~30s, still
-    // unexpired. After the next authenticate the expiry should
-    // jump forward to roughly `now + 60s` (well past the walked
-    // value).
+    // Walk the row's `expires_at` backward to ~now+10s. Next
+    // authenticate should jump it forward to ~now+60s.
     {
         let mut inner = repo.inner.lock().unwrap();
         let row = inner.values_mut().next().unwrap();
-        row.expires_at = Utc::now() + chrono::Duration::seconds(30);
+        row.expires_at = Utc::now() + chrono::Duration::seconds(10);
     }
     let validated = svc
         .authenticate(&issued.cookie_value)
         .await
         .unwrap()
         .expect("session still valid");
-    let walked_window_max = Utc::now() + chrono::Duration::seconds(30);
+    let walked_window_max = Utc::now() + chrono::Duration::seconds(15);
     assert!(
         validated.expires_at > walked_window_max,
-        "expires_at must slide forward to ~now+ttl, got {} (walked max {walked_window_max})",
+        "expires_at must slide forward, got {} (walked + 5s = {walked_window_max})",
         validated.expires_at
     );
-    // And the persisted row's expiry matches what the service
-    // returned.
+    // The persisted row's expiry matches what the service
+    // returned (sliding kept it < absolute_expires_at).
     let inner = repo.inner.lock().unwrap();
     let row = inner.values().next().unwrap();
     assert_eq!(row.expires_at, validated.expires_at);
+    assert!(
+        validated.expires_at <= row.absolute_expires_at,
+        "slide must never exceed absolute cap"
+    );
 
-    // The original_expiry is still close in time to validated.
-    // expires_at because the TTL is the same — but they're not
-    // EQUAL, since `Utc::now()` advanced between the two issue
-    // points. We just need to prove the slide happened, not
-    // pin the exact value.
+    // `original_expiry` is from `Utc::now()` taken at issue
+    // time; the slide ran at a strictly later `Utc::now()`, so
+    // the values differ.
     drop(inner);
-    assert_ne!(
-        original_expiry, validated.expires_at,
-        "even with the same TTL, the second `now` differs from the first"
+    assert!(
+        validated.expires_at > original_expiry,
+        "slide must advance past the original idle expiry"
+    );
+}
+
+#[tokio::test]
+async fn authenticate_slide_is_capped_at_absolute_max() {
+    // Regression for Copilot R2 (absolute cap): with idle_ttl >
+    // absolute_max, the slide must be CLAMPED to
+    // absolute_expires_at — an actively-used session can't live
+    // past the hard cap.
+    let repo: Arc<InMemorySessionRepo> = Arc::new(InMemorySessionRepo::default());
+    let svc = SessionService::new(repo.clone() as Arc<dyn SessionRepo>, vec![7u8; 32])
+        .unwrap()
+        // Absurdly large idle, tiny absolute — the slide value
+        // is enormous but the cap pins `expires_at` to
+        // absolute_expires_at.
+        .with_idle_ttl(Duration::from_secs(3600))
+        .with_absolute_max(Duration::from_secs(60));
+    let issued = svc.issue(fresh_user_id(), None, None).await.unwrap();
+    let abs = {
+        let inner = repo.inner.lock().unwrap();
+        inner.values().next().unwrap().absolute_expires_at
+    };
+
+    let validated = svc
+        .authenticate(&issued.cookie_value)
+        .await
+        .unwrap()
+        .expect("session still valid");
+    assert_eq!(
+        validated.expires_at, abs,
+        "slide must clamp to absolute_expires_at when idle_ttl > absolute_max"
     );
 }
 
@@ -358,7 +427,11 @@ async fn revoke_all_for_user_skips_already_expired_sessions() {
     // sha256 the service used at insert time) avoids depending
     // on HashMap iteration order.
     let dead_hash = {
-        let bytes = URL_SAFE_NO_PAD.decode(&dead.cookie_value).unwrap();
+        // Cookie value is `<token>.<tag>`. The DB key is
+        // sha256(<raw token bytes>), so peel off the tag before
+        // hashing.
+        let (token_b64, _) = dead.cookie_value.split_once('.').unwrap();
+        let bytes = URL_SAFE_NO_PAD.decode(token_b64).unwrap();
         Sha256::digest(&bytes).to_vec()
     };
     {

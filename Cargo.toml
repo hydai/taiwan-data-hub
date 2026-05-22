@@ -87,6 +87,10 @@ sha2 = "0.10"
 # encoding both LocalFs tokens and SigV4 signatures expect.
 hmac = "0.12"
 hex = "0.4"
+# Constant-time slice comparison for the session HMAC tag check
+# (#4.5). Avoids the timing-side-channel a `==` byte-walk would
+# expose to an attacker who can measure latency precisely.
+subtle = "2"
 tempfile = "3.13"
 # Derive-based CLI used by the gateway's `serve` / `doctor` subcommands
 # (#4.1) and any future binaries that need argument parsing. Default
