@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # rmcp is consumed exclusively via the `mcp_core::rmcp` re-export so the SDK
 # binding lives in a single crate; do not add a direct `rmcp` dep here.
+auth = { path = "../auth" }
 mcp-core = { path = "../mcp-core" }
 object-store = { path = "../object-store" }
 shared = { path = "../shared" }

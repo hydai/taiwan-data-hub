@@ -21,6 +21,7 @@ mod oauth;
 mod password;
 mod redact;
 mod service;
+mod session;
 mod token;
 
 pub use error::AuthError;
@@ -34,6 +35,9 @@ pub use password::{hash_password, verify_password};
 pub use service::{
     AuthService, AuthenticatedUser, DEFAULT_MAX_INFLIGHT_SENDS, DEFAULT_RESET_TTL,
     DEFAULT_VERIFY_TTL, into_arc,
+};
+pub use session::{
+    DEFAULT_SESSION_TTL, IssuedSession, SESSION_COOKIE_NAME, SessionService, ValidatedSession,
 };
 pub use token::{
     GeneratedToken, TOKEN_ENTROPY_BYTES, TOKEN_HASH_BYTES, digest_token, generate_token,

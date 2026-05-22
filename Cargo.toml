@@ -56,7 +56,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 url = "2"
 wiremock = "0.6"
 # sqlx 0.8.6 per DESIGN.md §5; rustls TLS to match the rest of the stack.
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate", "ipnetwork"] }
 uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
 testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
 tokio-cron-scheduler = "0.15.1"

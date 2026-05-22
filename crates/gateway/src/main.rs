@@ -13,6 +13,8 @@
 //!   would and would not be wired, and exits non-zero on a hard config
 //!   error so operators can catch typos before a redeploy.
 
+mod session_middleware;
+
 use std::net::SocketAddr;
 
 use anyhow::Context;
