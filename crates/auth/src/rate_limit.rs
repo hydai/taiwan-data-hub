@@ -49,9 +49,10 @@ pub const DEFAULT_IP_RPM: u32 = 60;
 /// invocation can run an expensive Parquet scan. 20/min keeps
 /// the limit per-key (multiplied by the user's normal tier
 /// limit) so a `pro` user with 600/min overall can still issue
-/// up to 20 of those against `query_rows`. The number is a
-/// starting point — operators tune via env if real traffic
-/// shows it too loose or too tight.
+/// up to 20 of those against `query_rows`. Hard-coded for now;
+/// layer 3 itself is deferred (see module docs) so there's
+/// no override config to wire yet — when the per-caller guard
+/// lands it'll grow an env knob alongside.
 pub const DEFAULT_QUERY_ROWS_RPM: u32 = 20;
 
 /// Outcome of a single rate-limit check. Carries the data the

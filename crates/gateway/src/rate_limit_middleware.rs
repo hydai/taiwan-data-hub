@@ -57,9 +57,11 @@ const HEADER_LIMIT: &str = "x-ratelimit-limit";
 /// as [`HEADER_LIMIT`]).
 const HEADER_REMAINING: &str = "x-ratelimit-remaining";
 /// Legacy `X-RateLimit-Reset` header name. We emit the
-/// delta-seconds form (RFC-7231-style delta) to match the
-/// `Retry-After` semantics — clients that read either end up
-/// with the same number.
+/// ABSOLUTE Unix-epoch-seconds form (not delta-seconds), which
+/// is the convention GitHub / Cloudflare / AWS / Twitter all
+/// follow for this header. `Retry-After` carries the delta-
+/// seconds form per RFC 7231; the two pair so clients reading
+/// either can compute the other.
 const HEADER_RESET: &str = "x-ratelimit-reset";
 
 /// Env var that opts into honouring `X-Forwarded-For` /
@@ -92,6 +94,15 @@ pub async fn ip_rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Response {
+    // Infrastructure probes are exempt: kubelet's
+    // liveness/readiness checks and load-balancer health
+    // checks hammer these paths from a single source IP at a
+    // rate that would trip the per-IP cap, AND the #0.4 spec
+    // requires `/healthz` to return 200 unconditionally —
+    // throttling it would defeat the contract.
+    if is_unthrottled_probe(req.uri().path()) {
+        return next.run(req).await;
+    }
     let peer_addr = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -101,7 +112,8 @@ pub async fn ip_rate_limit_middleware(
         );
     let ip = extract_client_ip(req.headers(), peer_addr, trust_proxy_headers());
     let key = format!("ip:{ip}");
-    let outcome = match limiter.check(&key, DEFAULT_IP_RPM, Utc::now()).await {
+    let now = Utc::now();
+    let outcome = match limiter.check(&key, DEFAULT_IP_RPM, now).await {
         Ok(o) => o,
         Err(e) => {
             // Fail OPEN on rate-limiter outages: a DB hiccup
@@ -117,11 +129,12 @@ pub async fn ip_rate_limit_middleware(
             return next.run(req).await;
         }
     };
+    let now_unix = now.timestamp();
     if !outcome.allowed {
-        return build_rate_limit_response(outcome);
+        return build_rate_limit_response(outcome, now_unix);
     }
     let mut response = next.run(req).await;
-    attach_rate_limit_headers(response.headers_mut(), outcome);
+    attach_rate_limit_headers(response.headers_mut(), outcome, now_unix);
     response
 }
 
@@ -156,7 +169,8 @@ pub async fn session_rate_limit_middleware(
     // Placeholder tier until per-API-key auth lands; see doc
     // comment above.
     let rpm = tier_rpm("free");
-    let outcome = match limiter.check(&key, rpm, Utc::now()).await {
+    let now = Utc::now();
+    let outcome = match limiter.check(&key, rpm, now).await {
         Ok(o) => o,
         Err(e) => {
             // `debug!` for the same reason as the IP middleware
@@ -167,11 +181,12 @@ pub async fn session_rate_limit_middleware(
             return next.run(req).await;
         }
     };
+    let now_unix = now.timestamp();
     if !outcome.allowed {
-        return build_rate_limit_response(outcome);
+        return build_rate_limit_response(outcome, now_unix);
     }
     let mut response = next.run(req).await;
-    attach_rate_limit_headers(response.headers_mut(), outcome);
+    attach_rate_limit_headers(response.headers_mut(), outcome, now_unix);
     response
 }
 
@@ -195,10 +210,13 @@ pub async fn session_rate_limit_middleware(
 /// not currently parsed — when production traffic shows it's
 /// being set we'll add it to the chain.
 ///
-/// Returns an [`IpAddr`] so the caller can format it
-/// canonically (no risk of two different string forms for the
-/// same IP — `::ffff:127.0.0.1` vs `127.0.0.1` collapse to the
-/// same `IpAddr`).
+/// Returns an [`IpAddr`] with IPv4-mapped IPv6 addresses
+/// canonicalised to [`IpAddr::V4`] via [`canonicalise_ip`].
+/// Without that normalisation, a single client whose address
+/// appears once as `127.0.0.1` and once as `::ffff:127.0.0.1`
+/// would land on two different counter keys (Rust's stdlib
+/// keeps v4-mapped v6 as `IpAddr::V6`); the rate limit would
+/// then be effectively double for that client.
 pub fn extract_client_ip(
     headers: &HeaderMap,
     peer: SocketAddr,
@@ -208,17 +226,46 @@ pub fn extract_client_ip(
         if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             if let Some(first) = forwarded.split(',').next() {
                 if let Ok(parsed) = first.trim().parse::<IpAddr>() {
-                    return parsed;
+                    return canonicalise_ip(parsed);
                 }
             }
         }
         if let Some(real) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             if let Ok(parsed) = real.trim().parse::<IpAddr>() {
-                return parsed;
+                return canonicalise_ip(parsed);
             }
         }
     }
-    peer.ip()
+    canonicalise_ip(peer.ip())
+}
+
+/// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to
+/// the equivalent [`IpAddr::V4`]. Without this normalisation
+/// the same physical client gets two different counter keys
+/// depending on whether the upstream layer happened to surface
+/// the address as v4 or v4-mapped v6 — which would
+/// effectively double a client's rate-limit budget.
+fn canonicalise_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        IpAddr::V4(_) => ip,
+    }
+}
+
+/// Paths that bypass the IP rate-limit middleware. Kubelet's
+/// liveness / readiness checks and load-balancer health
+/// probes both hammer the gateway from a single source IP at
+/// a cadence that would trip the per-IP cap (one probe per
+/// second × N replicas / N seconds = well over 60/min through
+/// the same `ip:<lb_ip>` counter). The probe paths also need
+/// to return 200 unconditionally per the #0.4 spec — a
+/// `429` from `/healthz` would tell kubelet the pod is sick
+/// when it isn't.
+fn is_unthrottled_probe(path: &str) -> bool {
+    matches!(path, "/healthz" | "/readyz")
 }
 
 /// Read the `TRUST_PROXY_HEADERS` env var ONCE on first
@@ -240,8 +287,16 @@ fn trust_proxy_headers() -> bool {
 /// Build the canonical 429 response. Single source of truth so
 /// the two middleware variants (and any future caller) can't
 /// disagree on body shape, headers, or status code.
+///
+/// `now_unix` is the absolute Unix-epoch seconds the gateway
+/// reads from its clock to build the `X-RateLimit-Reset`
+/// timestamp. Threaded in (rather than recomputed here) so
+/// it stays aligned with the same `Utc::now()` the limiter
+/// used to compute `retry_after_seconds` — without that, the
+/// header pair could disagree by a clock-tick under heavy
+/// load.
 #[must_use]
-pub fn build_rate_limit_response(outcome: RateLimitOutcome) -> Response {
+pub fn build_rate_limit_response(outcome: RateLimitOutcome, now_unix: i64) -> Response {
     let body = serde_json::json!({
         "error": "rate_limited",
         "message": "Rate limit exceeded. Slow down and try again.",
@@ -249,7 +304,7 @@ pub fn build_rate_limit_response(outcome: RateLimitOutcome) -> Response {
         "retry_after_seconds": outcome.retry_after_seconds,
     });
     let mut response = (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
-    attach_rate_limit_headers(response.headers_mut(), outcome);
+    attach_rate_limit_headers(response.headers_mut(), outcome, now_unix);
     if let Ok(value) = HeaderValue::from_str(&outcome.retry_after_seconds.to_string()) {
         response.headers_mut().insert(header::RETRY_AFTER, value);
     }
@@ -262,10 +317,20 @@ pub fn build_rate_limit_response(outcome: RateLimitOutcome) -> Response {
 /// X-prefixed variants). Used on both the allowed and
 /// rejected paths so clients can pace themselves before they
 /// hit the cap.
-fn attach_rate_limit_headers(headers: &mut HeaderMap, outcome: RateLimitOutcome) {
+///
+/// `X-RateLimit-Reset` is emitted as an absolute Unix-epoch
+/// timestamp (`now_unix + retry_after_seconds`), matching
+/// GitHub / Cloudflare / AWS / Twitter's convention for this
+/// header name. Most rate-limit-aware client libraries
+/// interpret `X-RateLimit-Reset` as absolute and would
+/// schedule the next retry at a wall-clock that's `now +
+/// reset` if we emitted delta-seconds instead.
+fn attach_rate_limit_headers(headers: &mut HeaderMap, outcome: RateLimitOutcome, now_unix: i64) {
     insert_numeric(headers, HEADER_LIMIT, outcome.limit.into());
     insert_numeric(headers, HEADER_REMAINING, outcome.remaining.into());
-    insert_numeric(headers, HEADER_RESET, outcome.retry_after_seconds);
+    let reset_at = now_unix.saturating_add_unsigned(outcome.retry_after_seconds);
+    let reset_at_unsigned = u64::try_from(reset_at).unwrap_or(0);
+    insert_numeric(headers, HEADER_RESET, reset_at_unsigned);
 }
 
 /// Helper: insert a numeric header value, swallowing the
@@ -345,7 +410,8 @@ mod tests {
             remaining: 0,
             retry_after_seconds: 42,
         };
-        let r = build_rate_limit_response(outcome);
+        let now_unix = 1_700_000_000;
+        let r = build_rate_limit_response(outcome, now_unix);
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             r.headers().get("retry-after").map(|v| v.to_str().unwrap()),
@@ -363,11 +429,13 @@ mod tests {
                 .map(|v| v.to_str().unwrap()),
             Some("0")
         );
+        // Absolute Unix-epoch timestamp (`now + retry_after`),
+        // not delta-seconds — matches GitHub / Cloudflare / AWS.
         assert_eq!(
             r.headers()
                 .get("x-ratelimit-reset")
                 .map(|v| v.to_str().unwrap()),
-            Some("42")
+            Some("1700000042")
         );
     }
 
@@ -379,8 +447,9 @@ mod tests {
             remaining: 17,
             retry_after_seconds: 30,
         };
+        let now_unix = 1_700_000_000;
         let mut headers = HeaderMap::new();
-        attach_rate_limit_headers(&mut headers, outcome);
+        attach_rate_limit_headers(&mut headers, outcome, now_unix);
         assert_eq!(
             headers
                 .get("x-ratelimit-limit")
@@ -393,11 +462,47 @@ mod tests {
                 .map(|v| v.to_str().unwrap()),
             Some("17")
         );
+        // Absolute Unix-epoch timestamp form.
         assert_eq!(
             headers
                 .get("x-ratelimit-reset")
                 .map(|v| v.to_str().unwrap()),
-            Some("30")
+            Some("1700000030")
         );
+    }
+
+    #[test]
+    fn canonicalise_ip_folds_v4_mapped_v6_to_v4() {
+        // R3 fix — the same client must hash to the same
+        // counter key whether the upstream layer surfaces v4
+        // or v4-mapped v6 (Rust's stdlib keeps v4-mapped v6 as
+        // `IpAddr::V6`, so without `to_ipv4_mapped()` the same
+        // physical client gets two budget buckets).
+        let mapped: IpAddr = "::ffff:127.0.0.1"
+            .parse::<std::net::Ipv6Addr>()
+            .unwrap()
+            .into();
+        assert_eq!(canonicalise_ip(mapped), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn canonicalise_ip_leaves_native_v6_alone() {
+        let native: IpAddr = "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap().into();
+        assert_eq!(canonicalise_ip(native), native);
+    }
+
+    #[test]
+    fn is_unthrottled_probe_matches_health_endpoints() {
+        // R3 fix — kubelet probes and load-balancer health
+        // checks must bypass the per-IP cap.
+        assert!(is_unthrottled_probe("/healthz"));
+        assert!(is_unthrottled_probe("/readyz"));
+        assert!(!is_unthrottled_probe("/"));
+        assert!(!is_unthrottled_probe("/mcp"));
+        assert!(!is_unthrottled_probe("/v1/api-keys"));
+        // Trailing slash / nested form must NOT match — those
+        // aren't the probe endpoints and need throttling.
+        assert!(!is_unthrottled_probe("/healthz/"));
+        assert!(!is_unthrottled_probe("/healthz/subpath"));
     }
 }
