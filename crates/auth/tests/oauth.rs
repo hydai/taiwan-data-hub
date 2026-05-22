@@ -140,6 +140,21 @@ impl OAuthAccountRepo for InMemoryOAuthAccountRepo {
             existing.refresh_token_nonce = new.refresh_token_nonce;
             existing.expires_at = new.expires_at;
         } else {
+            // Mirror migration 0009's
+            // `UNIQUE (user_id, provider)` — one identity per
+            // user per provider. The production INSERT would
+            // return SQLSTATE 23505 here; the fake returns the
+            // same typed error so a future regression that
+            // tries to bind a second identity surfaces in
+            // `cargo test` instead of production.
+            let user_provider_collision = inner
+                .values()
+                .any(|row| row.user_id == new.user_id && row.provider == new.provider);
+            if user_provider_collision {
+                return Err(StorageError::UniqueViolation(
+                    "oauth_accounts_user_id_provider_key".to_owned(),
+                ));
+            }
             inner.insert(key, new);
         }
         Ok(())
