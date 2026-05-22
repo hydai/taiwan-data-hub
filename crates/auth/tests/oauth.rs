@@ -195,9 +195,21 @@ fn build_service(
 }
 
 async fn install_github_mocks(server: &MockServer, returned_email: &str, github_user_id: u64) {
+    use wiremock::matchers::header;
+
+    // Token POST: match every form field GitHub's OAuth 2.1
+    // token endpoint expects. A regression that drops
+    // `code_verifier` (PKCE!), `redirect_uri`, or the client
+    // credentials would cause the mock not to match and the
+    // test to fail.
     Mock::given(method("POST"))
         .and(path("/login/oauth/access_token"))
         .and(body_string_contains("grant_type=authorization_code"))
+        .and(body_string_contains("code_verifier="))
+        .and(body_string_contains("redirect_uri="))
+        .and(body_string_contains("client_id=test-client-id"))
+        .and(body_string_contains("client_secret=test-client-secret"))
+        .and(body_string_contains("code="))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "access_token": "gho_test-access-token-value",
             "token_type": "bearer",
@@ -205,8 +217,17 @@ async fn install_github_mocks(server: &MockServer, returned_email: &str, github_
         })))
         .mount(server)
         .await;
+    // GET /user + /user/emails MUST carry the bearer +
+    // GitHub-API headers. Header matchers here catch a
+    // regression that forgets to attach them.
     Mock::given(method("GET"))
         .and(path("/user"))
+        .and(header(
+            "Authorization",
+            "Bearer gho_test-access-token-value",
+        ))
+        .and(header("Accept", "application/vnd.github+json"))
+        .and(header("User-Agent", "taiwan-data-hub"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": github_user_id })),
         )
@@ -214,6 +235,12 @@ async fn install_github_mocks(server: &MockServer, returned_email: &str, github_
         .await;
     Mock::given(method("GET"))
         .and(path("/user/emails"))
+        .and(header(
+            "Authorization",
+            "Bearer gho_test-access-token-value",
+        ))
+        .and(header("Accept", "application/vnd.github+json"))
+        .and(header("User-Agent", "taiwan-data-hub"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
                 "email": "secondary@example.com",
