@@ -145,6 +145,24 @@ pub trait AuthTokenRepo: Send + Sync {
         kind: AuthTokenKind,
         now: DateTime<Utc>,
     ) -> Result<u64, StorageError>;
+
+    /// Atomically invalidate all prior unconsumed tokens of `kind`
+    /// for `user_id` AND insert a fresh one. The two steps run in
+    /// a single transaction so a failure to insert rolls back the
+    /// invalidation — the old reset links cannot end up nullified
+    /// with no replacement in flight.
+    ///
+    /// Returns the number of rows that were invalidated; the
+    /// inserted row is the implicit success signal (Err on either
+    /// step rolls both back).
+    async fn replace_user_token(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        new_token_hash: &[u8],
+        new_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
 }
 
 #[async_trait]
@@ -290,6 +308,41 @@ impl AuthTokenRepo for Storage {
         .execute(self.pool())
         .await?;
         Ok(result.rows_affected())
+    }
+
+    async fn replace_user_token(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        new_token_hash: &[u8],
+        new_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let mut tx = self.pool().begin().await?;
+        let invalidated = sqlx::query(
+            "UPDATE auth_tokens
+                SET consumed_at = $3
+              WHERE user_id = $1
+                AND kind = $2
+                AND consumed_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO auth_tokens (user_id, kind, token_hash, expires_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(user_id)
+        .bind(kind.as_str())
+        .bind(new_token_hash)
+        .bind(new_expires_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(invalidated.rows_affected())
     }
 }
 

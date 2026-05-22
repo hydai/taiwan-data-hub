@@ -271,14 +271,23 @@ where
                 AuthError::InvalidConfig(format!("reset_ttl out of chrono range: {e}"))
             })?;
         let link = magic_link(&self.public_base_url, "/auth/reset", &token.cleartext)?;
-        // Invalidate any older pending reset tokens for this user so
-        // an intercepted older email can't succeed once a fresh
-        // request has been made. Verification deliberately doesn't
-        // do this — multiple devices reading the same inbox should
-        // each be able to click their own copy.
+        // Invalidate-then-insert runs atomically through
+        // `replace_user_token`: if the INSERT fails, the
+        // invalidation rolls back too. Without that, a transient
+        // DB error could nullify every older reset link without
+        // creating a replacement, locking the user out until they
+        // retry. Verification deliberately doesn't go through this
+        // path — multiple devices reading the same inbox should
+        // each be able to click their own copy of a resent link.
         let invalidated = self
             .tokens
-            .invalidate_user_tokens(user.id, AuthTokenKind::PasswordReset, now)
+            .replace_user_token(
+                user.id,
+                AuthTokenKind::PasswordReset,
+                &token.digest,
+                expires,
+                now,
+            )
             .await?;
         if invalidated > 0 {
             tracing::debug!(
@@ -287,14 +296,6 @@ where
                 "superseded prior password-reset tokens",
             );
         }
-        self.tokens
-            .insert_auth_token(
-                user.id,
-                AuthTokenKind::PasswordReset,
-                &token.digest,
-                expires,
-            )
-            .await?;
         self.spawn_send_password_reset(user.email.clone(), link, permit);
         Ok(())
     }

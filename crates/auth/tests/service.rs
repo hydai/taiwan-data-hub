@@ -200,6 +200,42 @@ impl AuthTokenRepo for InMemoryAuthTokenRepo {
         }
         Ok(count)
     }
+
+    async fn replace_user_token(
+        &self,
+        user_id: Uuid,
+        kind: AuthTokenKind,
+        new_token_hash: &[u8],
+        new_expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        // Holding the single Mutex across both steps gives the
+        // same "all-or-nothing" effect as the production sqlx
+        // transaction: a concurrent reader can't see a half-state.
+        let mut inner = self.inner.lock().unwrap();
+        if inner.contains_key(new_token_hash) {
+            return Err(StorageError::UniqueViolation(
+                "auth_tokens_token_hash_key".to_owned(),
+            ));
+        }
+        let mut invalidated = 0u64;
+        for row in inner.values_mut() {
+            if row.user_id == user_id && row.kind == kind && row.consumed_at.is_none() {
+                row.consumed_at = Some(now);
+                invalidated += 1;
+            }
+        }
+        inner.insert(
+            new_token_hash.to_vec(),
+            TokenRow {
+                user_id,
+                kind,
+                expires_at: new_expires_at,
+                consumed_at: None,
+            },
+        );
+        Ok(invalidated)
+    }
 }
 
 // --- helpers ---------------------------------------------------------
@@ -294,6 +330,18 @@ impl AuthTokenRepo for FailingTokenRepo {
         _now: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
         Ok(0)
+    }
+    async fn replace_user_token(
+        &self,
+        _user_id: Uuid,
+        _kind: AuthTokenKind,
+        _new_token_hash: &[u8],
+        _new_expires_at: DateTime<Utc>,
+        _now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::InvalidArgument(
+            "fake replace_user_token failure".to_owned(),
+        ))
     }
 }
 
