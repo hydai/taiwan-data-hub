@@ -68,9 +68,11 @@ impl FormatKind {
 }
 
 /// Result of a format validation. `kind` echoes the requested
-/// kind (or what `auto` resolved to). `valid` is the answer.
-/// `detail` carries an optional structured payload (e.g. the
-/// resolved IATA airport name, the LUHN-derived issuer hint).
+/// kind; `valid` is the answer. `detail` carries an optional
+/// structured payload (e.g. the resolved IATA airport name, the
+/// LUHN-derived issuer hint). Unlike `tw_validate_id`, this tool
+/// has no `auto` dispatch — the caller always picks the
+/// validator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FormatResult {
     pub valid: bool,
@@ -185,14 +187,16 @@ static PHONE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     //
     // Branches (each starts with `0` or `+886`):
     //  - mobile: 09XX-XXXXXX (10 digits including leading 0)
-    //  - 1-digit area (台北 02, 雙北 03 / 04 / 05 / 06 / 07 / 08):
-    //    `[2-8]\d{7,8}` → 9 or 10 digits total
-    //  - 3-digit area (037 苗栗 / 049 南投 / 082 金門 / 0836 馬祖 /
-    //    089 台東 / 0826 烏坵 ...): match `0` + 2 more digits +
-    //    subscriber (6 or 7 digits typical). We accept any 2-digit
-    //    prefix in `37 49 82 83 89 92 26` (the published TWNIC list)
-    //    plus 6-7 digit subscriber. Kept narrow rather than `\d{2}`
-    //    to avoid accepting nonsense like `0007654321`.
+    //  - 2-digit area code (台北 02; 雙北/桃園/新竹 03; 中部 04;
+    //    雲嘉 05; 台南 06; 高屏 07; 屏東/台東 08): the regex
+    //    matches `[2-8]` + `\d{7,8}` → 9 or 10 digits including
+    //    the leading 0.
+    //  - Special long-prefix areas (037 苗栗 / 049 南投 / 082 金門
+    //    / 083 馬祖 / 089 台東 / 026 烏坵 / 092): match the
+    //    leading 0 + two more digits + a 6-7-digit subscriber.
+    //    The 2-digit set `37|49|82|83|89|26|92` is the published
+    //    TWNIC prefix list rather than `\d{2}` so nonsense like
+    //    `0007654321` doesn't pass.
     Regex::new(r"^(?:\+886|0)(?:9\d{8}|[2-8]\d{7,8}|(?:37|49|82|83|89|26|92)\d{5,7})$")
         .expect("phone regex")
 });
@@ -446,33 +450,28 @@ mod tests {
         panic!("expected at least one valid invoice number in 12345670..12345679");
     }
 
-    /// R2 fix: lock the 7th-digit-is-7 alternate-checksum branch
-    /// per the 財政部 公報. The algorithm allows two acceptable
-    /// sums for these numbers (the "+1" path) — locate one
-    /// fixture by scanning candidates.
+    /// R2 fix (R3 refined): lock the 7th-digit-is-7 alternate-
+    /// checksum branch per the 財政部 公報. Hard-coded fixture
+    /// "00000079" (verified by hand):
+    ///   - digits = [0,0,0,0,0,0,7,9]
+    ///   - weights = [1,2,1,2,1,2,4,1]
+    ///   - products = [0,0,0,0,0,0,28,9]
+    ///   - digit-sums = [0,0,0,0,0,0,10,9] → sum = 19
+    ///   - 19 mod 10 = 9 → *standard path fails*
+    ///   - (19 + 1) mod 10 = 0 → *alternate path passes*, and
+    ///     digit[6] = 7 so the alternate branch is reachable.
+    ///
+    /// No brute-force search at test time — the fixture is
+    /// deterministic.
     #[test]
     fn invoice_seventh_digit_seven_alternate_path() {
-        // Find a number where the standard sum fails (mod10 != 0)
-        // but the alternate sum (with `add: 1`) passes, AND the
-        // 7th digit (index 6) is 7. This exercises the branch.
-        let mut found = None;
-        for n in 1_000_000..9_999_999_u32 {
-            let s = format!("{n:08}");
-            if s.chars().nth(6) != Some('7') {
-                continue;
-            }
-            let digits: Vec<u32> = s.chars().map(|c| c.to_digit(10).unwrap()).collect();
-            // Standard path fails; alternate path passes:
-            if !invoice_check(&digits, 0) && invoice_check(&digits, 1) {
-                found = Some(s);
-                break;
-            }
-        }
-        let s = found.expect("expected at least one alternate-path fixture in the search space");
-        check(FormatKind::Invoice, &s, true);
-        // Sanity: standard path alone would reject it.
+        let s = "00000079";
+        check(FormatKind::Invoice, s, true);
+        // Sanity: standard path alone rejects it.
         let digits: Vec<u32> = s.chars().map(|c| c.to_digit(10).unwrap()).collect();
-        assert!(!invoice_check(&digits, 0));
+        assert!(!invoice_check(&digits, 0), "standard check should fail");
+        assert!(invoice_check(&digits, 1), "alternate check should pass");
+        assert_eq!(digits[6], 7, "7th digit must be 7 to reach the branch");
     }
 
     #[test]
