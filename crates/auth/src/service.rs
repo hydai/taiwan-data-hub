@@ -37,6 +37,7 @@
 //!   only happens for known users — a job queue in v0.2 will
 //!   absorb that too.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -151,9 +152,14 @@ where
     /// cap, further sends are dropped and a `tracing::warn!`
     /// records the drop — the spawned task takes an owned permit
     /// that releases on drop, so capacity recovers naturally.
+    ///
+    /// Takes `NonZeroUsize` rather than `usize` so a config-plumbing
+    /// mistake that delivers `0` is impossible: a zero-permit
+    /// semaphore would silently drop every send and pretend SMTP is
+    /// broken.
     #[must_use]
-    pub fn with_max_inflight_sends(mut self, n: usize) -> Self {
-        self.send_permits = Arc::new(Semaphore::new(n));
+    pub fn with_max_inflight_sends(mut self, n: NonZeroUsize) -> Self {
+        self.send_permits = Arc::new(Semaphore::new(n.get()));
         self
     }
 
