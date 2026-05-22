@@ -155,12 +155,22 @@ struct ExchangedToken {
 }
 
 /// Claims we read out of the validated `id_token`.
+///
+/// `aud` is `String` (not `Vec<String>` or `serde_json::Value`)
+/// so that serde rejects a JWT whose `aud` claim is an array.
+/// Google's OAuth flow only ever issues single-audience
+/// `id_tokens` for client logins, and accepting an array would
+/// let a token minted for a different client — that happens to
+/// ALSO list our `client_id` — pass our audience check. Strict
+/// OIDC: `aud` is a single string equal to our `client_id`
+/// (which [`Validation::set_audience`] also confirms below).
 #[derive(Debug, Deserialize)]
 struct IdTokenClaims {
     sub: String,
     email: String,
     #[serde(default)]
     email_verified: bool,
+    aud: String,
 }
 
 #[async_trait]
@@ -332,6 +342,20 @@ impl GoogleProvider {
 
         let data = jsonwebtoken::decode::<IdTokenClaims>(id_token, &key, &validation)
             .map_err(|e| AuthError::OAuthExchange(format!("id_token verify failed: {e}")))?;
+        // Defence-in-depth on `aud`: `Validation::set_audience`
+        // already passes if the JWT's `aud` claim CONTAINS our
+        // client_id (it treats string + array uniformly). The
+        // `aud: String` deserialisation above rejects arrays at
+        // the type level, and this final equality check makes
+        // the strict "aud == client_id" requirement obvious at
+        // the read site even if a future jsonwebtoken upgrade
+        // changes the contains-semantics.
+        if data.claims.aud != self.client_id {
+            return Err(AuthError::OAuthExchange(format!(
+                "id_token aud={:?} does not match client_id (strict OIDC)",
+                data.claims.aud
+            )));
+        }
         Ok(data.claims)
     }
 }
@@ -460,9 +484,19 @@ impl JwksCache {
     }
 
     async fn decoding_key_for(&self, kid: &str) -> Result<DecodingKey, AuthError> {
-        // The double-check pattern: take the lock, look at the
-        // age, and refresh INSIDE the lock so concurrent callers
-        // don't all stampede the JWKS endpoint.
+        // Holding `tokio::sync::Mutex` across the `fetch_jwks()`
+        // `.await` is intentional. The std `await_holding_lock`
+        // clippy lint targets `std::sync::Mutex` (which would
+        // block the runtime); `tokio::sync::Mutex` is purpose-
+        // built to be held across awaits so the lint stays quiet.
+        //
+        // The serialization cost — concurrent logins all wait
+        // on the in-flight refresh — is the point: it converts
+        // a thundering-herd against Google's JWKS endpoint into
+        // a single round-trip whose result every waiter then
+        // hits in cache. The fetch is ~50 ms and runs once per
+        // hour (or once per kid rotation); we accept that brief
+        // blocking over rate-limited keys + retry storms.
         let mut guard = self.inner.lock().await;
         let stale = !guard.frozen
             && guard

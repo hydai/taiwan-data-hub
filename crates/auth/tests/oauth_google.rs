@@ -777,3 +777,51 @@ async fn finish_login_surfaces_oauth_error_json_from_4xx() {
         "expected `invalid_grant (Bad Request)` to surface, got: {err:?}"
     );
 }
+
+#[tokio::test]
+async fn finish_login_rejects_id_token_with_array_audience() {
+    // Regression for Copilot R4 (strict OIDC `aud`): an attacker
+    // who can mint a token for some other client where Google
+    // lists multiple audiences (including ours) should NOT pass
+    // our audience check. The auth crate rejects array-shaped
+    // `aud` claims outright — Google never issues those for
+    // client OAuth flows.
+    #[derive(Serialize)]
+    struct ArrayAudClaims<'a> {
+        iss: &'a str,
+        aud: Vec<&'a str>,
+        sub: &'a str,
+        email: &'a str,
+        email_verified: bool,
+        iat: i64,
+        exp: i64,
+    }
+    let now = Utc::now().timestamp();
+    let claims = ArrayAudClaims {
+        iss: "https://accounts.google.com",
+        // `test-client-id` IS in the array, so a loose
+        // intersection-style audience check would pass. The
+        // strict single-string requirement rejects it.
+        aud: vec!["test-client-id", "another-client"],
+        sub: "google-sub-array",
+        email: "array@example.com",
+        email_verified: true,
+        iat: now,
+        exp: now + 3600,
+    };
+    let key = EncodingKey::from_rsa_der(&test_signing_der());
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some("test-key".to_owned());
+    let id_token = jsonwebtoken::encode(&header, &claims, &key).expect("sign");
+
+    let server = MockServer::start().await;
+    install_google_token_mock(&server, &id_token).await;
+    let (svc, _, _, _) = build_service(&server.uri());
+    let started = svc.start_login("https://hub.example/cb").await.unwrap();
+    let state = token_from_url(&started.redirect_to, "state").unwrap();
+    let err = svc
+        .finish_login("test-code", &state, "https://hub.example/cb")
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, AuthError::OAuthExchange(_)), "got: {err:?}");
+}
