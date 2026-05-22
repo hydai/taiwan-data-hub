@@ -56,7 +56,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 url = "2"
 wiremock = "0.6"
 # sqlx 0.8.6 per DESIGN.md §5; rustls TLS to match the rest of the stack.
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "uuid", "macros", "migrate", "ipnetwork"] }
 uuid = { version = "1", default-features = false, features = ["std", "v7", "serde"] }
 testcontainers-modules = { version = "0.13", default-features = false, features = ["postgres"] }
 tokio-cron-scheduler = "0.15.1"
@@ -87,6 +87,10 @@ sha2 = "0.10"
 # encoding both LocalFs tokens and SigV4 signatures expect.
 hmac = "0.12"
 hex = "0.4"
+# Constant-time slice comparison for the session HMAC tag check
+# (#4.5). Avoids the timing-side-channel a `==` byte-walk would
+# expose to an attacker who can measure latency precisely.
+subtle = "2"
 tempfile = "3.13"
 # Derive-based CLI used by the gateway's `serve` / `doctor` subcommands
 # (#4.1) and any future binaries that need argument parsing. Default

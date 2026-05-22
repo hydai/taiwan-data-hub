@@ -15,6 +15,7 @@
 mod auth_repo;
 mod dataset_repo;
 mod oauth_repo;
+mod session_repo;
 mod sqlx_errors;
 
 pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
@@ -25,3 +26,4 @@ pub use dataset_repo::{
     SearchParams, SourceHttpState, Storage, StorageError, UsageRecorder, VersionWithFiles,
 };
 pub use oauth_repo::{NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo};
+pub use session_repo::{AuthenticatedSession, NewSession, SessionRepo};
