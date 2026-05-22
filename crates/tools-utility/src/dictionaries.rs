@@ -8,7 +8,11 @@
 //!  2. MRT 站點 (台北 / 桃園 / 台中 / 高雄 systems)
 //!  3. 銀行代碼 (中央銀行 published list)
 //!  4. 郵遞區號 (3-digit, district granularity)
-//!  5. 縣市代碼 (re-use of the 22-entry list from #3.10)
+//!  5. 縣市代碼 (mirrors the 22-code list from
+//!     [`crate::canonical::CountyCode`], with the same stable
+//!     identifier strings — kept as a Dictionary so it ships
+//!     the same `get_by_id` + `search` MCP surface as the other
+//!     four categories)
 //!
 //! Each category bakes a representative subset rather than the
 //! full government registry — the tables are pure-Rust statics
@@ -659,8 +663,13 @@ pub const POSTAL_CODES: Dictionary = Dictionary {
 };
 
 // ============================================================
-//  5. 縣市代碼 — re-use the 22-entry list from canonical.rs but
-//                surface here as a Dictionary for tool symmetry.
+//  5. 縣市代碼 — mirrors the 22 codes from
+//                `canonical::CountyCode::as_code()`. Kept as a
+//                separate constant (not built from the enum)
+//                because Dictionary expects a static slice; the
+//                two lists are kept in sync by convention. A
+//                proc-macro to derive this from the enum is a
+//                v0.2 refactor.
 // ============================================================
 
 pub const COUNTY_CODES: Dictionary = Dictionary {
