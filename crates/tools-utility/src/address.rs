@@ -152,8 +152,10 @@ pub fn normalize_address(input: &str) -> AddressParts {
 /// Counties / 直轄市 in their canonical (post-改制) form. The
 /// longest entry first so prefix-matching is deterministic when a
 /// shorter prefix could otherwise win (e.g. 新北市 vs hypothetical
-/// 新北).
-pub const COUNTIES: &[&str] = &[
+/// 新北). Crate-private — the canonicalizer (`crate::canonical`)
+/// reads it through the explicit accessor below; nothing else in
+/// the public API references it.
+pub(crate) const COUNTIES: &[&str] = &[
     "台北市",
     "新北市",
     "桃園市",
@@ -180,7 +182,8 @@ pub const COUNTIES: &[&str] = &[
 
 /// Pre-改制 county names that map to the post-改制 canonical form.
 /// Keyed on the input form, valued on the canonical form.
-pub const COUNTY_ALIASES: &[(&str, &str)] = &[
+/// Crate-private — see [`COUNTIES`].
+pub(crate) const COUNTY_ALIASES: &[(&str, &str)] = &[
     ("台中縣", "台中市"),
     ("台南縣", "台南市"),
     ("高雄縣", "高雄市"),
@@ -199,11 +202,11 @@ pub const COUNTY_ALIASES: &[(&str, &str)] = &[
     ("臺北縣", "新北市"),
 ];
 
-/// Public alias for [`strip_county_prefix`] used by sibling
-/// modules (e.g. `canonical`). Renamed `*_exact` to flag that
-/// the function is sensitive to the exact prefix bytes (no
-/// district peeling).
-pub fn strip_county_prefix_exact(s: &str) -> Option<(&str, &'static str, &str)> {
+/// Crate-private alias for [`strip_county_prefix`] used by
+/// sibling modules (e.g. `canonical`). Renamed `*_exact` to flag
+/// that the function is sensitive to the exact prefix bytes (no
+/// district peeling). Not part of the public API.
+pub(crate) fn strip_county_prefix_exact(s: &str) -> Option<(&str, &'static str, &str)> {
     strip_county_prefix(s)
 }
 
