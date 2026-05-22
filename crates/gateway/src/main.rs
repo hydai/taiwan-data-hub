@@ -352,7 +352,18 @@ fn wire_db_tools_if_available(
 /// account page just can't load. This matches the broader
 /// "fail-soft on optional DB dependencies" posture of the binary.
 fn build_auth_router_if_available(storage: Option<Storage>) -> Option<Router> {
-    let storage = storage?;
+    let Some(storage) = storage else {
+        // `connect_storage_if_available` already logged the
+        // underlying reason (URL unset or pool open failed) at
+        // its own boundary. Repeat it here at `info!` so the
+        // boot log has a single line that names the
+        // api-keys subrouter explicitly — operators searching
+        // for "api-keys" in the logs see one canonical
+        // disabled-reason instead of having to cross-reference
+        // two separate messages.
+        tracing::info!("api-keys subrouter disabled: no Storage handle");
+        return None;
+    };
     let hmac_key = match auth_hmac_key_from_env() {
         Ok(Some(k)) => k,
         Ok(None) => {

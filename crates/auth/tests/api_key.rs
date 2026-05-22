@@ -64,19 +64,21 @@ impl ApiKeyRepo for InMemoryApiKeyRepo {
             if *remaining > 0 {
                 *remaining -= 1;
                 return Err(StorageError::UniqueViolation(
-                    "mcp_api_keys_key_hash".into(),
+                    "mcp_api_keys_key_hash_idx".into(),
                 ));
             }
         }
-        // Real DB enforces UNIQUE on `key_hash` via the partial
-        // index; mirror that here so a duplicated hash from a
-        // (very unlikely) collision DOES surface as
-        // UniqueViolation even outside the forced path.
+        // Real DB enforces UNIQUE on `key_hash` via the unique
+        // index `mcp_api_keys_key_hash_idx` (R1 made it UNIQUE
+        // across ALL rows, not partial). Mirror that here so a
+        // duplicated hash from a (very unlikely) collision DOES
+        // surface as `UniqueViolation` even outside the forced
+        // path.
         {
             let inner = self.inner.lock().unwrap();
             if inner.values().any(|r| r.key_hash == new.key_hash) {
                 return Err(StorageError::UniqueViolation(
-                    "mcp_api_keys_key_hash".into(),
+                    "mcp_api_keys_key_hash_idx".into(),
                 ));
             }
         }
@@ -104,7 +106,8 @@ impl ApiKeyRepo for InMemoryApiKeyRepo {
     ) -> Result<Option<ApiKeyRow>, StorageError> {
         let mut inner = self.inner.lock().unwrap();
         // Find the row by hash with linear scan — fine for tests;
-        // production uses the partial index on `key_hash`.
+        // production uses the unique index on `key_hash`
+        // (`mcp_api_keys_key_hash_idx`).
         let Some(row) = inner.values_mut().find(|r| r.key_hash == key_hash) else {
             return Ok(None);
         };

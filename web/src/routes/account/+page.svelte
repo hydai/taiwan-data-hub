@@ -71,6 +71,24 @@
 			<p class="text-muted-foreground mt-2">{data.message}</p>
 		</div>
 	{:else if data.state === 'ok'}
+		{#if form?.revoke?.error}
+			<aside
+				role="alert"
+				class="border-destructive bg-destructive/5 mb-6 rounded-md border p-4 text-sm"
+			>
+				<p class="font-medium">Revoke failed</p>
+				<p class="text-muted-foreground mt-1">{form.revoke.error}</p>
+			</aside>
+		{/if}
+		{#if form?.rotate?.error}
+			<aside
+				role="alert"
+				class="border-destructive bg-destructive/5 mb-6 rounded-md border p-4 text-sm"
+			>
+				<p class="font-medium">Rotate failed</p>
+				<p class="text-muted-foreground mt-1">{form.rotate.error}</p>
+			</aside>
+		{/if}
 		{#if issued}
 			<aside role="alert" class="border-primary/30 bg-primary/5 mb-6 rounded-md border p-4 text-sm">
 				<p class="font-medium">

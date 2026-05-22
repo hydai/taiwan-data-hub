@@ -1,9 +1,16 @@
 /**
  * Shape mirroring `gateway::api_keys_routes::ApiKeySummary`. The
  * gateway never emits the cleartext key or the SHA-256 hash; this
- * type intentionally has no field for either so a future drift on
- * the Rust side (an accidental `Serialize` derive) shows up as a
- * compile-time mismatch the moment a tsc run touches this file.
+ * type omits both fields by intent. TypeScript's structural
+ * typing means extra fields on a received JSON payload would
+ * NOT trip the compiler, so this interface is not the guardrail
+ * — the actual defences are two-layered: (1) the gateway-side
+ * `api_key_summary_omits_cleartext_fields` unit test asserts the
+ * Rust serialiser never adds the bad fields in the first place,
+ * and (2) the runtime `parseApiKeySummary` validator in
+ * `gateway.ts` narrows `unknown` to a typed shape so a drift
+ * would surface as a parse failure rather than a silent
+ * extra-field pass-through.
  */
 export interface ApiKeySummary {
 	id: string;
