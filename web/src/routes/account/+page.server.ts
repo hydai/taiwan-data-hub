@@ -265,10 +265,10 @@ export const actions: Actions = {
 		if (issued === null) {
 			throw error(502, 'gateway returned an unexpected response shape on rotate');
 		}
-		// Mark the surface area with an explicit `is_rotated` flag
-		// so the page template can adjust copy (`rotated from
-		// tdh_abcd…` vs `created`); the cleartext display is the
-		// same as create otherwise.
+		// Mark the surface area with an explicit `was_rotation`
+		// flag so the page template can adjust copy ("rotated
+		// from tdh_abcd…" vs "created"); the cleartext display
+		// is the same as create otherwise.
 		return { created: issued satisfies IssuedApiKey, was_rotation: true };
 	}
 };

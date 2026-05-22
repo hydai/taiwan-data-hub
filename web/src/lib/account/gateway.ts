@@ -147,10 +147,25 @@ export function parseGatewayErrorBody(value: unknown): GatewayErrorBody | null {
  * Map an HTTP status to the [`GatewayErrorKind`] the page will
  * branch on. Centralised so a future status code (e.g. 403 when
  * scopes land in #4.7+) only needs to be added in one place.
+ *
+ * 404 is folded into `unavailable` for the COLLECTION-LOAD path
+ * because the gateway only mounts `/v1/api-keys` when both
+ * `DATABASE_URL` AND `SESSION_HMAC_KEY` are configured (see
+ * `build_auth_router_if_available` in the gateway crate). When
+ * one is missing, the subrouter isn't on the router at all and
+ * axum's default 404 fires — that's a "feature unavailable"
+ * state, not an "unexpected" one. Per-key actions
+ * (`DELETE /:id` / `POST /:id/rotate`) have their own explicit
+ * 404 branches in `+page.server.ts` because for those endpoints
+ * a 404 legitimately means "key not found / not yours" (which
+ * the user can act on) rather than "feature disabled".
  */
 export function classifyGatewayStatus(status: number): GatewayErrorKind {
 	if (status === 401) {
 		return 'unauthenticated';
+	}
+	if (status === 404) {
+		return 'unavailable';
 	}
 	if (status >= 500 && status < 600) {
 		return 'unavailable';
