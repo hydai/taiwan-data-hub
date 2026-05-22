@@ -153,7 +153,21 @@ where
     /// timing is uniform.
     pub async fn login(&self, email: &str, password: &str) -> Result<User, AuthError> {
         if let Some(user) = self.users.find_user_by_email(email).await? {
-            if verify_password(password, &user.password_hash)? {
+            // A corrupt stored hash must NOT surface as a distinct
+            // error to the caller — that would make "user exists
+            // with malformed hash" distinguishable from "wrong
+            // password" via HTTP status + timing, defeating the
+            // enumeration-safety guarantee. Log loudly, return
+            // InvalidCredentials.
+            let matched = verify_password(password, &user.password_hash).unwrap_or_else(|err| {
+                tracing::error!(
+                    user_id = %user.id,
+                    error = %err,
+                    "stored password_hash is unparseable; treating login as a mismatch",
+                );
+                false
+            });
+            if matched {
                 Ok(user)
             } else {
                 Err(AuthError::InvalidCredentials)

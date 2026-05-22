@@ -273,7 +273,6 @@ dependencies = [
  "lettre",
  "rand 0.9.4",
  "sha2",
- "sqlx",
  "storage",
  "thiserror",
  "tokio",

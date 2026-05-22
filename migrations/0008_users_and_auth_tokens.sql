@@ -30,10 +30,18 @@ CREATE TABLE users (
 -- yield working magic links; the cleartext token only ever lives
 -- in the recipient's mailbox.
 --
--- `kind` is a free-form text discriminator instead of an enum so
--- adding new flows (e.g. OAuth-link-account) is a no-migration
--- change. Indexed alongside `user_id` for the "do they already
--- have a pending verification?" lookup.
+-- `kind` is a plain TEXT column (not a Postgres ENUM) so the value
+-- set can be widened without an `ALTER TYPE ... ADD VALUE` round
+-- trip — but it carries a CHECK constraint listing the known kinds
+-- so a typo in INSERT is rejected at write time. Introducing a new
+-- flow therefore needs a one-line migration extending this CHECK;
+-- existing rows aren't rewritten.
+--
+-- The partial index alongside is the "do they already have a
+-- pending verification?" lookup. It is intentionally NOT UNIQUE:
+-- a user clicking "resend" should mint a new token without
+-- consuming the old, so two pending rows can legitimately co-exist
+-- briefly. Both are valid until `consume_auth_token` redeems one.
 CREATE TABLE auth_tokens (
     id          UUID         PRIMARY KEY DEFAULT uuidv7(),
     user_id     UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,

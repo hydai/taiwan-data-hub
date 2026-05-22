@@ -229,6 +229,31 @@ async fn login_rejects_wrong_password_with_invalid_credentials() {
 }
 
 #[tokio::test]
+async fn login_returns_invalid_credentials_when_stored_hash_is_corrupt() {
+    // Regression for Copilot R1 round 1 — a malformed `password_hash`
+    // (e.g. hand-edited row, lost migration) must NOT surface as
+    // AuthError::PasswordHash to the login caller, since that would
+    // make the row's presence distinguishable from a normal mismatch.
+    let users = InMemoryUserRepo::default();
+    let tokens = InMemoryAuthTokenRepo::default();
+    let mailer = MemoryMailer::new();
+    let base = Url::parse("https://hub.example").unwrap();
+
+    // Seed a row whose password_hash is NOT a valid PHC string.
+    users
+        .insert_user("corrupt@example.com", "not-a-phc-string")
+        .await
+        .unwrap();
+    let svc = AuthService::new(users, tokens, mailer, base);
+
+    let err = svc
+        .login("corrupt@example.com", "anything")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AuthError::InvalidCredentials));
+}
+
+#[tokio::test]
 async fn login_with_unknown_email_returns_invalid_credentials_not_email_taken() {
     let (svc, _) = build_service();
     let err = svc

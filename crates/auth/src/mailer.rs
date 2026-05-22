@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use lettre::message::Mailbox;
 use lettre::message::header::ContentType;
 use lettre::transport::smtp::AsyncSmtpTransport;
-use lettre::transport::smtp::client::Tls;
 use lettre::{AsyncTransport, Message, Tokio1Executor};
 use tracing::warn;
 use url::Url;
@@ -78,16 +77,15 @@ impl SmtpMailer {
     /// advertises it; `smtps://` is implicit-TLS. Both shapes are
     /// what Resend / Postmark / Mailgun publish.
     pub fn new(connection_url: &str, from: MailFrom) -> Result<Self, AuthError> {
+        // `from_url` configures TLS from the scheme + host already:
+        //   * `smtp://host:587`  → opportunistic STARTTLS keyed off `host`
+        //   * `smtps://host:465` → implicit TLS keyed off `host`
+        //
+        // We deliberately don't override `.tls(...)` here — a previous
+        // attempt did, with a hardcoded `localhost` SNI, which made
+        // certificate verification fail against every real provider.
         let transport = AsyncSmtpTransport::<Tokio1Executor>::from_url(connection_url)
             .map_err(|e| AuthError::Mailer(format!("invalid SMTP URL: {e}")))?
-            // Required STARTTLS — operators who actually want plaintext
-            // can use `smtp://...` with the loopback host; production
-            // SMTP without TLS would leak the password used to send the
-            // reset email, defeating the whole flow.
-            .tls(Tls::Required(
-                lettre::transport::smtp::client::TlsParameters::new("localhost".into())
-                    .map_err(|e| AuthError::Mailer(e.to_string()))?,
-            ))
             .build();
         Ok(Self { transport, from })
     }
