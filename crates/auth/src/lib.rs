@@ -15,6 +15,7 @@
 //! gateway's HTTP handlers in #4.5 take this service via `Arc<…>`
 //! and translate its return values into cookies + JSON responses.
 
+mod api_key;
 mod error;
 mod mailer;
 mod oauth;
@@ -24,6 +25,10 @@ mod service;
 mod session;
 mod token;
 
+pub use api_key::{
+    ALLOWED_TIERS, API_KEY_HUMAN_PREFIX, ApiKeyService, DEFAULT_RATE_LIMIT_TIER, IssuedApiKey,
+    VerifiedApiKey,
+};
 pub use error::AuthError;
 pub use mailer::{LogMailer, MailFrom, MailKind, Mailer, MemoryMailer, SentMessage, SmtpMailer};
 pub use oauth::{

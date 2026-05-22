@@ -78,4 +78,12 @@ pub enum AuthError {
     /// access token cleartext yet on the failure branch).
     #[error("oauth exchange failed: {0}")]
     OAuthExchange(String),
+    /// Caller-supplied input failed validation BEFORE any DB or
+    /// network round trip (e.g. an API-key name that's empty, a
+    /// `rate_limit_tier` outside the allowed set). Distinct from
+    /// `InvalidConfig` (service-side config) and from `Storage`
+    /// (DB-side errors) so HTTP handlers can map it cleanly to
+    /// `400 Bad Request` instead of `500`.
+    #[error("validation failed: {0}")]
+    Validation(String),
 }
