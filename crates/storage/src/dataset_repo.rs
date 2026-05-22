@@ -2380,4 +2380,278 @@ mod tests {
             "SQL CHECK must reject anonymous + non-null principal_id"
         );
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  #3.6 hot-cache pipeline — testcontainers coverage
+    // ════════════════════════════════════════════════════════════
+    //
+    // The cache_pipeline storage methods (hot_candidates,
+    // cold_candidates, demote_dataset, cache_hit_ratio) ship four
+    // non-trivial SQL queries with eligibility predicates,
+    // COALESCE(tier_override, tier) joins, partial-index-friendly
+    // shapes, and an UPDATE race-guard. The unit tests in the
+    // worker crate use mocks; these `#[ignore]` testcontainers
+    // tests catch SQL drift before it lands in production.
+
+    /// Force a dataset into `cached = true` (the upsert path
+    /// preserves `cached` / `cache_path` so we can't drive it
+    /// through the catalog API). Used by the cache-pipeline tests
+    /// below.
+    async fn force_cache_state(
+        storage: &Storage,
+        dataset_id: Uuid,
+        cached: bool,
+        tier: Option<&str>,
+        tier_override: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE datasets SET cached = $2, \
+                cache_path = CASE WHEN $2 THEN 'file:///tmp/' || id::text || '.parquet' ELSE NULL END, \
+                tier = COALESCE($3, tier), \
+                tier_override = $4 \
+             WHERE id = $1",
+        )
+        .bind(dataset_id)
+        .bind(cached)
+        .bind(tier)
+        .bind(tier_override)
+        .execute(storage.pool())
+        .await
+        .expect("force cache state");
+    }
+
+    async fn insert_query_rows_usage(storage: &Storage, dataset_id: Uuid, count: usize) {
+        for _ in 0..count {
+            storage
+                .record_usage(&NewUsageRecord {
+                    dataset_id,
+                    dataset_version_id: None,
+                    tool: "query_rows",
+                    format: None,
+                    principal_kind: "anonymous",
+                    principal_id: None,
+                    byte_size: None,
+                })
+                .await
+                .expect("record query_rows usage");
+        }
+    }
+
+    /// Locks: `hot_candidates` returns platinum/gold via the tier
+    /// rule even when zero hits, AND silver+ via the hit-threshold
+    /// rule. Already-cached datasets are excluded. Order is
+    /// platinum → gold → (hot silver) by tier-rank-asc.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn hot_candidates_selects_platinum_gold_or_above_threshold() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        let mut ids = Vec::new();
+        for slug in ["plat-1", "gold-1", "silver-popular", "silver-quiet"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        // Force tiers (upsert preserves them on first insert as
+        // 'bronze', so we have to set them explicitly).
+        force_cache_state(&storage, ids[0], false, Some("platinum"), None).await;
+        force_cache_state(&storage, ids[1], false, Some("gold"), None).await;
+        force_cache_state(&storage, ids[2], false, Some("silver"), None).await;
+        force_cache_state(&storage, ids[3], false, Some("silver"), None).await;
+        // silver-popular crosses the threshold; silver-quiet stays below.
+        insert_query_rows_usage(&storage, ids[2], 60).await;
+        insert_query_rows_usage(&storage, ids[3], 5).await;
+
+        let hot = storage.hot_candidates(7, 50).await.expect("hot_candidates");
+        let slugs: Vec<&str> = hot.iter().map(|c| c.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"plat-1")
+                && slugs.contains(&"gold-1")
+                && slugs.contains(&"silver-popular"),
+            "expected plat-1 + gold-1 + silver-popular in hot list, got {slugs:?}",
+        );
+        assert!(
+            !slugs.contains(&"silver-quiet"),
+            "silver-quiet under threshold should be excluded",
+        );
+        // Order: platinum first, then gold, then silver-popular.
+        assert_eq!(slugs[0], "plat-1", "tier rank: platinum=1 first");
+        assert_eq!(slugs[1], "gold-1", "tier rank: gold=2 second");
+    }
+
+    /// `hot_candidates` respects `tier_override`: a base 'bronze'
+    /// dataset with `tier_override = 'platinum'` must show up
+    /// even with zero hits.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn hot_candidates_respects_tier_override() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let m = DatasetMetadata {
+            source_id: "pinned".into(),
+            slug: "pinned".into(),
+            title_i18n: BTreeMap::from([("zh-TW".into(), "pinned".to_owned())]),
+            description_i18n: BTreeMap::new(),
+            license: "CC0".into(),
+            publisher: None,
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: None,
+            upstream_categories: vec![],
+        };
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+            .await
+            .expect("upsert");
+        force_cache_state(&storage, id, false, Some("bronze"), Some("platinum")).await;
+
+        let hot = storage.hot_candidates(7, 50).await.expect("hot_candidates");
+        assert!(hot.iter().any(|c| c.slug == "pinned"));
+        // CacheCandidate.tier returns the *effective* tier.
+        let entry = hot.iter().find(|c| c.slug == "pinned").unwrap();
+        assert_eq!(
+            entry.tier, "platinum",
+            "effective tier should be the override"
+        );
+    }
+
+    /// `cold_candidates`: returns silver/bronze that are cached but
+    /// have zero `query_rows` hits in the window. Excludes platinum/
+    /// gold via the effective-tier rule.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn cold_candidates_selects_silent_unpinned_cached_datasets() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let mut ids = Vec::new();
+        for slug in ["bronze-stale", "silver-active", "gold-pinned"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        force_cache_state(&storage, ids[0], true, Some("bronze"), None).await;
+        force_cache_state(&storage, ids[1], true, Some("silver"), None).await;
+        force_cache_state(&storage, ids[2], true, Some("gold"), None).await;
+        // silver-active has a recent hit; bronze-stale and gold-pinned have none.
+        insert_query_rows_usage(&storage, ids[1], 3).await;
+
+        let cold = storage.cold_candidates(30).await.expect("cold");
+        let slugs: Vec<&str> = cold.iter().map(|c| c.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"bronze-stale"),
+            "bronze with no hits → cold"
+        );
+        assert!(
+            !slugs.contains(&"silver-active"),
+            "silver with hits stays warm"
+        );
+        assert!(
+            !slugs.contains(&"gold-pinned"),
+            "gold editorial pin protected"
+        );
+    }
+
+    /// `demote_dataset` returns true on successful demote, false on
+    /// race (e.g. the dataset became gold between `cold_candidates`
+    /// and the UPDATE).
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn demote_dataset_returns_false_on_race_with_promotion() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let m = DatasetMetadata {
+            source_id: "racing".into(),
+            slug: "racing".into(),
+            title_i18n: BTreeMap::from([("zh-TW".into(), "racing".to_owned())]),
+            description_i18n: BTreeMap::new(),
+            license: "CC0".into(),
+            publisher: None,
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: None,
+            upstream_categories: vec![],
+        };
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+            .await
+            .expect("upsert");
+
+        // Eligible (cached, bronze, no pin) → demote succeeds.
+        force_cache_state(&storage, id, true, Some("bronze"), None).await;
+        let demoted = storage.demote_dataset(id).await.expect("demote");
+        assert!(demoted, "eligible dataset demotes");
+
+        // Re-promote + pin via tier_override → demote no-ops.
+        force_cache_state(&storage, id, true, Some("bronze"), Some("platinum")).await;
+        let demoted_again = storage.demote_dataset(id).await.expect("demote pinned");
+        assert!(!demoted_again, "pinned dataset must not demote");
+    }
+
+    /// `cache_hit_ratio`: counts `query_rows` usage in window; "hit"
+    /// is current cached=true at aggregation time.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn cache_hit_ratio_counts_query_rows_against_current_cached_flag() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let mut ids = Vec::new();
+        for slug in ["hot", "cold"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        force_cache_state(&storage, ids[0], true, Some("silver"), None).await;
+        force_cache_state(&storage, ids[1], false, Some("silver"), None).await;
+        insert_query_rows_usage(&storage, ids[0], 3).await; // 3 hits
+        insert_query_rows_usage(&storage, ids[1], 2).await; // 2 misses
+
+        let ratio = storage.cache_hit_ratio(7).await.expect("ratio");
+        assert_eq!(ratio.total, 5, "5 query_rows rows total");
+        assert_eq!(ratio.hits, 3, "3 against cached=true");
+        let v = ratio.ratio().expect("ratio Some");
+        assert!((v - 0.6).abs() < 1e-9);
+    }
 }
