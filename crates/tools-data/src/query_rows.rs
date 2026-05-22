@@ -139,6 +139,22 @@ impl ToolHandler for QueryRowsTool {
             )));
         };
 
+        // #3.6: record attempt usage *before* running the query so
+        // cache misses (dataset exists but not yet materialised)
+        // also count in the denominator. Without this the hit
+        // ratio would always be ≈ 1.0 because only successful
+        // queries — which already require cached=true — would
+        // ever write a row.
+        //
+        // We record on every reachable code path from here on
+        // (success, polars failure, timeout, cache miss). The
+        // dataset id is known so `dataset_id` is safe; the
+        // hit/miss classification is left to cache_hit_ratio's
+        // join against the current `cached` flag. Recording is
+        // best-effort — a failure here is a telemetry loss, not
+        // a query failure, so we log and continue.
+        self.record_query_attempt(&cache).await;
+
         let parquet_path = parquet_path_for_query(&cache)?;
         let effective_limit = validated.effective_limit();
         let validated_sql = validated.as_str().to_owned();
@@ -181,43 +197,49 @@ impl ToolHandler for QueryRowsTool {
             }
         };
 
-        // #3.6: record usage so the hot-cache pipeline can detect
-        // frequently-queried datasets. Recording is best-effort —
-        // a failure here is a telemetry loss, not a query
-        // failure, so we log and continue with the rendered
-        // response (same pattern as materialize_dataset).
-        //
-        // Principal threading note: v0.1 hard-codes
-        // `principal_kind = "anonymous"`. Personal-mode is the
-        // only auth surface that exists today (MODE=personal),
-        // so the audit row is correct as-is. When multi-user
-        // mode (#4) lands, query_rows' Request will gain an
-        // optional `principal` field (mirroring materialize_
-        // dataset's parser) and this site will read it; the
-        // shape change is the only thing blocking the v0.2
-        // upgrade.
-        if let Some(recorder) = &self.recorder {
-            if let Err(e) = recorder
-                .record_usage(&NewUsageRecord {
-                    dataset_id: cache.id,
-                    dataset_version_id: None,
-                    tool: TOOL_NAME,
-                    format: None,
-                    principal_kind: "anonymous",
-                    principal_id: None,
-                    byte_size: None,
-                })
-                .await
-            {
-                tracing::warn!(
-                    slug = %cache.slug,
-                    usage_error = %e,
-                    "query_rows usage recording failed (telemetry only)",
-                );
-            }
-        }
-
+        // Usage already recorded above (see record_query_attempt
+        // call). The post-success path doesn't need a second
+        // write — one row per call is the invariant the
+        // cache_hit_ratio query depends on.
         Ok(render_dataframe(&df, effective_limit))
+    }
+}
+
+impl QueryRowsTool {
+    /// #3.6: write one `usage_records` row per `query_rows` call.
+    /// Best-effort; a write failure is a telemetry loss, not a
+    /// query failure, so we log and continue.
+    ///
+    /// Principal threading note: v0.1 hard-codes
+    /// `principal_kind = "anonymous"`. Personal-mode (MODE=
+    /// personal) is the only auth surface that exists today, so
+    /// the audit row is correct as-is. When multi-user mode (#4)
+    /// lands, `query_rows`' `Request` will gain an optional
+    /// `principal` field (mirroring `materialize_dataset`'s
+    /// parser) and this site reads it; the shape change is the
+    /// only thing blocking the v0.2 upgrade.
+    async fn record_query_attempt(&self, cache: &CacheRef) {
+        let Some(recorder) = &self.recorder else {
+            return;
+        };
+        if let Err(e) = recorder
+            .record_usage(&NewUsageRecord {
+                dataset_id: cache.id,
+                dataset_version_id: None,
+                tool: TOOL_NAME,
+                format: None,
+                principal_kind: "anonymous",
+                principal_id: None,
+                byte_size: None,
+            })
+            .await
+        {
+            tracing::warn!(
+                slug = %cache.slug,
+                usage_error = %e,
+                "query_rows usage recording failed (telemetry only)",
+            );
+        }
     }
 }
 
@@ -574,6 +596,41 @@ mod tests {
         }
     }
 
+    /// R4 fix: stub `UsageRecorder` for telemetry assertions.
+    /// Captures every `(dataset_id, tool-name)` tuple. `tool` is
+    /// stored as `String` because the trait's signature borrows
+    /// it.
+    #[derive(Default, Clone)]
+    struct StubRecorder {
+        calls: Arc<Mutex<Vec<(Uuid, String)>>>,
+        fail_next: Arc<Mutex<bool>>,
+    }
+
+    impl StubRecorder {
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait]
+    impl storage::UsageRecorder for StubRecorder {
+        async fn record_usage(
+            &self,
+            record: &storage::NewUsageRecord<'_>,
+        ) -> Result<Uuid, StorageError> {
+            if *self.fail_next.lock().unwrap() {
+                return Err(StorageError::InvalidArgument(
+                    "test-injected failure".into(),
+                ));
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push((record.dataset_id, record.tool.to_string()));
+            Ok(Uuid::nil())
+        }
+    }
+
     #[async_trait]
     impl DatasetCacheLookup for StubLookup {
         async fn dataset_cache(&self, _key: DatasetKey) -> Result<Option<CacheRef>, StorageError> {
@@ -914,6 +971,50 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(out["truncated"], false);
+        assert_eq!(out["rows"].as_array().unwrap().len(), 3);
+    }
+
+    /// R4 fix: a successful `query_rows` call writes one
+    /// `usage_records` row so the #3.6 hot-cache pipeline can
+    /// detect frequently-queried datasets.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn successful_call_writes_usage_record() {
+        let (_dir, path) = write_fixture_parquet();
+        let cache_ref = cache_ref_for(&path);
+        let recorder = StubRecorder::default();
+        let tool = QueryRowsTool::new(StubLookup::new(Some(cache_ref)))
+            .with_recorder(Arc::new(recorder.clone()));
+        let _ = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 100",
+            }))
+            .await
+            .expect("ok");
+        assert_eq!(recorder.call_count(), 1, "recorder should fire once");
+        let calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls[0].1, TOOL_NAME);
+        // Same comparison via &str to be explicit about the lifetime.
+        assert_eq!(calls[0].1.as_str(), TOOL_NAME);
+    }
+
+    /// R4 fix: recorder errors must not fail the query. The user
+    /// gets their rows; ops sees a log line.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recorder_error_does_not_fail_the_query() {
+        let (_dir, path) = write_fixture_parquet();
+        let cache_ref = cache_ref_for(&path);
+        let recorder = StubRecorder::default();
+        *recorder.fail_next.lock().unwrap() = true;
+        let tool =
+            QueryRowsTool::new(StubLookup::new(Some(cache_ref))).with_recorder(Arc::new(recorder));
+        let out = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 100",
+            }))
+            .await
+            .expect("query must succeed even when recorder errors");
         assert_eq!(out["rows"].as_array().unwrap().len(), 3);
     }
 }
