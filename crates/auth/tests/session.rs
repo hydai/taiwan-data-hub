@@ -48,13 +48,18 @@ impl SessionRepo for InMemorySessionRepo {
         if inner.contains_key(&new.id_hash) {
             return Err(StorageError::UniqueViolation("sessions_pkey".to_owned()));
         }
-        let now = Utc::now();
+        // Mirror the production INSERT: `created_at` and
+        // `last_seen_at` BOTH come from `new.created_at` (the
+        // caller-supplied `now`), so the fake's row keeps the
+        // same single-clock-source invariant as the real table.
+        // Calling `Utc::now()` here would re-introduce the
+        // app/DB clock split the production code just fixed.
         inner.insert(
             new.id_hash,
             Row {
                 user_id: new.user_id,
-                created_at: now,
-                last_seen_at: now,
+                created_at: new.created_at,
+                last_seen_at: new.created_at,
                 expires_at: new.expires_at,
                 absolute_expires_at: new.absolute_expires_at,
                 revoked_at: None,

@@ -35,14 +35,27 @@ CREATE TABLE sessions (
     -- bytes).
     id                BYTEA        PRIMARY KEY,
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- `DEFAULT now()` is a SAFETY NET for direct SQL writers
+    -- (manual psql, future backfill, other-language clients).
+    -- The auth crate ALWAYS binds `created_at` (and
+    -- `last_seen_at`) explicitly from the same wall-clock value
+    -- it used to compute the expiries below, so all four
+    -- timestamps share one clock source. Without that, a
+    -- multi-second app/DB clock skew would silently corrupt the
+    -- `created_at < expires_at < absolute_expires_at` audit
+    -- timeline.
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
     last_seen_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     -- Sliding-window idle expiry. The auth crate touches this on
     -- each authenticated request to `min(now + idle_ttl,
     -- absolute_expires_at)` — never past the hard cap below.
+    -- Initial value at insert uses the SAME `now` bound into
+    -- `created_at`; the table's DEFAULT covers direct SQL only.
     expires_at        TIMESTAMPTZ  NOT NULL,
-    -- Hard cap on session lifetime. Set at insert
-    -- (`created_at + absolute_max`); NEVER extended. Even an
+    -- Hard cap on session lifetime. Set at insert to `now +
+    -- absolute_max` using the SAME `now` bound into
+    -- `created_at` (the auth crate's single per-issue
+    -- wall-clock value). NEVER extended afterwards; even an
     -- actively-used session dies once `now > absolute_expires_at`.
     -- Spec ("max 14d total") lives here.
     absolute_expires_at TIMESTAMPTZ NOT NULL,

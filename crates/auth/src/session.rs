@@ -332,6 +332,14 @@ impl SessionService {
             .insert_session(NewSession {
                 id_hash,
                 user_id,
+                // Single wall-clock source for the whole row.
+                // `created_at` (and `last_seen_at`, which the
+                // repo binds from the same value) shares the
+                // clock used for the expiries below — keeps
+                // `created_at <= last_seen_at < expires_at <
+                // absolute_expires_at` true even under app/DB
+                // skew.
+                created_at: now,
                 expires_at,
                 absolute_expires_at,
                 user_agent,

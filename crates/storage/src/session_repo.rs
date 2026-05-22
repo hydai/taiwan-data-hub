@@ -23,14 +23,23 @@ pub struct NewSession {
     /// request that mints it.
     pub id_hash: Vec<u8>,
     pub user_id: Uuid,
+    /// Wall-clock `now` the auth crate captured for this issue.
+    /// Bound to both `created_at` and `last_seen_at` so all four
+    /// timestamp columns share one clock source even if the app
+    /// and DB clocks drift. The table's `DEFAULT now()` stays
+    /// as a fallback for direct SQL writers (manual psql, future
+    /// backfill) that don't supply a value.
+    pub created_at: DateTime<Utc>,
     /// Sliding-window idle expiry. Set initially to `min(now +
     /// idle_ttl, absolute_expires_at)`; [`SessionRepo::
     /// touch_and_authenticate`] then advances this on each
-    /// request, always capped at `absolute_expires_at`.
+    /// request, always capped at `absolute_expires_at`. Caller
+    /// MUST use the same `now` it sets in [`Self::created_at`].
     pub expires_at: DateTime<Utc>,
     /// Hard cap on session lifetime. Set once at insert
     /// (`now + absolute_max`); NEVER extended. Even active
-    /// sessions die at this point.
+    /// sessions die at this point. Caller MUST use the same
+    /// `now` it sets in [`Self::created_at`].
     pub absolute_expires_at: DateTime<Utc>,
     /// Best-effort audit fields. `None` when the gateway can't
     /// determine the value (no proxy header, missing UA).
@@ -98,14 +107,26 @@ pub trait SessionRepo: Send + Sync {
 #[async_trait]
 impl SessionRepo for Storage {
     async fn insert_session(&self, new: NewSession) -> Result<(), StorageError> {
+        // `created_at` and `last_seen_at` are bound from the
+        // SAME `now` the auth crate used to compute `expires_at`
+        // and `absolute_expires_at` (placeholder `$3` reused
+        // across both columns). Without this, the DB's
+        // `DEFAULT now()` would tag `created_at` with the DB
+        // clock while the expiries used the app clock — a
+        // multi-second skew between them is enough to make the
+        // audit timeline (`created_at < expires_at <
+        // absolute_expires_at`) look corrupted even though
+        // nothing is wrong.
         sqlx::query(
             "INSERT INTO sessions
-                (id, user_id, expires_at, absolute_expires_at,
+                (id, user_id, created_at, last_seen_at,
+                 expires_at, absolute_expires_at,
                  user_agent, ip_addr)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+             VALUES ($1, $2, $3, $3, $4, $5, $6, $7)",
         )
         .bind(&new.id_hash)
         .bind(new.user_id)
+        .bind(new.created_at)
         .bind(new.expires_at)
         .bind(new.absolute_expires_at)
         .bind(new.user_agent.as_deref())
