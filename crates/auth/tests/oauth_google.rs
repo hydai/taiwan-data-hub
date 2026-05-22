@@ -20,7 +20,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
-use auth::{AuthError, GoogleProvider, JwksCache, OAuthService, TokenCipher, account_aad};
+use auth::{
+    AuthError, GoogleProvider, JwksCache, OAuthProvider, OAuthService, TokenCipher, account_aad,
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
@@ -248,6 +250,13 @@ struct IdTokenClaims<'a> {
     email_verified: bool,
     iat: i64,
     exp: i64,
+    /// Optional OIDC `name` claim — set when a test exercises
+    /// the `profile`-scope extraction path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    /// Optional OIDC `picture` claim — pairs with `name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    picture: Option<&'a str>,
 }
 
 /// PKCS#1 DER bytes of the shared test key. `jsonwebtoken` with
@@ -292,6 +301,8 @@ fn google_claims<'a>(
         email_verified,
         iat: now,
         exp: now + 3600,
+        name: None,
+        picture: None,
     }
 }
 
@@ -394,8 +405,8 @@ async fn start_login_returns_google_authorize_url_with_oidc_params() {
     );
     assert_eq!(
         token_from_url(&url, "scope").as_deref(),
-        Some("openid email"),
-        "scope must request OIDC id_token + email"
+        Some("openid email profile"),
+        "scope must request OIDC id_token + email + profile (name/picture)"
     );
     assert_eq!(
         token_from_url(&url, "code_challenge_method").as_deref(),
@@ -569,6 +580,8 @@ async fn finish_login_rejects_wrong_issuer() {
         email_verified: true,
         iat: Utc::now().timestamp(),
         exp: Utc::now().timestamp() + 3600,
+        name: None,
+        picture: None,
     };
     let id_token = sign_id_token(&bad_claims);
     install_google_token_mock(&server, &id_token).await;
@@ -595,6 +608,8 @@ async fn finish_login_rejects_expired_id_token() {
         email_verified: true,
         iat: now - 7200,
         exp: now - 3600,
+        name: None,
+        picture: None,
     });
     install_google_token_mock(&server, &id_token).await;
     let (svc, _, _, _) = build_service(&server.uri());
@@ -864,6 +879,92 @@ async fn finish_login_never_leaks_tokens_on_2xx_malformed_body() {
         msg.contains("status=200"),
         "status missing from error: {msg}"
     );
+}
+
+#[tokio::test]
+async fn provider_extracts_display_name_and_avatar_from_id_token() {
+    // Issue #44 DoD: "extracts email/name/avatar". The Google
+    // provider requests `openid email profile`; the resulting
+    // `id_token` carries the OIDC `name` + `picture` claims;
+    // `exchange_and_fetch_profile` must surface them on the
+    // returned `ProviderProfile`. v0.1 doesn't persist them yet
+    // (the `users` table has no display-name / avatar columns);
+    // a follow-up will wire up the storage migration.
+    let server = MockServer::start().await;
+    let now = Utc::now().timestamp();
+    let id_token = sign_id_token(&IdTokenClaims {
+        iss: "https://accounts.google.com",
+        aud: "test-client-id",
+        sub: "google-sub-profile",
+        email: "named@example.com",
+        email_verified: true,
+        iat: now,
+        exp: now + 3600,
+        name: Some("Alice Example"),
+        picture: Some("https://lh3.googleusercontent.com/a/avatar.png"),
+    });
+    install_google_token_mock(&server, &id_token).await;
+
+    let provider = GoogleProvider::with_endpoints(
+        "test-client-id".to_owned(),
+        "test-client-secret".to_owned(),
+        Client::new(),
+        format!("{}/o/oauth2/v2/auth", server.uri()),
+        format!("{}/token", server.uri()),
+        jwks_cache(),
+    );
+    let profile = provider
+        .exchange_and_fetch_profile(
+            "test-code",
+            // PKCE verifiers must be 43-128 chars; the wiremock
+            // matcher only requires `code_verifier=` to be
+            // present, so any URL-safe-base64 string works.
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "https://hub.example/cb",
+        )
+        .await
+        .unwrap();
+    assert_eq!(profile.email, "named@example.com");
+    assert_eq!(profile.display_name.as_deref(), Some("Alice Example"));
+    assert_eq!(
+        profile.avatar_url.as_deref(),
+        Some("https://lh3.googleusercontent.com/a/avatar.png")
+    );
+}
+
+#[tokio::test]
+async fn provider_leaves_display_name_and_avatar_none_when_absent() {
+    // Some Google accounts have no display name set; the `name`
+    // + `picture` claims are then absent from the id_token even
+    // with the `profile` scope. Provider must surface that as
+    // `None`, not error out.
+    let server = MockServer::start().await;
+    let id_token = sign_id_token(&google_claims(
+        "google-sub-nameless",
+        "nameless@example.com",
+        true,
+        "test-client-id",
+    ));
+    install_google_token_mock(&server, &id_token).await;
+
+    let provider = GoogleProvider::with_endpoints(
+        "test-client-id".to_owned(),
+        "test-client-secret".to_owned(),
+        Client::new(),
+        format!("{}/o/oauth2/v2/auth", server.uri()),
+        format!("{}/token", server.uri()),
+        jwks_cache(),
+    );
+    let profile = provider
+        .exchange_and_fetch_profile(
+            "test-code",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "https://hub.example/cb",
+        )
+        .await
+        .unwrap();
+    assert_eq!(profile.display_name, None);
+    assert_eq!(profile.avatar_url, None);
 }
 
 #[tokio::test]

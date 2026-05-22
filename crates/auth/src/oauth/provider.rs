@@ -34,6 +34,20 @@ pub struct ProviderProfile {
     pub refresh_token: Option<String>,
     /// Optional access-token TTL.
     pub expires_in: Option<std::time::Duration>,
+    /// Optional provider-supplied display name. Populated when the
+    /// provider returns one (Google's OIDC `name` claim when the
+    /// caller requested the `profile` scope, GitHub's `/user.name`
+    /// when set). `None` when the provider didn't return it OR
+    /// when this provider impl doesn't yet plumb it through. The
+    /// auth crate stores it for future use by the gateway; the
+    /// v0.1 `users` table has no display-name column so it's not
+    /// persisted yet — a follow-up will add the storage layer.
+    pub display_name: Option<String>,
+    /// Optional provider-supplied avatar URL. Populated from
+    /// Google's OIDC `picture` claim or GitHub's `/user.avatar_url`.
+    /// Same v0.1 caveat as `display_name`: extracted by the
+    /// provider, not yet persisted.
+    pub avatar_url: Option<String>,
 }
 
 #[async_trait]

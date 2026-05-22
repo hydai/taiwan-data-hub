@@ -59,21 +59,16 @@ const REAL_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 /// valid `iss` values. We accept either.
 const ACCEPTED_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.google.com"];
 
-/// Minimum OIDC scopes for "log in with Google": `openid` enables
-/// the `id_token`, `email` puts the address + verified flag into
-/// the JWT.
+/// OIDC scopes for "log in with Google":
 ///
-/// `profile` is intentionally OMITTED in v0.1. The `ProviderProfile`
-/// trait surface this auth crate ships carries `provider_user_id` +
-/// `email` only (matching `GitHubProvider` in #4.3); the `users`
-/// table has no `display_name` / `avatar_url` columns yet. The
-/// `name` / `picture` claims that Google would put in the
-/// `id_token` (given `profile`) have no plumbing target — issue
-/// #44 covers that as a cross-cutting follow-up that needs a
-/// storage migration + symmetric extraction in `GitHubProvider`.
-/// Do NOT silently change `SCOPES` here without expanding
-/// `ProviderProfile` first or the extra claim does no work.
-const SCOPES: &str = "openid email";
+/// - `openid` enables the `id_token`.
+/// - `email` puts the address + verified flag into the JWT.
+/// - `profile` adds the optional `name` + `picture` claims that
+///   we extract into [`ProviderProfile::display_name`] and
+///   [`ProviderProfile::avatar_url`]. The v0.1 `users` table has
+///   no columns for them yet, so they ride in the trait surface
+///   but aren't persisted until the storage migration lands.
+const SCOPES: &str = "openid email profile";
 
 /// JWKS cache TTL. Google rotates signing keys every few weeks
 /// but advertises the new ones well in advance, so a generous
@@ -184,6 +179,15 @@ struct IdTokenClaims {
     #[serde(default)]
     email_verified: bool,
     aud: String,
+    /// OIDC `name` claim — present when the caller requested the
+    /// `profile` scope. Optional because some Google accounts have
+    /// no display name set.
+    #[serde(default)]
+    name: Option<String>,
+    /// OIDC `picture` claim — same `profile`-scope dependency as
+    /// `name`. Populated with the user's avatar URL.
+    #[serde(default)]
+    picture: Option<String>,
 }
 
 #[async_trait]
@@ -239,6 +243,8 @@ impl OAuthProvider for GoogleProvider {
             access_token: token.access_token,
             refresh_token: token.refresh_token,
             expires_in: token.expires_in.map(Duration::from_secs),
+            display_name: claims.name,
+            avatar_url: claims.picture,
         })
     }
 }
