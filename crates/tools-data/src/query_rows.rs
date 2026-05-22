@@ -1027,6 +1027,38 @@ mod tests {
         assert_eq!(calls[0].1, TOOL_NAME);
     }
 
+    /// R12 fix: cache misses (dataset exists but `cached=false`)
+    /// must also write a `usage_records` row so the
+    /// `cache_hit_ratio` denominator includes misses. Without
+    /// this assertion a regression that moves the recorder
+    /// below `parquet_path_for_query` would silently re-bias
+    /// the metric to ~100%.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cache_miss_still_writes_usage_record() {
+        let uncached = CacheRef {
+            id: Uuid::nil(),
+            slug: "fixture".into(),
+            cached: false, // ← the bias-trigger condition
+            cache_path: None,
+        };
+        let recorder = StubRecorder::default();
+        let tool = QueryRowsTool::new(StubLookup::new(Some(uncached)))
+            .with_recorder(Arc::new(recorder.clone()));
+        let err = tool
+            .call(json!({
+                "slug": "fixture",
+                "sql": "SELECT id FROM current_dataset LIMIT 100",
+            }))
+            .await
+            .expect_err("cache miss should surface NotFound");
+        assert!(matches!(err, ToolError::NotFound(_)));
+        assert_eq!(
+            recorder.call_count(),
+            1,
+            "cache miss must still write to usage_records so cache_hit_ratio denominator stays honest",
+        );
+    }
+
     /// R4 fix: recorder errors must not fail the query. The user
     /// gets their rows; ops sees a log line.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
