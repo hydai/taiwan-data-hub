@@ -23,6 +23,7 @@
 //! tests) the worker runs a single immediate pass before settling
 //! into the cron loop.
 
+mod cache_pipeline;
 mod driver;
 
 use std::env;
@@ -35,6 +36,10 @@ use storage::Storage;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing_subscriber::EnvFilter;
 
+use std::sync::Arc;
+use storage::CacheState;
+
+use crate::cache_pipeline::{CacheTickConfig, run_cache_tick};
 use crate::driver::run_one_pass;
 
 /// "Nightly at 02:00 Asia/Taipei" expressed in UTC. Taiwan does not
@@ -44,6 +49,13 @@ use crate::driver::run_one_pass;
 /// Format is the 7-field cron spec `tokio-cron-scheduler` expects:
 /// `sec min hour day-of-month month day-of-week year`.
 const NIGHTLY_TPE_2AM_IN_UTC: &str = "0 0 18 * * * *";
+
+/// #3.6 hot-cache pipeline tick: every 6 hours at the top of the
+/// hour (UTC 00:00 / 06:00 / 12:00 / 18:00). 6h matches the
+/// issue's "frequently-queried" sensitivity — promotion / demotion
+/// catches up to query traffic without churning the catalog. Same
+/// 7-field cron format as the nightly crawl.
+const CACHE_TICK_CRON: &str = "0 0 0,6,12,18 * * * *";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,6 +100,38 @@ async fn main() -> Result<()> {
     })
     .context("failed to construct cron job")?;
     scheduler.add(job).await.context("failed to register job")?;
+
+    // #3.6 hot-cache pipeline: runs every 6 hours so promotion/
+    // demotion catches up to query traffic without overloading
+    // Postgres (the candidate queries scan usage_records). 6h
+    // is also short enough that an editorial pin shows up in
+    // the next tick the operator can correlate with their
+    // dataset edit.
+    let cache_state: Arc<dyn CacheState> = Arc::new(storage.clone());
+    let cache_state_for_cron = cache_state.clone();
+    let cache_job = Job::new_async_tz(CACHE_TICK_CRON, Utc, move |_uuid, _l| {
+        let state = cache_state_for_cron.clone();
+        Box::pin(async move {
+            tracing::info!("cron tick: running cache pipeline (#3.6)");
+            match run_cache_tick(state, CacheTickConfig::default()).await {
+                Ok(report) => {
+                    tracing::info!(
+                        hot_candidate_count = report.hot_candidate_count,
+                        demoted_count = report.demoted_count,
+                        hit_ratio = ?report.hit_ratio(),
+                        "cache tick complete",
+                    );
+                }
+                Err(e) => tracing::error!(error = %e, "cache tick failed"),
+            }
+        })
+    })
+    .context("failed to construct cache tick job")?;
+    scheduler
+        .add(cache_job)
+        .await
+        .context("failed to register cache tick job")?;
+
     scheduler
         .start()
         .await
@@ -95,6 +139,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         cron_utc = NIGHTLY_TPE_2AM_IN_UTC,
+        cache_cron_utc = CACHE_TICK_CRON,
         "ETL worker scheduled; waiting for shutdown signal"
     );
 

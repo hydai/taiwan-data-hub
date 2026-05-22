@@ -106,7 +106,7 @@ pub fn register_db_tools_with(
     builder
         .register(GetDatasetTool::from_arc(reader))
         .register(SearchDatasetsTool::from_arc(searcher))
-        .register(QueryRowsTool::from_arc(cache.clone()))
+        .register(QueryRowsTool::from_arc(cache.clone()).with_recorder(recorder.clone()))
         .register(DescribeSchemaTool::from_arc(cache.clone()))
         .register(GetSampleTool::from_arc(cache.clone()))
         .register(JoinDatasetsTool::from_arc(cache.clone()))

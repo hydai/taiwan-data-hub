@@ -199,6 +199,136 @@ pub struct DatasetLatestFiles {
     pub files: Vec<DatasetFileRow>,
 }
 
+/// Bare-minimum dataset identification for the hot-cache pipeline
+/// (#3.6) — id + slug, enough to log what's being promoted/demoted
+/// without re-loading the full row.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct CacheCandidate {
+    pub id: Uuid,
+    pub slug: String,
+    pub tier: String,
+    /// Number of `query_rows` hits in the lookback window. Always
+    /// populated for the candidate-finding query so the worker can
+    /// log the actual hit count alongside the slug.
+    pub query_hits: i64,
+}
+
+/// Cache hit / total ratio for a window — read once per tick by the
+/// telemetry exporter. `hits` counts `query_rows` invocations
+/// against datasets whose `cached` flag is `true` **at the time
+/// the ratio is computed** (when [`CacheState::cache_hit_ratio`]
+/// runs) — not at the original call time, since
+/// `usage_records` has no per-row cache-state snapshot. `total`
+/// is the `query_rows` invocation total over the same window.
+/// Both are `i64` to match Postgres `COUNT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::FromRow)]
+pub struct CacheHitRatio {
+    pub hits: i64,
+    pub total: i64,
+}
+
+impl CacheHitRatio {
+    /// Ratio as a fraction in `[0.0, 1.0]`, or `None` when there
+    /// were no queries (so the gauge stays at the prior value or
+    /// is reported as missing rather than 0/0).
+    ///
+    /// Cast precision: hits / total are bounded by Postgres COUNT
+    /// over the lookback window — even at a million queries/day
+    /// they fit in f64's 2^53 mantissa precisely, so the cast is
+    /// lossless in practice. The clippy lint is suppressed
+    /// locally rather than at the workspace level.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn ratio(&self) -> Option<f64> {
+        if self.total == 0 {
+            None
+        } else {
+            Some(self.hits as f64 / self.total as f64)
+        }
+    }
+}
+
+/// Object-safe surface for the #3.6 cache pipeline. Decoupled from
+/// the materialisation traits so the etl-worker can hold a
+/// minimal Arc<dyn CacheState> instead of the full Storage.
+#[async_trait]
+pub trait CacheState: Send + Sync + 'static {
+    /// Datasets that should be promoted to the parquet cache.
+    /// Selection: tier IN ('platinum', 'gold') OR
+    /// `query_rows` hits in the last `window_days` ≥ `hit_threshold`.
+    /// Already-cached datasets are excluded — promotion is a no-op
+    /// when the parquet already exists.
+    async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError>;
+
+    /// Datasets currently `cached = true` with **zero**
+    /// `query_rows` invocations in the last `inactive_days`.
+    /// `get_dataset` / `materialize_dataset` calls do *not* keep
+    /// a dataset warm — `query_rows` is the signal of "users are
+    /// reading rows" that justifies a parquet cache. These are
+    /// candidates for demotion — the worker calls
+    /// [`Self::demote_dataset`] on each. Platinum / gold tiers
+    /// are excluded so editorially-pinned datasets don't churn
+    /// out.
+    async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError>;
+
+    /// Mark a dataset as no longer cached. Sets `cached = false`
+    /// and clears `cache_path` *iff* the dataset is currently
+    /// cached and not editorially pinned. Returns whether the
+    /// row was actually changed (`true` = demoted; `false` = the
+    /// dataset was promoted to platinum/gold or already
+    /// uncached between the candidate scan and the UPDATE, so
+    /// the no-op is correct). Doesn't delete the parquet file
+    /// itself — the object-store layer's lifecycle policy
+    /// handles physical eviction.
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Compute the cache hit ratio over the last `window_days` of
+    /// `query_rows` usage. **"Hit"** = `cached = true` **at the
+    /// time this method runs** (when the `cache_pipeline` tick
+    /// calls into us), *not* at the original `query_rows` call
+    /// time — there's no per-row snapshot in `usage_records`.
+    /// In practice that's accurate on average because cache
+    /// state only changes via the #3.6 pipeline; short bursts
+    /// of churn between two 6h ticks could mis-attribute rows.
+    /// A perfectly historical ratio needs a `cached_at_call`
+    /// column on `usage_records` (v0.2 enhancement). Surfaces
+    /// as a Prometheus gauge once #2.10 telemetry lands.
+    async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError>;
+}
+
+#[async_trait]
+impl CacheState for Storage {
+    async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        Storage::hot_candidates(self, window_days, hit_threshold).await
+    }
+
+    async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        Storage::cold_candidates(self, inactive_days).await
+    }
+
+    async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
+        Storage::demote_dataset(self, dataset_id).await
+    }
+
+    async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
+        Storage::cache_hit_ratio(self, window_days).await
+    }
+}
+
 /// Object-safe writer for `usage_records`. Decoupled from
 /// [`DatasetWriter`] so tools that only need to log usage don't drag
 /// in the catalog-mutating surface.
@@ -857,6 +987,163 @@ impl Storage {
         .await
         .map_err(StorageError::from)?;
         Ok(row.0)
+    }
+
+    /// #3.6 hot-cache pipeline: candidates for promotion.
+    ///
+    /// Selection rule: tier IN ('platinum', 'gold') OR the dataset
+    /// received ≥ `hit_threshold` `query_rows` calls in the last
+    /// `window_days`. Already-cached datasets are excluded — re-
+    /// materialisation is a separate operation.
+    ///
+    /// Returned in deterministic order (tier rank asc — platinum
+    /// first, then gold, silver, bronze; then hit count desc;
+    /// then slug asc) so a worker can checkpoint progress within
+    /// the candidate list.
+    pub async fn hot_candidates(
+        &self,
+        window_days: i32,
+        hit_threshold: i64,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        // Effective tier = COALESCE(tier_override, tier). The
+        // schema (migrations/0001_init.sql) makes tier_override
+        // win when an admin pins a dataset, so the candidate
+        // query has to look at that column or it'll miss
+        // editorial pins.
+        let rows: Vec<CacheCandidate> = sqlx::query_as(
+            "SELECT d.id, d.slug, \
+                    COALESCE(d.tier_override, d.tier) AS tier, \
+                    COALESCE(u.hits, 0)::bigint AS query_hits \
+             FROM datasets d \
+             LEFT JOIN ( \
+                SELECT dataset_id, COUNT(*)::bigint AS hits \
+                FROM usage_records \
+                WHERE tool = 'query_rows' \
+                  AND requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                GROUP BY dataset_id \
+             ) u ON u.dataset_id = d.id \
+             WHERE NOT d.cached \
+               AND ( \
+                 COALESCE(d.tier_override, d.tier) IN ('platinum', 'gold') \
+                 OR COALESCE(u.hits, 0) >= $2 \
+               ) \
+             ORDER BY \
+               CASE COALESCE(d.tier_override, d.tier) \
+                 WHEN 'platinum' THEN 1 \
+                 WHEN 'gold' THEN 2 \
+                 WHEN 'silver' THEN 3 \
+                 ELSE 4 \
+               END, \
+               COALESCE(u.hits, 0) DESC, \
+               d.slug ASC",
+        )
+        .bind(window_days)
+        .bind(hit_threshold)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows)
+    }
+
+    /// #3.6 hot-cache pipeline: candidates for demotion.
+    ///
+    /// Selection rule: currently `cached = true`, tier NOT IN
+    /// ('platinum', 'gold') (editorial pins stay), AND no
+    /// `query_rows` hit in the last `inactive_days`.
+    pub async fn cold_candidates(
+        &self,
+        inactive_days: i32,
+    ) -> Result<Vec<CacheCandidate>, StorageError> {
+        // Same effective-tier rule as `hot_candidates` —
+        // tier_override wins.
+        let rows: Vec<CacheCandidate> = sqlx::query_as(
+            "SELECT d.id, d.slug, \
+                    COALESCE(d.tier_override, d.tier) AS tier, \
+                    COALESCE(u.hits, 0)::bigint AS query_hits \
+             FROM datasets d \
+             LEFT JOIN ( \
+                SELECT dataset_id, COUNT(*)::bigint AS hits \
+                FROM usage_records \
+                WHERE tool = 'query_rows' \
+                  AND requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                GROUP BY dataset_id \
+             ) u ON u.dataset_id = d.id \
+             WHERE d.cached \
+               AND COALESCE(d.tier_override, d.tier) NOT IN ('platinum', 'gold') \
+               AND COALESCE(u.hits, 0) = 0 \
+             ORDER BY d.slug ASC",
+        )
+        .bind(inactive_days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows)
+    }
+
+    /// #3.6 hot-cache pipeline: clear a dataset's cached state.
+    ///
+    /// Sets `cached = false` and `cache_path = NULL`. The actual
+    /// parquet file in `SeaweedFS` is left for the object-store
+    /// lifecycle policy to garbage-collect; tracking that here
+    /// would be a layering violation.
+    ///
+    /// The UPDATE carries the same eligibility predicate as
+    /// `cold_candidates` (`cached = true` AND effective tier
+    /// not pinned to platinum/gold). This closes the race where
+    /// an admin promotes a dataset to platinum/gold *after*
+    /// `cold_candidates` runs but *before* the demote fires —
+    /// the predicate makes the UPDATE a no-op and the returned
+    /// `false` lets the caller distinguish "really demoted"
+    /// from "race lost". A missing `id` also returns `false`
+    /// rather than silently succeeding.
+    pub async fn demote_dataset(&self, dataset_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE datasets \
+             SET cached = false, cache_path = NULL \
+             WHERE id = $1 \
+               AND cached \
+               AND COALESCE(tier_override, tier) NOT IN ('platinum', 'gold')",
+        )
+        .bind(dataset_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// #3.6 hot-cache pipeline: aggregate cache hit ratio for a
+    /// `query_rows` window. A "hit" is a `query_rows` invocation
+    /// whose dataset has `cached = true` **right now** — that is,
+    /// when this aggregation method runs, not at the original
+    /// `query_rows` call time. (`usage_records` has no per-row
+    /// snapshot of the cache flag, so this is the closest
+    /// approximation; see paragraph below for the drift bound.)
+    ///
+    /// The join is against the *current* `datasets.cached` flag
+    /// because `usage_records` has no per-row snapshot of the
+    /// cache state at call time. In practice a dataset's cache
+    /// state only changes via this pipeline (which runs every
+    /// 6 hours), so the ratio is accurate on average — but a
+    /// short burst of churn between two ticks could mis-attribute
+    /// individual rows. A perfectly historical hit ratio would
+    /// need a separate `cached_at_call` column on
+    /// `usage_records`; v0.2 enhancement if telemetry drift
+    /// becomes a concern.
+    pub async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
+        let row: CacheHitRatio = sqlx::query_as(
+            "SELECT \
+                COALESCE(SUM(CASE WHEN d.cached THEN 1 ELSE 0 END), 0)::bigint AS hits, \
+                COUNT(*)::bigint AS total \
+             FROM usage_records u \
+             JOIN datasets d ON d.id = u.dataset_id \
+             WHERE u.tool = 'query_rows' \
+               AND u.requested_at >= now() - ($1::int * INTERVAL '1 day')",
+        )
+        .bind(window_days)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(row)
     }
 }
 
@@ -2092,5 +2379,279 @@ mod tests {
             raw_insert.is_err(),
             "SQL CHECK must reject anonymous + non-null principal_id"
         );
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  #3.6 hot-cache pipeline — testcontainers coverage
+    // ════════════════════════════════════════════════════════════
+    //
+    // The cache_pipeline storage methods (hot_candidates,
+    // cold_candidates, demote_dataset, cache_hit_ratio) ship four
+    // non-trivial SQL queries with eligibility predicates,
+    // COALESCE(tier_override, tier) joins, partial-index-friendly
+    // shapes, and an UPDATE race-guard. The unit tests in the
+    // worker crate use mocks; these `#[ignore]` testcontainers
+    // tests catch SQL drift before it lands in production.
+
+    /// Force a dataset into `cached = true` (the upsert path
+    /// preserves `cached` / `cache_path` so we can't drive it
+    /// through the catalog API). Used by the cache-pipeline tests
+    /// below.
+    async fn force_cache_state(
+        storage: &Storage,
+        dataset_id: Uuid,
+        cached: bool,
+        tier: Option<&str>,
+        tier_override: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE datasets SET cached = $2, \
+                cache_path = CASE WHEN $2 THEN 'file:///tmp/' || id::text || '.parquet' ELSE NULL END, \
+                tier = COALESCE($3, tier), \
+                tier_override = $4 \
+             WHERE id = $1",
+        )
+        .bind(dataset_id)
+        .bind(cached)
+        .bind(tier)
+        .bind(tier_override)
+        .execute(storage.pool())
+        .await
+        .expect("force cache state");
+    }
+
+    async fn insert_query_rows_usage(storage: &Storage, dataset_id: Uuid, count: usize) {
+        for _ in 0..count {
+            storage
+                .record_usage(&NewUsageRecord {
+                    dataset_id,
+                    dataset_version_id: None,
+                    tool: "query_rows",
+                    format: None,
+                    principal_kind: "anonymous",
+                    principal_id: None,
+                    byte_size: None,
+                })
+                .await
+                .expect("record query_rows usage");
+        }
+    }
+
+    /// Locks: `hot_candidates` returns platinum/gold via the tier
+    /// rule even when zero hits, AND silver+ via the hit-threshold
+    /// rule. Already-cached datasets are excluded. Order is
+    /// platinum → gold → (hot silver) by tier-rank-asc.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn hot_candidates_selects_platinum_gold_or_above_threshold() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        let mut ids = Vec::new();
+        for slug in ["plat-1", "gold-1", "silver-popular", "silver-quiet"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        // Force tiers (upsert preserves them on first insert as
+        // 'bronze', so we have to set them explicitly).
+        force_cache_state(&storage, ids[0], false, Some("platinum"), None).await;
+        force_cache_state(&storage, ids[1], false, Some("gold"), None).await;
+        force_cache_state(&storage, ids[2], false, Some("silver"), None).await;
+        force_cache_state(&storage, ids[3], false, Some("silver"), None).await;
+        // silver-popular crosses the threshold; silver-quiet stays below.
+        insert_query_rows_usage(&storage, ids[2], 60).await;
+        insert_query_rows_usage(&storage, ids[3], 5).await;
+
+        let hot = storage.hot_candidates(7, 50).await.expect("hot_candidates");
+        let slugs: Vec<&str> = hot.iter().map(|c| c.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"plat-1")
+                && slugs.contains(&"gold-1")
+                && slugs.contains(&"silver-popular"),
+            "expected plat-1 + gold-1 + silver-popular in hot list, got {slugs:?}",
+        );
+        assert!(
+            !slugs.contains(&"silver-quiet"),
+            "silver-quiet under threshold should be excluded",
+        );
+        // Order: platinum first, then gold, then silver-popular.
+        assert_eq!(slugs[0], "plat-1", "tier rank: platinum=1 first");
+        assert_eq!(slugs[1], "gold-1", "tier rank: gold=2 second");
+    }
+
+    /// `hot_candidates` respects `tier_override`: a base 'bronze'
+    /// dataset with `tier_override = 'platinum'` must show up
+    /// even with zero hits.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn hot_candidates_respects_tier_override() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let m = DatasetMetadata {
+            source_id: "pinned".into(),
+            slug: "pinned".into(),
+            title_i18n: BTreeMap::from([("zh-TW".into(), "pinned".to_owned())]),
+            description_i18n: BTreeMap::new(),
+            license: "CC0".into(),
+            publisher: None,
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: None,
+            upstream_categories: vec![],
+        };
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+            .await
+            .expect("upsert");
+        force_cache_state(&storage, id, false, Some("bronze"), Some("platinum")).await;
+
+        let hot = storage.hot_candidates(7, 50).await.expect("hot_candidates");
+        assert!(hot.iter().any(|c| c.slug == "pinned"));
+        // CacheCandidate.tier returns the *effective* tier.
+        let entry = hot.iter().find(|c| c.slug == "pinned").unwrap();
+        assert_eq!(
+            entry.tier, "platinum",
+            "effective tier should be the override"
+        );
+    }
+
+    /// `cold_candidates`: returns silver/bronze that are cached but
+    /// have zero `query_rows` hits in the window. Excludes platinum/
+    /// gold via the effective-tier rule.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn cold_candidates_selects_silent_unpinned_cached_datasets() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let mut ids = Vec::new();
+        for slug in ["bronze-stale", "silver-active", "gold-pinned"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        force_cache_state(&storage, ids[0], true, Some("bronze"), None).await;
+        force_cache_state(&storage, ids[1], true, Some("silver"), None).await;
+        force_cache_state(&storage, ids[2], true, Some("gold"), None).await;
+        // silver-active has a recent hit; bronze-stale and gold-pinned have none.
+        insert_query_rows_usage(&storage, ids[1], 3).await;
+
+        let cold = storage.cold_candidates(30).await.expect("cold");
+        let slugs: Vec<&str> = cold.iter().map(|c| c.slug.as_str()).collect();
+        assert!(
+            slugs.contains(&"bronze-stale"),
+            "bronze with no hits → cold"
+        );
+        assert!(
+            !slugs.contains(&"silver-active"),
+            "silver with hits stays warm"
+        );
+        assert!(
+            !slugs.contains(&"gold-pinned"),
+            "gold editorial pin protected"
+        );
+    }
+
+    /// `demote_dataset` returns true on successful demote, false on
+    /// race (e.g. the dataset became gold between `cold_candidates`
+    /// and the UPDATE).
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn demote_dataset_returns_false_on_race_with_promotion() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let m = DatasetMetadata {
+            source_id: "racing".into(),
+            slug: "racing".into(),
+            title_i18n: BTreeMap::from([("zh-TW".into(), "racing".to_owned())]),
+            description_i18n: BTreeMap::new(),
+            license: "CC0".into(),
+            publisher: None,
+            update_frequency: None,
+            original_url: None,
+            last_modified_at: None,
+            upstream_categories: vec![],
+        };
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+            .await
+            .expect("upsert");
+
+        // Eligible (cached, bronze, no pin) → demote succeeds.
+        force_cache_state(&storage, id, true, Some("bronze"), None).await;
+        let demoted = storage.demote_dataset(id).await.expect("demote");
+        assert!(demoted, "eligible dataset demotes");
+
+        // Re-promote + pin via tier_override → demote no-ops.
+        force_cache_state(&storage, id, true, Some("bronze"), Some("platinum")).await;
+        let demoted_again = storage.demote_dataset(id).await.expect("demote pinned");
+        assert!(!demoted_again, "pinned dataset must not demote");
+    }
+
+    /// `cache_hit_ratio`: counts `query_rows` usage in window; "hit"
+    /// is current cached=true at aggregation time.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn cache_hit_ratio_counts_query_rows_against_current_cached_flag() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let mut ids = Vec::new();
+        for slug in ["hot", "cold"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push(id);
+        }
+        force_cache_state(&storage, ids[0], true, Some("silver"), None).await;
+        force_cache_state(&storage, ids[1], false, Some("silver"), None).await;
+        insert_query_rows_usage(&storage, ids[0], 3).await; // 3 hits
+        insert_query_rows_usage(&storage, ids[1], 2).await; // 2 misses
+
+        let ratio = storage.cache_hit_ratio(7).await.expect("ratio");
+        assert_eq!(ratio.total, 5, "5 query_rows rows total");
+        assert_eq!(ratio.hits, 3, "3 against cached=true");
+        let v = ratio.ratio().expect("ratio Some");
+        assert!((v - 0.6).abs() < 1e-9);
     }
 }
