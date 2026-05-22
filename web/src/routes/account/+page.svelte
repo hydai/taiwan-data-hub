@@ -24,12 +24,24 @@
 		// with the rest of the marketplace UI; toggling to user
 		// preferences lands when Paraglide v2's `getLocale()` is
 		// wired through.
+		//
+		// `timeZone: 'Asia/Taipei'` is set explicitly because the
+		// page is SSR'd on Node (whose default zone is the host)
+		// and then hydrated on the client (whose zone is the
+		// user's). Without a pinned zone the two formats can
+		// disagree, causing a hydration mismatch / brief flicker
+		// the moment Svelte takes over the DOM. Asia/Taipei is
+		// the right anchor since this product targets a Taiwan
+		// audience; switching to user-local rendering would
+		// require a client-only formatter that mounts after
+		// hydration.
 		return d.toLocaleString('zh-TW', {
 			year: 'numeric',
 			month: 'short',
 			day: 'numeric',
 			hour: '2-digit',
-			minute: '2-digit'
+			minute: '2-digit',
+			timeZone: 'Asia/Taipei'
 		});
 	};
 

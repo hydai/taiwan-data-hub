@@ -11,9 +11,10 @@
 //!
 //! `verify`'s comparison happens server-side via the DB equality
 //! predicate `WHERE key_hash = $1` on the SHA-256 hash, NOT via
-//! a Rust constant-time compare — the partial-index hot path
-//! makes the lookup a single btree probe and the surrounding
-//! request latency dwarfs any per-byte timing signal. A
+//! a Rust constant-time compare — the UNIQUE index on
+//! `mcp_api_keys.key_hash` makes the lookup a single btree
+//! probe and the surrounding request latency dwarfs any
+//! per-byte timing signal. A
 //! malformed cleartext (wrong prefix, length, or base64url
 //! alphabet) is rejected by [`is_well_shaped`] BEFORE hashing,
 //! so attacker-controlled bytes never reach `Sha256::digest`
@@ -239,9 +240,13 @@ impl ApiKeyService {
     /// request). [`is_well_shaped`] short-circuits malformed
     /// input before any DB round trip; a well-shaped but
     /// unknown key still pays one btree probe through the
-    /// partial-unique index on `key_hash`. The timing
-    /// difference between the two reject paths leaks the
-    /// well-shaped / malformed distinction, which is
+    /// UNIQUE index on `mcp_api_keys.key_hash`. The revocation
+    /// filter (`revoked_at IS NULL`) is in the
+    /// `touch_and_verify` `UPDATE … RETURNING` predicate, not
+    /// the index itself — the index is unique across all rows
+    /// so a revoked key's hash can never be re-issued. The
+    /// timing difference between the two reject paths leaks
+    /// the well-shaped / malformed distinction, which is
     /// acceptable because the cleartext format is publicly
     /// documented (see module-level docs).
     pub async fn verify(&self, cleartext: &str) -> Result<Option<VerifiedApiKey>, AuthError> {
