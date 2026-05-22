@@ -16,6 +16,8 @@ pub mod canonical;
 pub mod canonical_tool;
 pub mod date;
 pub mod date_tools;
+pub mod dictionaries;
+pub mod dictionary_tools;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;
@@ -55,4 +57,14 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(SolarTermForDateTool)
         .register(IsNationalHolidayTool)
         .register(CanonicalCityDistrictTool)
+        .register(dictionary_tools::ADMIN_DIVISION_GET_TOOL)
+        .register(dictionary_tools::ADMIN_DIVISION_SEARCH_TOOL)
+        .register(dictionary_tools::MRT_STATION_GET_TOOL)
+        .register(dictionary_tools::MRT_STATION_SEARCH_TOOL)
+        .register(dictionary_tools::BANK_CODE_GET_TOOL)
+        .register(dictionary_tools::BANK_CODE_SEARCH_TOOL)
+        .register(dictionary_tools::POSTAL_CODE_GET_TOOL)
+        .register(dictionary_tools::POSTAL_CODE_SEARCH_TOOL)
+        .register(dictionary_tools::COUNTY_CODE_GET_TOOL)
+        .register(dictionary_tools::COUNTY_CODE_SEARCH_TOOL)
 }
