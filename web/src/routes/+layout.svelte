@@ -46,6 +46,7 @@
 		{isMenuOpen}
 		onToggleMenu={toggleMenu}
 		mode={data.mode}
+		user={data.user}
 		{locale}
 		onLocaleChange={setLocale}
 	/>
