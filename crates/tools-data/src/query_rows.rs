@@ -259,7 +259,9 @@ impl QueryRowsTool {
             Err(_) => {
                 tracing::warn!(
                     slug = %cache.slug,
-                    timeout_secs = RECORDER_TIMEOUT.as_secs(),
+                    // Log milliseconds, not seconds — RECORDER_TIMEOUT
+                    // is 500ms and as_secs() truncates to 0.
+                    timeout_ms = u64::try_from(RECORDER_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
                     "query_rows usage recording timed out (telemetry only)",
                 );
             }
