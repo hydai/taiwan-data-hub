@@ -12,6 +12,8 @@
 //! for `serde_json::Value` round-trips.
 
 pub mod address;
+pub mod canonical;
+pub mod canonical_tool;
 pub mod date;
 pub mod date_tools;
 pub mod national_id;
@@ -20,6 +22,9 @@ pub mod passport;
 pub mod tax_id;
 pub mod validate_id_tool;
 
+pub use canonical_tool::{
+    CanonicalCityDistrictTool, TOOL_NAME as TW_CANONICAL_CITY_DISTRICT_TOOL_NAME,
+};
 pub use date_tools::{
     GregorianToLunarTool, GregorianToRocTool, IsNationalHolidayTool, RocToGregorianTool,
     SolarTermForDateTool, TOOL_GREGORIAN_TO_LUNAR as TW_GREGORIAN_TO_LUNAR_TOOL_NAME,
@@ -49,4 +54,5 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(GregorianToLunarTool)
         .register(SolarTermForDateTool)
         .register(IsNationalHolidayTool)
+        .register(CanonicalCityDistrictTool)
 }

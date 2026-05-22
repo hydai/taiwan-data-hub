@@ -153,7 +153,7 @@ pub fn normalize_address(input: &str) -> AddressParts {
 /// longest entry first so prefix-matching is deterministic when a
 /// shorter prefix could otherwise win (e.g. 新北市 vs hypothetical
 /// 新北).
-const COUNTIES: &[&str] = &[
+pub const COUNTIES: &[&str] = &[
     "台北市",
     "新北市",
     "桃園市",
@@ -180,7 +180,7 @@ const COUNTIES: &[&str] = &[
 
 /// Pre-改制 county names that map to the post-改制 canonical form.
 /// Keyed on the input form, valued on the canonical form.
-const COUNTY_ALIASES: &[(&str, &str)] = &[
+pub const COUNTY_ALIASES: &[(&str, &str)] = &[
     ("台中縣", "台中市"),
     ("台南縣", "台南市"),
     ("高雄縣", "高雄市"),
@@ -198,6 +198,14 @@ const COUNTY_ALIASES: &[(&str, &str)] = &[
     ("臺東縣", "台東縣"),
     ("臺北縣", "新北市"),
 ];
+
+/// Public alias for [`strip_county_prefix`] used by sibling
+/// modules (e.g. `canonical`). Renamed `*_exact` to flag that
+/// the function is sensitive to the exact prefix bytes (no
+/// district peeling).
+pub fn strip_county_prefix_exact(s: &str) -> Option<(&str, &'static str, &str)> {
+    strip_county_prefix(s)
+}
 
 /// Try to match a county prefix on `s` (longest-first). On hit,
 /// returns the raw matched string, the canonical normalised form,
