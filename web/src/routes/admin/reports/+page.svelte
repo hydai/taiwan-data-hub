@@ -21,9 +21,20 @@
 		// Explicit NaN check + raw-string fallback gives
 		// the moderator UI a stable display when a
 		// timestamp ever drifts off-shape.
+		//
+		// Locale + timezone are pinned to match
+		// `/admin/moderation` (and the comment thread) so
+		// the SSR-rendered string doesn't shift on hydration.
 		const d = new Date(iso);
 		if (Number.isNaN(d.getTime())) return iso;
-		return d.toLocaleString();
+		return d.toLocaleString('zh-TW', {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			timeZone: 'Asia/Taipei'
+		});
 	}
 </script>
 

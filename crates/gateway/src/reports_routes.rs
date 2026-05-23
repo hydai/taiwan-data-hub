@@ -194,6 +194,7 @@ async fn submit_report(
         Err(ReportDenialReason::BodyTooLong) => Err(ApiError::Validation(format!(
             "body too long (max {REPORT_BODY_MAX_LEN} characters)"
         ))),
+        Err(ReportDenialReason::TargetNotFound) => Err(ApiError::NotFound),
     }
 }
 

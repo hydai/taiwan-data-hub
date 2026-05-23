@@ -72,12 +72,15 @@ CREATE INDEX reports_open_created_idx
 CREATE INDEX reports_reporter_created_idx
     ON reports (reporter_id, created_at DESC);
 
--- Aggregation path — "how many distinct reporters has
+-- Aggregation path — "how many UNRESOLVED reporters has
 -- this (kind, id) accumulated?" — drives the auto-hide
--- check. Covers WHERE target_kind = $1 AND target_id =
--- $2 efficiently without a sort.
-CREATE INDEX reports_target_idx
-    ON reports (target_kind, target_id);
+-- threshold check on every insert. Partial predicate
+-- matches the query exactly, so the per-target COUNT
+-- stays index-only as resolved reports accumulate over
+-- the lifetime of a target.
+CREATE INDEX reports_unresolved_target_idx
+    ON reports (target_kind, target_id)
+    WHERE resolved_at IS NULL;
 
 COMMENT ON TABLE reports IS
     'Per-(reporter, target) flag rows. UNIQUE forbids piling on; auto-hide threshold enforced by auth::ReportService.';

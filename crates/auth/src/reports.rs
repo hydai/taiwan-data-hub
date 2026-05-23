@@ -42,6 +42,11 @@ pub const REPORT_BODY_MAX_LEN: usize = 2048;
 pub enum ReportDenialReason {
     /// Optional body exceeded [`REPORT_BODY_MAX_LEN`].
     BodyTooLong,
+    /// The `(target_kind, target_id)` row doesn't exist
+    /// (or was deleted out from under the report). Gateway
+    /// maps to 404 so a fat-fingered UUID doesn't pollute
+    /// the moderator queue.
+    TargetNotFound,
 }
 
 /// Why a moderator-side resolution failed.
@@ -98,7 +103,7 @@ impl ReportService {
         {
             return Ok(Err(ReportDenialReason::BodyTooLong));
         }
-        let outcome = self
+        match self
             .repo
             .insert(
                 NewReport {
@@ -111,8 +116,18 @@ impl ReportService {
                 },
                 REPORT_AUTO_HIDE_THRESHOLD,
             )
-            .await?;
-        Ok(Ok(outcome))
+            .await
+        {
+            Ok(outcome) => Ok(Ok(outcome)),
+            // The repo emits InvalidArgument when the
+            // probe inside the transaction can't find the
+            // target row. Surface as a typed denial so the
+            // gateway maps it to 404 instead of 500.
+            Err(storage::StorageError::InvalidArgument(_)) => {
+                Ok(Err(ReportDenialReason::TargetNotFound))
+            }
+            Err(other) => Err(other.into()),
+        }
     }
 
     /// Moderator queue. Caller must have already passed

@@ -27,6 +27,20 @@ struct ReportStore {
     /// Tracks the targets the fake has hidden so tests
     /// can assert the side-effect.
     hidden_targets: Mutex<Vec<(ReportTargetKind, Uuid)>>,
+    /// Set of `(kind, id)` pairs the fake recognises as
+    /// existing comment/submission rows. Mirrors the
+    /// production existence probe inside `insert`. Tests
+    /// register targets via `register_target` before
+    /// reporting so the happy paths succeed; the
+    /// `rejects_unknown_target` test deliberately skips
+    /// the registration to exercise the denial.
+    known_targets: Mutex<Vec<(ReportTargetKind, Uuid)>>,
+}
+
+impl ReportStore {
+    fn register_target(&self, kind: ReportTargetKind, id: Uuid) {
+        self.known_targets.lock().unwrap().push((kind, id));
+    }
 }
 
 #[async_trait]
@@ -36,6 +50,18 @@ impl ReportRepo for ReportStore {
         new: NewReport,
         auto_hide_threshold: i64,
     ) -> Result<ReportInsertOutcome, StorageError> {
+        if !self
+            .known_targets
+            .lock()
+            .unwrap()
+            .contains(&(new.target_kind, new.target_id))
+        {
+            return Err(StorageError::InvalidArgument(format!(
+                "{} target {} does not exist",
+                new.target_kind.as_str(),
+                new.target_id
+            )));
+        }
         let mut inner = self.rows.lock().unwrap();
         let existing_id = inner
             .iter()
@@ -186,13 +212,23 @@ fn make_service() -> (Arc<ReportStore>, ReportService) {
     (repo, svc)
 }
 
+/// Mint a UUID and register it as a known target in the
+/// fake. Use this in tests that need a successful submit
+/// path. The `rejects_unknown_target` test calls
+/// `Uuid::now_v7()` directly to exercise the denial.
+fn make_target(repo: &Arc<ReportStore>, kind: ReportTargetKind) -> Uuid {
+    let id = Uuid::now_v7();
+    repo.register_target(kind, id);
+    id
+}
+
 // === Tests ===
 
 #[tokio::test]
 async fn submit_round_trips_and_dedups_per_reporter() {
-    let (_repo, svc) = make_service();
+    let (repo, svc) = make_service();
     let reporter = Uuid::now_v7();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let first = svc
         .submit(
             reporter,
@@ -228,7 +264,7 @@ async fn submit_round_trips_and_dedups_per_reporter() {
 #[tokio::test]
 async fn keep_clears_auto_hide() {
     let (repo, svc) = make_service();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let mut last_report_id = None;
     for _ in 0..REPORT_AUTO_HIDE_THRESHOLD {
         let outcome = svc
@@ -273,7 +309,7 @@ async fn keep_clears_auto_hide() {
 #[tokio::test]
 async fn unresolved_count_is_the_threshold() {
     let (repo, svc) = make_service();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let mut report_ids = Vec::new();
     for _ in 0..REPORT_AUTO_HIDE_THRESHOLD {
         let outcome = svc
@@ -319,7 +355,7 @@ async fn unresolved_count_is_the_threshold() {
 #[tokio::test]
 async fn auto_hide_trips_on_threshold() {
     let (repo, svc) = make_service();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     for i in 0..REPORT_AUTO_HIDE_THRESHOLD {
         let reporter = Uuid::now_v7();
         let outcome = svc
@@ -358,13 +394,14 @@ async fn auto_hide_trips_on_threshold() {
 
 #[tokio::test]
 async fn body_too_long_is_denial() {
-    let (_repo, svc) = make_service();
+    let (repo, svc) = make_service();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let too_long = "x".repeat(auth::REPORT_BODY_MAX_LEN + 1);
     let outcome = svc
         .submit(
             Uuid::now_v7(),
             ReportTargetKind::Comment,
-            Uuid::now_v7(),
+            target,
             ReportReason::Spam,
             Some(too_long),
         )
@@ -375,11 +412,12 @@ async fn body_too_long_is_denial() {
 
 #[tokio::test]
 async fn blank_body_normalizes_to_none() {
-    let (_repo, svc) = make_service();
+    let (repo, svc) = make_service();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     svc.submit(
         Uuid::now_v7(),
         ReportTargetKind::Comment,
-        Uuid::now_v7(),
+        target,
         ReportReason::Spam,
         Some("   ".into()),
     )
@@ -393,10 +431,29 @@ async fn blank_body_normalizes_to_none() {
 }
 
 #[tokio::test]
+async fn rejects_unknown_target() {
+    let (_repo, svc) = make_service();
+    // Deliberately NOT calling `make_target` — the target
+    // is just a random UUID that doesn't match any
+    // comment / submission row.
+    let outcome = svc
+        .submit(
+            Uuid::now_v7(),
+            ReportTargetKind::Comment,
+            Uuid::now_v7(),
+            ReportReason::Spam,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome.unwrap_err(), ReportDenialReason::TargetNotFound);
+}
+
+#[tokio::test]
 async fn resolve_hide_flips_target() {
     let (repo, svc) = make_service();
     let reporter = Uuid::now_v7();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let outcome = svc
         .submit(
             reporter,
@@ -427,9 +484,9 @@ async fn resolve_hide_flips_target() {
 
 #[tokio::test]
 async fn resolve_already_resolved_returns_not_found() {
-    let (_repo, svc) = make_service();
+    let (repo, svc) = make_service();
     let reporter = Uuid::now_v7();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     let outcome = svc
         .submit(
             reporter,
@@ -454,9 +511,9 @@ async fn resolve_already_resolved_returns_not_found() {
 
 #[tokio::test]
 async fn resolve_delete_on_submission_rejected_at_service() {
-    let (_repo, svc) = make_service();
+    let (repo, svc) = make_service();
     let reporter = Uuid::now_v7();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Submission);
     let outcome = svc
         .submit(
             reporter,
@@ -487,7 +544,7 @@ async fn resolve_delete_on_submission_rejected_at_service() {
 async fn resolved_report_is_immutable_via_resubmit() {
     let (repo, svc) = make_service();
     let reporter = Uuid::now_v7();
-    let target = Uuid::now_v7();
+    let target = make_target(&repo, ReportTargetKind::Comment);
     // 1) File initial report.
     let first = svc
         .submit(
@@ -531,9 +588,9 @@ async fn resolved_report_is_immutable_via_resubmit() {
 
 #[tokio::test]
 async fn list_open_returns_oldest_first() {
-    let (_repo, svc) = make_service();
-    let target_a = Uuid::now_v7();
-    let target_b = Uuid::now_v7();
+    let (repo, svc) = make_service();
+    let target_a = make_target(&repo, ReportTargetKind::Comment);
+    let target_b = make_target(&repo, ReportTargetKind::Comment);
     let first = svc
         .submit(
             Uuid::now_v7(),

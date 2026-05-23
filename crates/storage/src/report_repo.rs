@@ -283,6 +283,31 @@ impl ReportRepo for Storage {
         auto_hide_threshold: i64,
     ) -> Result<InsertOutcome, StorageError> {
         let mut tx = self.pool().begin().await?;
+        // Verify the target row exists. The polymorphic
+        // `(target_kind, target_id)` shape rules out a
+        // hard FK, so a missing target would otherwise
+        // pollute the moderator queue (and the auto-hide
+        // UPDATE would silently affect 0 rows). The probe
+        // shares the transaction with the insert so a
+        // race against a concurrent target delete still
+        // produces a typed error rather than a phantom
+        // report row.
+        let target_table = match new.target_kind {
+            ReportTargetKind::Comment => "comments",
+            ReportTargetKind::Submission => "submissions",
+        };
+        let probe_sql = format!("SELECT 1 FROM {target_table} WHERE id = $1");
+        let exists = sqlx::query(&probe_sql)
+            .bind(new.target_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if exists.is_none() {
+            return Err(StorageError::InvalidArgument(format!(
+                "{} target {} does not exist",
+                new.target_kind.as_str(),
+                new.target_id
+            )));
+        }
         // Insert the report. ON CONFLICT keeps the
         // existing row so the moderator queue stays
         // de-duped, and the CASE WHEN guards make a
