@@ -338,7 +338,15 @@ function snapshot(form: FormData): Record<string, string> {
 					? SUBMISSION_FIELD_LIMITS.url
 					: SUBMISSION_FIELD_LIMITS.name) * 1.1
 		);
-		out[name] = raw.length > limit ? raw.slice(0, limit) : raw;
+		// Clamp by Unicode scalar values to match the
+		// preflight + Rust validator. A `raw.slice(0, limit)`
+		// would (a) count UTF-16 code units (so emoji etc. get
+		// limited to half the intended cap) and (b) risk
+		// splitting a surrogate pair, producing a malformed
+		// string in the echo. The `[...raw]` iterator yields
+		// scalar values and `join('')` reassembles them safely.
+		const scalars = [...raw];
+		out[name] = scalars.length > limit ? scalars.slice(0, limit).join('') : raw;
 	}
 	return out;
 }
