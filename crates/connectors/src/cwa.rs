@@ -15,7 +15,7 @@
 //!   from CWA's automated stations across the country.
 //! - **一般天氣預報 — 今明 36 小時天氣預報** (dataset
 //!   `F-C0032-001`) — county-level 36-hour outlook.
-//! - **颱風路徑** (dataset `W-C0034-001`) — active and recent
+//! - **颱風路徑** (dataset `W-C0034-005`) — active and recent
 //!   typhoon track polylines.
 //!
 //! All three carry `upstream_categories = ["環境"]` so the
@@ -234,6 +234,26 @@ impl CwaConnector {
             return Err(crate::ConnectorError::Config(format!(
                 "path {:?} disallowed by robots.txt",
                 url.path(),
+            )));
+        }
+        // Refuse to inject if the caller's path already
+        // carries an `Authorization` query parameter — two
+        // values would land on the wire and upstream's
+        // first-wins-vs-last-wins behaviour decides which
+        // key gets used. Silently stripping would mask a
+        // real misconfiguration (e.g. a stale key copied
+        // from somewhere); rejecting forces the caller to
+        // look at their `path`. Case-insensitive match in
+        // case a caller spells it `authorization` even
+        // though CWA itself requires the capital-A form.
+        if url
+            .query_pairs()
+            .any(|(k, _)| k.eq_ignore_ascii_case(API_KEY_QUERY_PARAM))
+        {
+            return Err(crate::ConnectorError::Config(format!(
+                "path {path:?} already specifies an {API_KEY_QUERY_PARAM:?} query \
+                 parameter — the connector injects the API key automatically and \
+                 refuses to send a duplicate"
             )));
         }
         // Inject the API key as a query parameter. Done after
@@ -908,6 +928,54 @@ mod tests {
             .expect_err("absolute URL must be rejected");
         assert!(
             matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("://")),
+            "got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn polite_get_rejects_path_with_duplicate_authorization_param() {
+        // If a caller's path already carries `Authorization`,
+        // appending the connector's key would put two values
+        // on the wire — upstream's first-wins-vs-last-wins
+        // behaviour decides which key gets used. We reject
+        // loudly rather than silently strip so a real
+        // misconfiguration surfaces immediately.
+        let connector = CwaConnector::builder()
+            .base_url("https://example.test")
+            .api_key("test-key")
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let err = connector
+            .polite_get("/api/v1/rest/datastore/O-A0001-001?Authorization=stale-key")
+            .await
+            .expect_err("duplicate Authorization must be rejected");
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("Authorization")),
+            "got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn polite_get_rejects_duplicate_authorization_case_insensitively() {
+        // CWA itself requires the capital-A form, but if a
+        // caller spells it `authorization` lowercase, we
+        // still want to refuse — the case mismatch would
+        // otherwise let the duplicate land on the wire.
+        let connector = CwaConnector::builder()
+            .base_url("https://example.test")
+            .api_key("test-key")
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let err = connector
+            .polite_get("/api/v1/rest/datastore/O-A0001-001?authorization=stale-key")
+            .await
+            .expect_err("case-mismatched duplicate must still be rejected");
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("Authorization")),
             "got {err:?}",
         );
     }
