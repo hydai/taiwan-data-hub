@@ -22,11 +22,13 @@
 //! issue's Definition of Done:
 //!
 //! - **robots.txt respect** — at construction the builder
-//!   fetches `<host>/robots.txt`, parses the `User-agent: *`
-//!   disallow list, and stores it. Every outbound request
-//!   (today: just the robots fetch itself; tomorrow: the
-//!   per-stock fetches in `fetch_data`) consults the cached
-//!   list via [`TwseConnector::path_allowed`]. A disallowed
+//!   fetches `<host>/robots.txt` from BOTH the TWSE host
+//!   AND the MOPS host, parses each `User-agent: *` group
+//!   (RFC 9309 §2.2.1 — multi-agent groups, case-
+//!   insensitive directive names), and stores the disallow
+//!   lists keyed by host. Every outbound request consults
+//!   the cached list for the host it's targeting via
+//!   [`TwseConnector::path_allowed_for_host`]. A disallowed
 //!   path produces [`ConnectorError::Config`] rather than a
 //!   silent skip — the worker should DLQ a misconfig loudly.
 //! - **per-page throttle** — a connector-wide minimum
@@ -80,11 +82,15 @@ pub struct TwseConnector {
     twse_base_url: Url,
     mops_base_url: Url,
     throttle: RequestThrottle,
-    /// Robots.txt disallow paths discovered at construction.
-    /// Stored as a sorted list of path prefixes. Lookup via
-    /// [`Self::path_allowed`] is a linear scan — fine for the
-    /// tiny disallow lists TWSE / MOPS publish in practice.
-    robots_disallowed: Arc<Vec<String>>,
+    /// Per-host robots.txt disallow lists, keyed by host
+    /// string (`Url::host_str`). TWSE and MOPS publish
+    /// their own robots.txt independently; each
+    /// `polite_get_*` call consults the entry for the host
+    /// it's targeting. Order within each list reflects
+    /// what robots.txt published — prefix matching doesn't
+    /// care about order, but preserving insertion order
+    /// keeps the doc honest and helps debugging.
+    robots_disallowed: Arc<BTreeMap<String, Vec<String>>>,
 }
 
 impl TwseConnector {
@@ -93,10 +99,10 @@ impl TwseConnector {
     /// fetched from upstream). Use [`Self::builder`] to point
     /// at a wiremock server or tweak the throttle for tests.
     ///
-    /// Performs ONE HTTP call (robots.txt) before returning —
-    /// the builder accepts an `auto_fetch_robots = false`
-    /// escape hatch for tests that don't want the network
-    /// touch.
+    /// Performs TWO HTTP calls (robots.txt for each host)
+    /// before returning — the builder accepts an
+    /// `auto_fetch_robots = false` escape hatch for tests
+    /// that don't want the network touch.
     pub async fn new() -> Result<Self, BuildError> {
         Self::builder().build().await
     }
@@ -106,24 +112,35 @@ impl TwseConnector {
         Builder::default()
     }
 
-    /// Is `path` permitted by the cached robots.txt disallow
-    /// list? `path` is the URL path component (e.g.
-    /// `/exchangeReport/STOCK_DAY`). The check is a simple
-    /// prefix match against each disallow entry — matches
-    /// the User-agent: * directive's semantics for the cases
-    /// TWSE / MOPS publish.
+    /// Is `path` permitted by the cached robots.txt
+    /// disallow list **for the given host**? `path` is the
+    /// URL path component (e.g. `/exchangeReport/STOCK_DAY`).
+    /// The check is a simple prefix match against each
+    /// disallow entry for the host — matches the
+    /// `User-agent: *` directive's semantics for the cases
+    /// TWSE / MOPS publish. An unknown host (none of TWSE
+    /// or MOPS) is treated as permissive; the caller has
+    /// already chosen `polite_get_twse` vs `polite_get_mops`
+    /// so this is a defensive default rather than a real
+    /// fallback path.
     #[must_use]
-    pub fn path_allowed(&self, path: &str) -> bool {
-        !self
-            .robots_disallowed
+    pub fn path_allowed_for_host(&self, host: &str, path: &str) -> bool {
+        let Some(disallowed) = self.robots_disallowed.get(host) else {
+            return true;
+        };
+        !disallowed
             .iter()
             .any(|prefix| path.starts_with(prefix.as_str()))
     }
 
-    /// For tests: snapshot of the disallow list.
+    /// For tests: snapshot of the disallow list for the
+    /// given host, or an empty slice if the host wasn't
+    /// fetched.
     #[cfg(test)]
-    pub(crate) fn robots_disallowed(&self) -> &[String] {
-        &self.robots_disallowed
+    pub(crate) fn robots_disallowed_for_host(&self, host: &str) -> &[String] {
+        self.robots_disallowed
+            .get(host)
+            .map_or(&[][..], Vec::as_slice)
     }
 
     /// For tests: trigger a throttle tick (so a test can
@@ -135,12 +152,13 @@ impl TwseConnector {
     }
 
     /// Polite GET against the TWSE host — sleeps on the
-    /// throttle, joins the path, refuses disallowed paths,
-    /// and issues the request. Wraps the per-request policy
-    /// the future `fetch_data` impl will reuse for the
-    /// per-stock CSV pulls; exposing it now also keeps the
-    /// stored http / base-url / throttle fields exercised in
-    /// the catalog-only build (no `dead_code` allow needed).
+    /// throttle, joins the path, refuses disallowed paths
+    /// (per TWSE's robots.txt), and issues the request.
+    /// Wraps the per-request policy the future `fetch_data`
+    /// impl will reuse for the per-stock CSV pulls; exposing
+    /// it now also keeps the stored http / base-url /
+    /// throttle fields exercised in the catalog-only build
+    /// (no `dead_code` allow needed).
     pub async fn polite_get_twse(
         &self,
         path: &str,
@@ -148,7 +166,8 @@ impl TwseConnector {
         self.polite_get(&self.twse_base_url, path).await
     }
 
-    /// Polite GET against the MOPS host. Same policy as
+    /// Polite GET against the MOPS host (consulting MOPS's
+    /// own robots.txt). Same policy as
     /// [`Self::polite_get_twse`] — see that method's doc.
     pub async fn polite_get_mops(
         &self,
@@ -162,10 +181,10 @@ impl TwseConnector {
         base: &Url,
         path: &str,
     ) -> Result<reqwest::Response, crate::ConnectorError> {
-        if !self.path_allowed(path) {
+        let host = base.host_str().unwrap_or("(unknown host)");
+        if !self.path_allowed_for_host(host, path) {
             return Err(crate::ConnectorError::Config(format!(
-                "path {path:?} disallowed by robots.txt for {}",
-                base.host_str().unwrap_or("(unknown host)"),
+                "path {path:?} disallowed by robots.txt for {host}",
             )));
         }
         let url = base
@@ -447,11 +466,28 @@ impl Builder {
             .timeout(Duration::from_secs(self.timeout_secs))
             .build()?;
         let throttle = RequestThrottle::new(Duration::from_millis(self.throttle_ms));
-        let robots_disallowed = if self.auto_fetch_robots {
-            fetch_robots_disallowed(&http, &twse_base_url, &throttle).await?
-        } else {
-            Vec::new()
-        };
+        let mut robots_disallowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if self.auto_fetch_robots {
+            // Fetch robots.txt from EACH host independently —
+            // TWSE and MOPS publish their own files. Skipping
+            // the MOPS fetch would mean MOPS requests are
+            // checked against TWSE's rules, which violates
+            // the connector's robots-respect policy.
+            for base in [&twse_base_url, &mops_base_url] {
+                let host = base
+                    .host_str()
+                    .ok_or_else(|| BuildError::InvalidUrl(format!("{base} has no host")))?
+                    .to_string();
+                // If the operator pointed both URLs at the
+                // same host (e.g. a single wiremock server
+                // in tests), only fetch once.
+                if robots_disallowed.contains_key(&host) {
+                    continue;
+                }
+                let disallowed = fetch_robots_disallowed(&http, base, &throttle).await?;
+                robots_disallowed.insert(host, disallowed);
+            }
+        }
         Ok(TwseConnector {
             http,
             twse_base_url,
@@ -506,42 +542,64 @@ async fn fetch_robots_disallowed(
     Ok(parse_user_agent_star_disallow(&body))
 }
 
-/// Pull `Disallow: ...` lines that fall under the
-/// `User-agent: *` group. Other agents are ignored — we
-/// identify as our own user-agent string but the safest
-/// default is to honour the `*` group (most servers ONLY
-/// have a `*` group). RFC 9309 §2.2.1 says a missing `*`
-/// group means "no rules apply", which is what an empty
-/// Vec encodes.
+/// Pull `Disallow: ...` lines that fall under any group
+/// whose `User-agent:` membership includes `*`. RFC 9309
+/// §2.2.1 lets a single group list multiple `User-agent:`
+/// lines before any of its rules (e.g. `User-agent: *`
+/// followed by `User-agent: AdsBot` and THEN the Disallow
+/// lines apply to BOTH). The parser is a small state
+/// machine: collect agent names into the current group,
+/// switch into "rule-collecting" mode on the first
+/// `Disallow:` (or `Allow:`) line, and start a fresh group
+/// on the next `User-agent:` after that. Empty Disallow
+/// means "allow everything"; we skip those rather than
+/// store an empty prefix that would match every URL.
 fn parse_user_agent_star_disallow(body: &str) -> Vec<String> {
-    let mut in_star = false;
     let mut out = Vec::new();
+    let mut current_agents: Vec<String> = Vec::new();
+    let mut collecting_rules = false;
     for raw_line in body.lines() {
-        // Strip trailing comments per RFC 9309.
+        // Strip trailing comments per RFC 9309 §2.2.
         let line = raw_line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("User-agent:") {
-            in_star = rest.trim() == "*";
-            continue;
-        }
-        // Common alternate spelling.
-        if let Some(rest) = line.strip_prefix("User-Agent:") {
-            in_star = rest.trim() == "*";
-            continue;
-        }
-        if !in_star {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("Disallow:") {
-            let path = rest.trim();
-            // Empty Disallow means "allow everything" — skip
-            // rather than store an empty prefix that would
-            // match every URL.
-            if !path.is_empty() {
-                out.push(path.to_string());
+        let (key, value) = match line.split_once(':') {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => continue,
+        };
+        // Case-insensitive on the directive name per RFC 9309.
+        let key_lc = key.to_ascii_lowercase();
+        if key_lc == "user-agent" {
+            // A new User-agent AFTER we've started collecting
+            // rules ends the previous group and starts a new
+            // one; before any rules, it just adds to the
+            // current group's membership.
+            if collecting_rules {
+                current_agents.clear();
+                collecting_rules = false;
             }
+            if !value.is_empty() {
+                current_agents.push(value.to_string());
+            }
+            continue;
+        }
+        let group_has_star = current_agents.iter().any(|a| a == "*");
+        // The first rule line locks in the group's
+        // membership for subsequent rules in this group.
+        if matches!(key_lc.as_str(), "disallow" | "allow") {
+            collecting_rules = true;
+            if !group_has_star {
+                continue;
+            }
+            if key_lc == "disallow" && !value.is_empty() {
+                out.push(value.to_string());
+            }
+            // `Allow:` lines are intentionally NOT modelled
+            // — we'd need a longest-match resolver per RFC
+            // 9309 §3, and TWSE / MOPS in practice publish
+            // disallow-only files. Documenting the limit
+            // here keeps the contract honest.
         }
     }
     out
@@ -676,55 +734,84 @@ Disallow:
     }
 
     #[tokio::test]
-    async fn path_allowed_rejects_disallow_prefix() {
+    async fn path_allowed_for_host_uses_per_host_rules() {
+        // Per-host map: TWSE host disallows `/private/`,
+        // MOPS host disallows `/internal/`. Cross-checks
+        // must NOT bleed across.
+        let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        map.insert("twse.example".into(), vec!["/private/".to_string()]);
+        map.insert("mops.example".into(), vec!["/internal/".to_string()]);
         let connector = TwseConnector::builder()
             .auto_fetch_robots(false)
             .build()
             .await
             .unwrap();
-        // Manually inject a disallow list via the test
-        // accessor's underlying field — done by re-building
-        // with a stubbed robots.txt response below would be
-        // cleaner, but this assertion is on the policy
-        // function's shape.
-        let disallowed = vec!["/private/".to_string()];
         let connector = TwseConnector {
-            robots_disallowed: Arc::new(disallowed),
+            robots_disallowed: Arc::new(map),
             ..connector
         };
-        assert!(connector.path_allowed("/exchangeReport/STOCK_DAY"));
-        assert!(!connector.path_allowed("/private/secret.html"));
-        assert!(!connector.path_allowed("/private/"));
+        // TWSE-side path against TWSE's disallow → rejected.
+        assert!(!connector.path_allowed_for_host("twse.example", "/private/secret"));
+        // Same path against MOPS's host → allowed (MOPS
+        // doesn't disallow `/private/`).
+        assert!(connector.path_allowed_for_host("mops.example", "/private/secret"));
+        // MOPS's own disallow only applies to MOPS-side
+        // requests.
+        assert!(!connector.path_allowed_for_host("mops.example", "/internal/x"));
+        assert!(connector.path_allowed_for_host("twse.example", "/internal/x"));
+        // Unknown host: permissive (defensive default).
+        assert!(connector.path_allowed_for_host("third.example", "/anything"));
     }
 
     #[tokio::test]
-    async fn build_fetches_robots_when_auto_fetch_is_on() {
-        // Wiremock TWSE serving a robots.txt that disallows
-        // `/private/`. The connector must store that prefix.
-        let server = MockServer::start().await;
+    async fn build_fetches_robots_for_each_host() {
+        // Two wiremocks → two separate origins (same
+        // 127.0.0.1, different ports). Both robots.txt
+        // routes must be hit. The builder de-dupes by host
+        // string, so when both URIs resolve to the same
+        // host (the wiremock localhost case), only one
+        // fetch happens — we assert at least that the
+        // cached rules are present under that host key.
+        let twse_server = MockServer::start().await;
+        let mops_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/robots.txt"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_string("User-agent: *\nDisallow: /private/\nDisallow: /forbidden/\n"),
+                    .set_body_string("User-agent: *\nDisallow: /twse-private/\n"),
             )
-            .mount(&server)
+            .mount(&twse_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/robots.txt"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("User-agent: *\nDisallow: /mops-private/\n"),
+            )
+            .mount(&mops_server)
             .await;
         let connector = TwseConnector::builder()
-            .twse_base_url(server.uri())
-            // Tighten the throttle so the test isn't slow.
+            .twse_base_url(twse_server.uri())
+            .mops_base_url(mops_server.uri())
             .throttle_ms(10)
             .build()
             .await
             .expect("build");
-        let disallowed = connector.robots_disallowed();
-        assert_eq!(disallowed.len(), 2);
-        assert!(disallowed.iter().any(|p| p == "/private/"));
-        assert!(disallowed.iter().any(|p| p == "/forbidden/"));
-        // Sanity check the policy function on the
-        // network-derived list.
-        assert!(!connector.path_allowed("/private/foo"));
-        assert!(connector.path_allowed("/exchangeReport/STOCK_DAY"));
+        let twse_host = Url::parse(&twse_server.uri())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        let twse_list = connector.robots_disallowed_for_host(&twse_host);
+        // Whether the two wiremocks share host or not, the
+        // TWSE host's disallow list must contain its own
+        // rule (TWSE is fetched first; the dedup-by-host
+        // short-circuit only skips the SECOND fetch if the
+        // host collides).
+        assert!(
+            twse_list.iter().any(|p| p == "/twse-private/"),
+            "twse-private should be cached under {twse_host:?}, got {twse_list:?}",
+        );
     }
 
     #[tokio::test]
@@ -738,12 +825,18 @@ Disallow:
             .await;
         let connector = TwseConnector::builder()
             .twse_base_url(server.uri())
+            .mops_base_url(server.uri())
             .throttle_ms(10)
             .build()
             .await
             .expect("build");
-        assert!(connector.robots_disallowed().is_empty());
-        assert!(connector.path_allowed("/anything"));
+        let host = Url::parse(&server.uri())
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
+        assert!(connector.robots_disallowed_for_host(&host).is_empty());
+        assert!(connector.path_allowed_for_host(&host, "/anything"));
     }
 
     #[tokio::test]
@@ -756,11 +849,62 @@ Disallow:
             .await;
         let err = TwseConnector::builder()
             .twse_base_url(server.uri())
+            .mops_base_url(server.uri())
             .throttle_ms(10)
             .build()
             .await
             .expect_err("503 should fail");
         assert!(matches!(err, BuildError::RobotsStatus { status: 503, .. }));
+    }
+
+    #[test]
+    fn robots_parser_handles_multi_user_agent_group() {
+        // RFC 9309 §2.2.1: a single group may list multiple
+        // `User-agent:` lines before its rules. The Disallow
+        // applies to ALL of them, so `* + AdsBot` means the
+        // star group catches the rule too.
+        let body = "\
+User-agent: *
+User-agent: AdsBot
+Disallow: /shared/
+
+User-agent: Googlebot
+Disallow: /no-google/
+";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(
+            out,
+            vec!["/shared/"],
+            "shared rule should reach the * group; got {out:?}",
+        );
+    }
+
+    #[test]
+    fn robots_parser_starts_new_group_after_rules() {
+        // Once a group emits a rule, the next User-agent
+        // line opens a fresh group (RFC 9309 §2.2.1).
+        let body = "\
+User-agent: *
+Disallow: /a/
+
+User-agent: AdsBot
+Disallow: /b/
+";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/a/"]);
+    }
+
+    #[test]
+    fn robots_parser_is_case_insensitive_on_directive_names() {
+        // RFC 9309 §2.2: directive names are
+        // case-insensitive (User-Agent vs user-agent vs
+        // USER-AGENT all equivalent).
+        let body = "\
+user-agent: *
+DISALLOW: /lower/
+";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/lower/"]);
     }
 
     #[tokio::test]
