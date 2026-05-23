@@ -286,4 +286,13 @@ mod tests {
         let (_, desc) = validate_inputs("ok", Some("   ")).unwrap();
         assert!(desc.is_none());
     }
+
+    #[test]
+    fn long_description_rejected() {
+        let too_long: String = "x".repeat(COLLECTION_DESCRIPTION_MAX_LEN + 1);
+        assert_eq!(
+            validate_inputs("ok", Some(&too_long)).unwrap_err(),
+            InputError::DescriptionTooLong
+        );
+    }
 }

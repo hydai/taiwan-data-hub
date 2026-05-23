@@ -74,12 +74,13 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 			});
 			if (res.ok) {
 				// Run the response through the same runtime
-				// narrower the account page uses so a shape
-				// drift here can't throw an unchecked TypeError
-				// from `.some(...)` and bubble up to the outer
-				// catch as a noisy 500 trace. A `null` parse
-				// degrades to "not bookmarked" — same outcome
-				// as a network failure, no extra branch needed.
+				// narrower that the account page uses so a
+				// shape drift here can't throw an unchecked
+				// TypeError from `.some(...)` and bubble up
+				// to the outer catch as a noisy 500 trace.
+				// A `null` parse degrades to "not bookmarked"
+				// — same outcome as a network failure, no
+				// extra branch needed.
 				const rows = parseBookmarkArray(await res.json().catch(() => null));
 				if (rows !== null) {
 					bookmarked = rows.some(

@@ -46,10 +46,12 @@ CREATE INDEX bookmarks_user_created_idx
 -- the gateway also hits (the dataset page's pre-paint probe
 -- uses `?kind=dataset`, and the /account/bookmarks tabs
 -- filter the same way). The three-column composite ordered
--- by `created_at DESC` lets Postgres satisfy
+-- by `created_at DESC` lets Postgres satisfy the
 -- `WHERE user_id = $1 AND target_kind = $2 ORDER BY
--- created_at DESC` with an index-only scan as bookmark
--- counts grow.
+-- created_at DESC` filter + sort directly from the index;
+-- the row payload (`id`, `target_id`) is still fetched from
+-- the heap. Add `INCLUDE (id, target_id)` here if a future
+-- profile shows the heap fetch as the hot path.
 CREATE INDEX bookmarks_user_kind_created_idx
     ON bookmarks (user_id, target_kind, created_at DESC);
 
@@ -94,7 +96,7 @@ CREATE TABLE collection_items (
 
 -- "Which collections is this row in?" lookup. The PK above
 -- already covers the (collection_id, …) direction; this
--- partial covers the reverse for the "starred datasets in
+-- index covers the reverse for the "starred datasets in
 -- which folders?" detail page.
 CREATE INDEX collection_items_target_idx
     ON collection_items (target_kind, target_id);
