@@ -58,6 +58,12 @@ impl UserRepo for InMemoryUserRepo {
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError> {
         Ok(self.inner.lock().unwrap().get(&id).cloned())
     }
+    async fn find_user_role(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<storage::UserRole>, StorageError> {
+        Ok(self.inner.lock().unwrap().get(&id).map(|u| u.role))
+    }
     async fn mark_email_verified(&self, id: Uuid) -> Result<bool, StorageError> {
         let mut inner = self.inner.lock().unwrap();
         let Some(user) = inner.get_mut(&id) else {

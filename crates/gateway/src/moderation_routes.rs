@@ -114,6 +114,7 @@ async fn list_pending(
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     svc.require_moderator(session.user_id)
         .await
+        .map_err(ApiError::from)?
         .map_err(ApiError::from_denial)?;
     let kind_filter = match query.kind.as_deref() {
         None | Some("") => None,
@@ -139,6 +140,7 @@ async fn get_submission(
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     svc.require_moderator(session.user_id)
         .await
+        .map_err(ApiError::from)?
         .map_err(ApiError::from_denial)?;
     let id = parse_submission_id(&id)?;
     let row = svc.get(id).await.map_err(ApiError::from)?;
@@ -156,6 +158,7 @@ async fn approve_submission(
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     svc.require_moderator(session.user_id)
         .await
+        .map_err(ApiError::from)?
         .map_err(ApiError::from_denial)?;
     let id = parse_submission_id(&id)?;
     let outcome = svc
@@ -188,6 +191,7 @@ async fn reject_submission(
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     svc.require_moderator(session.user_id)
         .await
+        .map_err(ApiError::from)?
         .map_err(ApiError::from_denial)?;
     let id = parse_submission_id(&id)?;
     let reason = body.reason.unwrap_or_default();

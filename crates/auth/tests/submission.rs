@@ -118,22 +118,24 @@ impl SubmissionRepo for InMemorySubmissionRepo {
     async fn get_for_moderation(&self, _id: Uuid) -> Result<Option<SubmissionRow>, StorageError> {
         unreachable!("author-side submission tests do not exercise the moderation surface")
     }
-    async fn approve(
+    async fn approve_with_audit(
         &self,
         _id: Uuid,
         _mod_id: Uuid,
         _reason: Option<&str>,
+        _audit_metadata: &serde_json::Value,
         _now: DateTime<Utc>,
-    ) -> Result<Option<SubmissionRow>, StorageError> {
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         unreachable!("author-side submission tests do not exercise the moderation surface")
     }
-    async fn reject(
+    async fn reject_with_audit(
         &self,
         _id: Uuid,
         _mod_id: Uuid,
         _reason: &str,
+        _audit_metadata: &serde_json::Value,
         _now: DateTime<Utc>,
-    ) -> Result<Option<SubmissionRow>, StorageError> {
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         unreachable!("author-side submission tests do not exercise the moderation surface")
     }
 }

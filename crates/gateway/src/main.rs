@@ -462,8 +462,7 @@ fn build_auth_router_if_available(
     let session_repo: Arc<dyn storage::SessionRepo> = Arc::new(storage.clone());
     let api_key_repo: Arc<dyn storage::ApiKeyRepo> = Arc::new(storage.clone());
     let submission_repo: Arc<dyn storage::SubmissionRepo> = Arc::new(storage.clone());
-    let user_repo: Arc<dyn storage::UserRepo> = Arc::new(storage.clone());
-    let audit_repo: Arc<dyn storage::AuditLogRepo> = Arc::new(storage);
+    let user_repo: Arc<dyn storage::UserRepo> = Arc::new(storage);
     let session_service = match auth::SessionService::new(session_repo, hmac_key) {
         Ok(svc) => Arc::new(svc),
         Err(e) => {
@@ -476,11 +475,7 @@ fn build_auth_router_if_available(
     };
     let api_key_service = Arc::new(auth::ApiKeyService::new(api_key_repo));
     let submission_service = Arc::new(auth::SubmissionService::new(submission_repo.clone()));
-    let moderation_service = Arc::new(auth::ModerationService::new(
-        submission_repo,
-        user_repo,
-        audit_repo,
-    ));
+    let moderation_service = Arc::new(auth::ModerationService::new(submission_repo, user_repo));
 
     // Layer stack (axum applies bottom-up, so the order here
     // is the OUTER-TO-INNER request flow):

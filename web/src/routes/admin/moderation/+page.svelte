@@ -170,12 +170,16 @@
 								class="mt-3 flex flex-col gap-2 sm:flex-row"
 							>
 								<input type="hidden" name="id" value={row.id} />
-								<input
-									name="reason"
-									required
-									placeholder="Reason (required)"
-									class="border-border focus-visible:ring-ring flex-1 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
-								/>
+								<label class="flex-1" for={`reject-reason-${row.id}`}>
+									<span class="sr-only">Reason for rejecting submission {row.title}</span>
+									<input
+										id={`reject-reason-${row.id}`}
+										name="reason"
+										required
+										placeholder="Reason (required)"
+										class="border-border focus-visible:ring-ring w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+									/>
+								</label>
 								<button
 									type="submit"
 									class="bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-ring rounded-md px-3 py-2 text-sm font-medium focus-visible:ring-2 focus-visible:outline-none"

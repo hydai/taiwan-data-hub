@@ -143,6 +143,17 @@ pub trait UserRepo: Send + Sync {
     /// after `consume_auth_token` returns the owning `user_id`.
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError>;
 
+    /// Lightweight role lookup for the moderation gate (#5a.2).
+    /// Selects only `users.role`, skipping the expensive
+    /// `password_hash` materialisation that the full
+    /// [`Self::find_user_by_id`] would do. The moderator gate
+    /// fires on every `/api/v1/admin/*` request so the read
+    /// stays a single btree probe via the `users_role_idx`
+    /// partial index. Returns `Ok(None)` for an unknown id —
+    /// the caller maps that into 403 alongside the
+    /// insufficient-role case.
+    async fn find_user_role(&self, id: Uuid) -> Result<Option<UserRole>, StorageError>;
+
     /// Set `email_verified_at = now()`. Idempotent: a second call
     /// after a successful verify returns `Ok(false)` and leaves
     /// the timestamp unchanged.
@@ -264,6 +275,24 @@ impl UserRepo for Storage {
         .await?;
         row.map(|r| User::from_row(&r).map_err(StorageError::from))
             .transpose()
+    }
+
+    async fn find_user_role(&self, id: Uuid) -> Result<Option<UserRole>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT role FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?;
+        match row {
+            None => Ok(None),
+            Some((role_str,)) => UserRole::from_wire(&role_str)
+                .ok_or_else(|| {
+                    StorageError::Database(sqlx::Error::Decode(
+                        format!("unknown users.role {role_str:?} (CHECK constraint drift?)")
+                            .into(),
+                    ))
+                })
+                .map(Some),
+        }
     }
 
     async fn mark_email_verified(&self, id: Uuid) -> Result<bool, StorageError> {

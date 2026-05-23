@@ -17,10 +17,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::json;
-use storage::{
-    AuditAction, AuditLogRepo, AuditTargetKind, NewAuditLog, SubmissionRepo, SubmissionRow,
-    UserRepo, UserRole,
-};
+use storage::{SubmissionRepo, SubmissionRow, UserRepo, UserRole};
 use uuid::Uuid;
 
 use crate::error::AuthError;
@@ -57,7 +54,6 @@ pub enum ModerationDenialReason {
 pub struct ModerationService {
     submissions: Arc<dyn SubmissionRepo>,
     users: Arc<dyn UserRepo>,
-    audit: Arc<dyn AuditLogRepo>,
 }
 
 impl std::fmt::Debug for ModerationService {
@@ -68,36 +64,36 @@ impl std::fmt::Debug for ModerationService {
 
 impl ModerationService {
     #[must_use]
-    pub fn new(
-        submissions: Arc<dyn SubmissionRepo>,
-        users: Arc<dyn UserRepo>,
-        audit: Arc<dyn AuditLogRepo>,
-    ) -> Self {
-        Self {
-            submissions,
-            users,
-            audit,
-        }
+    pub fn new(submissions: Arc<dyn SubmissionRepo>, users: Arc<dyn UserRepo>) -> Self {
+        Self { submissions, users }
     }
 
     /// Look up the caller's role + check the moderator gate.
-    /// Returns `Ok(())` if the user is at least a moderator,
-    /// `Err(Forbidden)` otherwise. Used by every moderation
-    /// endpoint as the first gate.
+    /// Returns the role on success, an outer
+    /// [`AuthError::Storage`] when the DB call fails (mapped
+    /// to 500 by the gateway), or an inner
+    /// `Err(Forbidden)` when the user is missing or has an
+    /// insufficient role.
+    ///
+    /// The two error layers are intentionally distinct so a
+    /// transient DB outage doesn't surface as 403 — a 500
+    /// signals an operator-actionable failure, while 403
+    /// signals an end-user permission issue.
+    ///
+    /// Uses [`UserRepo::find_user_role`] (selects only the
+    /// role column, served by the `users_role_idx` partial
+    /// index) so the hot-path admin request stays cheap.
     pub async fn require_moderator(
         &self,
         user_id: Uuid,
-    ) -> Result<UserRole, ModerationDenialReason> {
-        let user = self
-            .users
-            .find_user_by_id(user_id)
-            .await
-            .map_err(|_| ModerationDenialReason::Forbidden)?
-            .ok_or(ModerationDenialReason::Forbidden)?;
-        if !user.role.can_moderate() {
-            return Err(ModerationDenialReason::Forbidden);
+    ) -> Result<Result<UserRole, ModerationDenialReason>, AuthError> {
+        let Some(role) = self.users.find_user_role(user_id).await? else {
+            return Ok(Err(ModerationDenialReason::Forbidden));
+        };
+        if !role.can_moderate() {
+            return Ok(Err(ModerationDenialReason::Forbidden));
         }
-        Ok(user.role)
+        Ok(Ok(role))
     }
 
     /// List pending submissions for the moderation queue.
@@ -117,10 +113,13 @@ impl ModerationService {
         Ok(self.submissions.get_for_moderation(id).await?)
     }
 
-    /// Approve a pending submission. Writes an audit log row in
-    /// the same call so the timestamp + actor are consistent.
-    /// `reason` is optional on approve — moderators may leave a
-    /// note for the author but aren't required to.
+    /// Approve a pending submission. The status flip + audit
+    /// log row are written in a single DB transaction
+    /// (`SubmissionRepo::approve_with_audit`) so a partial
+    /// commit can't leave an approved submission with no
+    /// audit trail. `reason` is optional on approve —
+    /// moderators may leave a note for the author but aren't
+    /// required to.
     pub async fn approve(
         &self,
         moderator_id: Uuid,
@@ -133,27 +132,33 @@ impl ModerationService {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        let Some(row) = self
+        // Peek at the kind ahead of the UPDATE so the audit
+        // metadata is rich. If the row isn't pending we'd skip
+        // the UPDATE anyway; the metadata field still carries
+        // the kind so post-hoc audit queries don't have to
+        // join the submissions table to know what was decided.
+        let kind_str = self
             .submissions
-            .approve(submission_id, moderator_id, trimmed.as_deref(), now)
+            .get_for_moderation(submission_id)
             .await?
-        else {
+            .map(|r| r.kind.as_str());
+        let metadata = json!({
+            "submission_kind": kind_str,
+            "reason": trimmed,
+        });
+        let outcome = self
+            .submissions
+            .approve_with_audit(
+                submission_id,
+                moderator_id,
+                trimmed.as_deref(),
+                &metadata,
+                now,
+            )
+            .await?;
+        let Some((row, audit_log_id)) = outcome else {
             return Ok(Err(ModerationDenialReason::NotFoundOrAlreadyDecided));
         };
-        let audit_log_id = self
-            .audit
-            .insert(NewAuditLog {
-                actor_id: Some(moderator_id),
-                action: AuditAction::SubmissionApprove,
-                target_kind: AuditTargetKind::Submission,
-                target_id: Some(submission_id),
-                metadata: json!({
-                    "submission_kind": row.kind.as_str(),
-                    "reason": trimmed,
-                }),
-                created_at: now,
-            })
-            .await?;
         Ok(Ok(Decision {
             submission: row,
             audit_log_id,
@@ -162,6 +167,8 @@ impl ModerationService {
 
     /// Reject a pending submission. The reason is mandatory on
     /// reject; an empty trim folds to [`ModerationDenialReason::MissingRejectReason`].
+    /// Status flip + audit log row write happen in a single
+    /// DB transaction.
     pub async fn reject(
         &self,
         moderator_id: Uuid,
@@ -173,27 +180,22 @@ impl ModerationService {
             return Ok(Err(ModerationDenialReason::MissingRejectReason));
         }
         let now = Utc::now();
-        let Some(row) = self
+        let kind_str = self
             .submissions
-            .reject(submission_id, moderator_id, &trimmed, now)
+            .get_for_moderation(submission_id)
             .await?
-        else {
+            .map(|r| r.kind.as_str());
+        let metadata = json!({
+            "submission_kind": kind_str,
+            "reason": trimmed,
+        });
+        let outcome = self
+            .submissions
+            .reject_with_audit(submission_id, moderator_id, &trimmed, &metadata, now)
+            .await?;
+        let Some((row, audit_log_id)) = outcome else {
             return Ok(Err(ModerationDenialReason::NotFoundOrAlreadyDecided));
         };
-        let audit_log_id = self
-            .audit
-            .insert(NewAuditLog {
-                actor_id: Some(moderator_id),
-                action: AuditAction::SubmissionReject,
-                target_kind: AuditTargetKind::Submission,
-                target_id: Some(submission_id),
-                metadata: json!({
-                    "submission_kind": row.kind.as_str(),
-                    "reason": trimmed,
-                }),
-                created_at: now,
-            })
-            .await?;
         Ok(Ok(Decision {
             submission: row,
             audit_log_id,
