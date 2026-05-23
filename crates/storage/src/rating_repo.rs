@@ -207,31 +207,52 @@ impl RatingRepo for Storage {
         target_id: Uuid,
         viewer_id: Option<Uuid>,
     ) -> Result<RatingView, StorageError> {
-        let aggregate = sqlx::query(
-            "SELECT target_kind, target_id, avg_score, rating_count, last_refreshed_at
-               FROM rating_aggregates
-              WHERE target_kind = $1 AND target_id = $2",
+        // Single round trip: LEFT JOIN the cached aggregate
+        // and the viewer's own rating onto a one-row anchor
+        // (so the row is always returned even when the
+        // aggregate is missing). The `r.user_id IS NULL`
+        // guard makes the JOIN drop the row when the caller
+        // is anonymous, leaving `viewer_score` NULL.
+        let row = sqlx::query(
+            "SELECT a.target_kind     AS agg_target_kind,
+                    a.target_id       AS agg_target_id,
+                    a.avg_score,
+                    a.rating_count,
+                    a.last_refreshed_at,
+                    r.score           AS viewer_score
+               FROM (SELECT $1::TEXT AS k, $2::UUID AS id) AS anchor
+               LEFT JOIN rating_aggregates a
+                      ON a.target_kind = anchor.k AND a.target_id = anchor.id
+               LEFT JOIN ratings r
+                      ON $3::UUID IS NOT NULL
+                     AND r.user_id     = $3::UUID
+                     AND r.target_kind = anchor.k
+                     AND r.target_id   = anchor.id",
         )
         .bind(target_kind.as_str())
         .bind(target_id)
-        .fetch_optional(self.pool())
-        .await?
-        .map(|r| RatingAggregateRow::from_row(&r))
-        .transpose()?;
-        let viewer_score = match viewer_id {
-            None => None,
-            Some(uid) => {
-                sqlx::query_scalar::<_, i16>(
-                    "SELECT score FROM ratings
-                  WHERE user_id = $1 AND target_kind = $2 AND target_id = $3",
-                )
-                .bind(uid)
-                .bind(target_kind.as_str())
-                .bind(target_id)
-                .fetch_optional(self.pool())
-                .await?
-            }
+        .bind(viewer_id)
+        .fetch_one(self.pool())
+        .await?;
+        let rating_count: Option<i32> = row.try_get("rating_count")?;
+        let aggregate = if let Some(count) = rating_count {
+            let kind_str: String = row.try_get("agg_target_kind")?;
+            let agg_kind = RatingTargetKind::from_wire(&kind_str).ok_or_else(|| {
+                StorageError::Decode(format!(
+                    "unknown rating_aggregates.target_kind {kind_str:?} (CHECK drift?)"
+                ))
+            })?;
+            Some(RatingAggregateRow {
+                target_kind: agg_kind,
+                target_id: row.try_get("agg_target_id")?,
+                avg_score: row.try_get("avg_score")?,
+                rating_count: count,
+                last_refreshed_at: row.try_get("last_refreshed_at")?,
+            })
+        } else {
+            None
         };
+        let viewer_score: Option<i16> = row.try_get("viewer_score")?;
         Ok(RatingView {
             aggregate,
             viewer_score,
@@ -268,15 +289,15 @@ impl RatingRepo for Storage {
 /// delete so an external observer never sees the row and
 /// its aggregate disagree.
 ///
-/// **Concurrency**: under PostgreSQL's default READ
-/// COMMITTED, two concurrent writers to the same target
+/// **Concurrency**: under `PostgreSQL`'s default `READ`
+/// `COMMITTED`, two concurrent writers to the same target
 /// can each compute the aggregate from a snapshot taken
 /// *before* the other's `ratings` row is visible. Without a
 /// barrier, the second-to-write transaction's aggregate
 /// row overwrites the first's using stale data, leaving
 /// the cache off by one row. We take a per-target advisory
 /// lock at transaction scope (released on COMMIT/ROLLBACK)
-/// so the AVG/COUNT recompute runs serially per target.
+/// so the `AVG`/`COUNT` recompute runs serially per target.
 /// Different targets stay in parallel — the lock key
 /// derives from `(target_kind, target_id)`.
 async fn refresh_aggregate(
@@ -333,13 +354,15 @@ fn hash_kind(kind: RatingTargetKind) -> i32 {
 }
 
 /// Fold a UUID's 128-bit value into the i64 the second
-/// `pg_advisory_xact_lock` arg accepts. XORing the two
-/// halves preserves enough entropy that collisions across
-/// targets stay astronomically rare, and pg_advisory_lock
+/// `pg_advisory_xact_lock` arg accepts. The two halves are
+/// XOR'd to preserve enough entropy that collisions across
+/// targets stay astronomically rare; `pg_advisory_lock`
 /// keys don't need to be cryptographically unique — only
 /// "distinct enough that unrelated writers don't queue on
-/// each other".
+/// each other". The `from_ne_bytes` reinterprets the bit
+/// pattern as `i64` without the `cast_possible_wrap`
+/// concern.
 fn target_id_low_i64(id: Uuid) -> i64 {
     let (hi, lo) = id.as_u64_pair();
-    (hi ^ lo) as i64
+    i64::from_ne_bytes((hi ^ lo).to_ne_bytes())
 }

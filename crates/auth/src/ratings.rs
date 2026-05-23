@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::error::AuthError;
 
 /// Minimum account age before a user can submit their first
-/// rating. Matches the DoD on issue #53.
+/// rating. Matches the `DoD` on issue #53.
 pub const MIN_ACCOUNT_AGE_FOR_RATING: Duration = Duration::hours(24);
 
 /// Allowed score range (inclusive). Mirrored at the SQL

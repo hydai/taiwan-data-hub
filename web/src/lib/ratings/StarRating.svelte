@@ -178,17 +178,23 @@
 </script>
 
 <div class="flex items-center gap-2">
-	<div
-		role={interactive ? 'radiogroup' : undefined}
-		aria-label="Rate this dataset"
-		class="inline-flex items-center"
-	>
+	<!--
+		Plain `<button>` group rather than role="radiogroup".
+		A real radiogroup needs roving-tabindex + arrow-key
+		traversal per WAI-ARIA practices, and screen readers
+		that hear the radio role expect that behaviour. We
+		don't implement it, so the buttons stay as buttons;
+		the per-star `aria-label` ("4 stars") + `aria-pressed`
+		on the active rating give assistive tech the same
+		"this is the chosen rating" signal without lying
+		about the keyboard contract.
+	-->
+	<div aria-label="Rate this dataset" class="inline-flex items-center">
 		{#each [1, 2, 3, 4, 5] as star (star)}
 			{@const filled = star <= displayScore}
 			<button
 				type="button"
-				role={interactive ? 'radio' : undefined}
-				aria-checked={interactive ? viewerScore === star : undefined}
+				aria-pressed={interactive ? viewerScore === star : undefined}
 				aria-label={`${star} ${star === 1 ? 'star' : 'stars'}`}
 				disabled={!interactive || inFlight}
 				onclick={() => pickScore(star)}

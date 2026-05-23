@@ -26,34 +26,30 @@ struct RatingStore {
     rows: Mutex<HashMap<Uuid, RatingRow>>,
 }
 
-impl RatingStore {
-    fn aggregate_for(
-        &self,
-        rows: &HashMap<Uuid, RatingRow>,
-        target_kind: RatingTargetKind,
-        target_id: Uuid,
-        now: DateTime<Utc>,
-    ) -> Option<RatingAggregateRow> {
-        let mut scores: Vec<i16> = rows
-            .values()
-            .filter(|r| r.target_kind == target_kind && r.target_id == target_id)
-            .map(|r| r.score)
-            .collect();
-        if scores.is_empty() {
-            return None;
-        }
-        scores.sort_unstable();
-        let count: i32 = scores.len() as i32;
-        let sum: i64 = scores.iter().map(|s| i64::from(*s)).sum();
-        let avg = sum as f64 / f64::from(count);
-        Some(RatingAggregateRow {
-            target_kind,
-            target_id,
-            avg_score: avg,
-            rating_count: count,
-            last_refreshed_at: now,
-        })
+fn aggregate_for(
+    rows: &HashMap<Uuid, RatingRow>,
+    target_kind: RatingTargetKind,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+) -> Option<RatingAggregateRow> {
+    let scores: Vec<i16> = rows
+        .values()
+        .filter(|r| r.target_kind == target_kind && r.target_id == target_id)
+        .map(|r| r.score)
+        .collect();
+    if scores.is_empty() {
+        return None;
     }
+    let count = i32::try_from(scores.len()).unwrap_or(i32::MAX);
+    let sum: f64 = scores.iter().copied().map(f64::from).sum();
+    let avg = sum / f64::from(count);
+    Some(RatingAggregateRow {
+        target_kind,
+        target_id,
+        avg_score: avg,
+        rating_count: count,
+        last_refreshed_at: now,
+    })
 }
 
 #[async_trait]
@@ -130,7 +126,7 @@ impl RatingRepo for RatingStore {
         viewer_id: Option<Uuid>,
     ) -> Result<RatingView, StorageError> {
         let inner = self.rows.lock().unwrap();
-        let aggregate = self.aggregate_for(&inner, target_kind, target_id, Utc::now());
+        let aggregate = aggregate_for(&inner, target_kind, target_id, Utc::now());
         let viewer_score = viewer_id.and_then(|uid| {
             inner
                 .values()
@@ -152,7 +148,7 @@ impl RatingRepo for RatingStore {
         let inner = self.rows.lock().unwrap();
         let mut out = Vec::new();
         for (kind, id) in targets {
-            if let Some(agg) = self.aggregate_for(&inner, *kind, *id, Utc::now()) {
+            if let Some(agg) = aggregate_for(&inner, *kind, *id, Utc::now()) {
                 out.push(agg);
             }
         }
