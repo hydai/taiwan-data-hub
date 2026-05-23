@@ -568,14 +568,15 @@ enabled = false
     fn checked_in_sources_toml_loads() {
         let raw = include_str!("../../../config/sources.toml");
         let configs = parse(raw, "config/sources.toml").expect("checked-in file parses");
-        // Production has data.gov.tw + TWSE enabled today
-        // (M5b.3-5 flip MOEA / CWA / Fishery on as their
+        // Production has data.gov.tw + TWSE + MOEA enabled
+        // today (M5b.4-5 flip CWA / Fishery on as their
         // connectors land). A future PR that turns on the
         // remaining sources should update this assertion in
         // lockstep so the test is the spec.
         let enabled_ids: Vec<SourceId> = configs.iter().map(|c| c.source_id).collect();
-        assert_eq!(configs.len(), 2, "{configs:?}");
+        assert_eq!(configs.len(), 3, "{configs:?}");
         assert!(enabled_ids.contains(&SourceId::DataGovTw));
         assert!(enabled_ids.contains(&SourceId::Twse));
+        assert!(enabled_ids.contains(&SourceId::Moea));
     }
 }

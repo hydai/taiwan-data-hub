@@ -11,6 +11,7 @@
 //! `data_gov_tw | twse | moea | cwa | fishery_moa | user_contrib`.
 
 pub mod data_gov_tw;
+pub mod moea;
 pub mod twse;
 
 use std::collections::BTreeMap;
