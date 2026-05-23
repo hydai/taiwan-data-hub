@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::json;
 use storage::{SubmissionRepo, SubmissionRow, UserRepo, UserRole};
 use uuid::Uuid;
 
@@ -136,44 +135,25 @@ impl ModerationService {
     /// log row are written in a single DB transaction
     /// (`SubmissionRepo::approve_with_audit`) so a partial
     /// commit can't leave an approved submission with no
-    /// audit trail. `reason` is optional on approve —
-    /// moderators may leave a note for the author but aren't
-    /// required to.
+    /// audit trail. The audit metadata's `submission_kind`
+    /// is derived inside that transaction from the post-
+    /// UPDATE row — no service-side pre-read.
+    /// `reason` is optional on approve — moderators may leave
+    /// a note for the author but aren't required to.
     pub async fn approve(
         &self,
         moderator_id: Uuid,
         submission_id: Uuid,
         reason: Option<String>,
     ) -> Result<Result<Decision, ModerationDenialReason>, AuthError> {
-        let now = Utc::now();
         let trimmed = reason
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
-        // Peek at the kind ahead of the UPDATE so the audit
-        // metadata is rich. If the row isn't pending we'd skip
-        // the UPDATE anyway; the metadata field still carries
-        // the kind so post-hoc audit queries don't have to
-        // join the submissions table to know what was decided.
-        let kind_str = self
-            .submissions
-            .get_for_moderation(submission_id)
-            .await?
-            .map(|r| r.kind.as_str());
-        let metadata = json!({
-            "submission_kind": kind_str,
-            "reason": trimmed,
-        });
         let outcome = self
             .submissions
-            .approve_with_audit(
-                submission_id,
-                moderator_id,
-                trimmed.as_deref(),
-                &metadata,
-                now,
-            )
+            .approve_with_audit(submission_id, moderator_id, trimmed.as_deref(), Utc::now())
             .await?;
         let Some((row, audit_log_id)) = outcome else {
             return Ok(Err(ModerationDenialReason::NotFoundOrAlreadyDecided));
@@ -198,19 +178,9 @@ impl ModerationService {
         if trimmed.is_empty() {
             return Ok(Err(ModerationDenialReason::MissingRejectReason));
         }
-        let now = Utc::now();
-        let kind_str = self
-            .submissions
-            .get_for_moderation(submission_id)
-            .await?
-            .map(|r| r.kind.as_str());
-        let metadata = json!({
-            "submission_kind": kind_str,
-            "reason": trimmed,
-        });
         let outcome = self
             .submissions
-            .reject_with_audit(submission_id, moderator_id, &trimmed, &metadata, now)
+            .reject_with_audit(submission_id, moderator_id, &trimmed, Utc::now())
             .await?;
         let Some((row, audit_log_id)) = outcome else {
             return Ok(Err(ModerationDenialReason::NotFoundOrAlreadyDecided));

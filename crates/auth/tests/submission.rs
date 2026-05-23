@@ -123,7 +123,6 @@ impl SubmissionRepo for InMemorySubmissionRepo {
         _id: Uuid,
         _mod_id: Uuid,
         _reason: Option<&str>,
-        _audit_metadata: &serde_json::Value,
         _now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         unreachable!("author-side submission tests do not exercise the moderation surface")
@@ -133,7 +132,6 @@ impl SubmissionRepo for InMemorySubmissionRepo {
         _id: Uuid,
         _mod_id: Uuid,
         _reason: &str,
-        _audit_metadata: &serde_json::Value,
         _now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         unreachable!("author-side submission tests do not exercise the moderation surface")

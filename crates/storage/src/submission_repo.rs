@@ -243,9 +243,11 @@ pub trait SubmissionRepo: Send + Sync {
     /// commit can't leave an approved submission with no
     /// audit trail (or vice versa).
     ///
-    /// `audit_metadata` is the JSONB payload the audit row
-    /// will carry. The service layer composes it (kind +
-    /// reason); the storage layer treats it as opaque.
+    /// The audit row's `metadata` JSONB is built INSIDE the
+    /// transaction from the post-UPDATE row's kind + the
+    /// trimmed reason. This avoids an extra pre-read round
+    /// trip the service would otherwise need just to learn
+    /// the submission kind.
     ///
     /// Returns `Ok(None)` when the id doesn't exist OR the
     /// row isn't pending anymore — the gateway folds both
@@ -258,7 +260,6 @@ pub trait SubmissionRepo: Send + Sync {
         id: Uuid,
         moderator_id: Uuid,
         reason: Option<&str>,
-        audit_metadata: &serde_json::Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError>;
 
@@ -272,7 +273,6 @@ pub trait SubmissionRepo: Send + Sync {
         id: Uuid,
         moderator_id: Uuid,
         reason: &str,
-        audit_metadata: &serde_json::Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError>;
 }
@@ -422,7 +422,6 @@ impl SubmissionRepo for Storage {
         id: Uuid,
         moderator_id: Uuid,
         reason: Option<&str>,
-        audit_metadata: &serde_json::Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         decide_with_audit(
@@ -431,7 +430,6 @@ impl SubmissionRepo for Storage {
                 id,
                 moderator_id,
                 reason,
-                audit_metadata,
                 now,
                 next_status: SubmissionStatus::Approved,
                 audit_action: crate::AuditAction::SubmissionApprove,
@@ -445,7 +443,6 @@ impl SubmissionRepo for Storage {
         id: Uuid,
         moderator_id: Uuid,
         reason: &str,
-        audit_metadata: &serde_json::Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         decide_with_audit(
@@ -454,7 +451,6 @@ impl SubmissionRepo for Storage {
                 id,
                 moderator_id,
                 reason: Some(reason),
-                audit_metadata,
                 now,
                 next_status: SubmissionStatus::Rejected,
                 audit_action: crate::AuditAction::SubmissionReject,
@@ -473,12 +469,14 @@ impl SubmissionRepo for Storage {
 /// raw strings) so the mapping from "this is an approve"
 /// vs "reject" stays compile-time checked. `.as_str()` runs
 /// at bind time inside [`decide_with_audit`] to convert to
-/// the wire form the DB CHECK constraints expect.
+/// the wire form the DB CHECK constraints expect. The audit
+/// `metadata` JSON is composed inside the transaction from
+/// the returned row's kind + the trimmed `reason` — no need
+/// for the caller to pre-fetch the row.
 struct DecideInputs<'a> {
     id: Uuid,
     moderator_id: Uuid,
     reason: Option<&'a str>,
-    audit_metadata: &'a serde_json::Value,
     now: DateTime<Utc>,
     next_status: SubmissionStatus,
     audit_action: crate::AuditAction,
@@ -522,18 +520,25 @@ async fn decide_with_audit(
         return Ok(None);
     };
     let submission_row = SubmissionRow::from_row(&row)?;
-    let (audit_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO audit_logs
-            (actor_id, action, target_kind, target_id, metadata, created_at)
-         VALUES ($1, $2, 'submission', $3, $4, $5)
-         RETURNING id",
+    // Derive the audit metadata from the row we just touched —
+    // saves the service layer an extra round trip to learn
+    // `submission_kind` and keeps the metadata in lockstep with
+    // the version the row actually has post-update.
+    let metadata = serde_json::json!({
+        "submission_kind": submission_row.kind.as_str(),
+        "reason": inputs.reason,
+    });
+    let audit_id = crate::audit_repo::insert_audit_log_inner(
+        &mut tx,
+        &crate::NewAuditLog {
+            actor_id: Some(inputs.moderator_id),
+            action: inputs.audit_action,
+            target_kind: crate::AuditTargetKind::Submission,
+            target_id: Some(inputs.id),
+            metadata,
+            created_at: inputs.now,
+        },
     )
-    .bind(inputs.moderator_id)
-    .bind(inputs.audit_action.as_str())
-    .bind(inputs.id)
-    .bind(inputs.audit_metadata)
-    .bind(inputs.now)
-    .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
     Ok(Some((submission_row, audit_id)))

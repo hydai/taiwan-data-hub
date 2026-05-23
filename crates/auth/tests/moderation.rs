@@ -210,7 +210,6 @@ impl SubmissionRepo for SubmissionStore {
         id: Uuid,
         moderator_id: Uuid,
         reason: Option<&str>,
-        audit_metadata: &Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         let snap = {
@@ -227,13 +226,20 @@ impl SubmissionRepo for SubmissionStore {
             snapshot(row)
         };
         let audit_id = Uuid::now_v7();
+        // Mirror the production storage layer: build metadata
+        // from the freshly-updated row's kind + the trimmed
+        // reason. No service-side pre-read.
+        let metadata = serde_json::json!({
+            "submission_kind": snap.kind.as_str(),
+            "reason": reason,
+        });
         self.audit_log.lock().unwrap().push(AuditRecord {
             id: audit_id,
             actor_id: Some(moderator_id),
             action: storage::AuditAction::SubmissionApprove,
             target_kind: storage::AuditTargetKind::Submission,
             target_id: Some(id),
-            metadata: audit_metadata.clone(),
+            metadata,
             created_at: now,
         });
         Ok(Some((snap, audit_id)))
@@ -243,7 +249,6 @@ impl SubmissionRepo for SubmissionStore {
         id: Uuid,
         moderator_id: Uuid,
         reason: &str,
-        audit_metadata: &Value,
         now: DateTime<Utc>,
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         let snap = {
@@ -260,13 +265,17 @@ impl SubmissionRepo for SubmissionStore {
             snapshot(row)
         };
         let audit_id = Uuid::now_v7();
+        let metadata = serde_json::json!({
+            "submission_kind": snap.kind.as_str(),
+            "reason": reason,
+        });
         self.audit_log.lock().unwrap().push(AuditRecord {
             id: audit_id,
             actor_id: Some(moderator_id),
             action: storage::AuditAction::SubmissionReject,
             target_kind: storage::AuditTargetKind::Submission,
             target_id: Some(id),
-            metadata: audit_metadata.clone(),
+            metadata,
             created_at: now,
         });
         Ok(Some((snap, audit_id)))

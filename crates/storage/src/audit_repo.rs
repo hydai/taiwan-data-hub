@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::{Storage, StorageError};
@@ -74,23 +75,40 @@ pub trait AuditLogRepo: Send + Sync {
     async fn insert(&self, new: NewAuditLog) -> Result<Uuid, StorageError>;
 }
 
+/// Single source of truth for the `audit_logs` INSERT.
+/// Takes a `&mut PgConnection` so both the
+/// pool-targeted [`AuditLogRepo::insert`] and the transactional
+/// caller in `submission_repo::decide_with_audit` can reuse
+/// the same SQL — a schema change here automatically
+/// propagates to both call sites.
+///
+/// `crate`-visible so callers in sibling modules can opt in;
+/// not part of the public API.
+pub(crate) async fn insert_audit_log_inner(
+    conn: &mut PgConnection,
+    new: &NewAuditLog,
+) -> Result<Uuid, StorageError> {
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO audit_logs
+            (actor_id, action, target_kind, target_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id",
+    )
+    .bind(new.actor_id)
+    .bind(new.action.as_str())
+    .bind(new.target_kind.as_str())
+    .bind(new.target_id)
+    .bind(&new.metadata)
+    .bind(new.created_at)
+    .fetch_one(conn)
+    .await?;
+    Ok(id)
+}
+
 #[async_trait]
 impl AuditLogRepo for Storage {
     async fn insert(&self, new: NewAuditLog) -> Result<Uuid, StorageError> {
-        let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO audit_logs
-                (actor_id, action, target_kind, target_id, metadata, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
-             RETURNING id",
-        )
-        .bind(new.actor_id)
-        .bind(new.action.as_str())
-        .bind(new.target_kind.as_str())
-        .bind(new.target_id)
-        .bind(&new.metadata)
-        .bind(new.created_at)
-        .fetch_one(self.pool())
-        .await?;
-        Ok(id)
+        let mut conn = self.pool().acquire().await?;
+        insert_audit_log_inner(&mut conn, &new).await
     }
 }
