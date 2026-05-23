@@ -177,7 +177,15 @@ export const actions: Actions = {
 		if (response.status === 404)
 			return fail(404, { message: 'Collection not found or already deleted.' });
 		if (!response.ok) {
-			return fail(response.status, { message: 'Could not delete collection.' });
+			// Surface the gateway's structured `{error,
+			// message}` body when present so actionable
+			// failures (e.g. invalid UUID → 400 with a
+			// useful hint) reach the user. Matches what
+			// `create_collection` above already does.
+			const body = parseGatewayErrorBody(await response.json().catch(() => null));
+			return fail(response.status, {
+				message: body?.message ?? 'Could not delete collection.'
+			});
 		}
 		return { deleted: id };
 	}
