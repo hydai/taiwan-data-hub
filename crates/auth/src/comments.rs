@@ -302,9 +302,8 @@ impl CommentService {
             // row → window closed. Anything else → 404. This
             // mirrors the spec the pre-read above started.
             let recheck = self.comments.get(comment_id).await?;
-            let still_eligible = recheck.is_some_and(|r| {
-                r.user_id == Some(author_id) && r.deleted_at.is_none()
-            });
+            let still_eligible =
+                recheck.is_some_and(|r| r.user_id == Some(author_id) && r.deleted_at.is_none());
             return Ok(Err(if still_eligible {
                 CommentDenialReason::EditWindowClosed
             } else {

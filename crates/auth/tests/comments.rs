@@ -223,7 +223,13 @@ async fn reply_to_soft_deleted_parent_rejected() {
         .unwrap();
     let _ = svc.delete(alice, root.id).await.unwrap().unwrap();
     let err = svc
-        .create(alice, kind, target, Some(root.id), "child of tombstone".into())
+        .create(
+            alice,
+            kind,
+            target,
+            Some(root.id),
+            "child of tombstone".into(),
+        )
         .await
         .unwrap()
         .unwrap_err();

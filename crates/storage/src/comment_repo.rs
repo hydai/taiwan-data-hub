@@ -52,14 +52,13 @@ mod tests {
     /// non-empty string satisfies the column.
     async fn seed_user(storage: &Storage) -> Uuid {
         let email = format!("user-{}@example.test", Uuid::now_v7());
-        let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
-        )
-        .bind(&email)
-        .bind("placeholder")
-        .fetch_one(storage.pool())
-        .await
-        .expect("seed user");
+        let (id,): (Uuid,) =
+            sqlx::query_as("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+                .bind(&email)
+                .bind("placeholder")
+                .fetch_one(storage.pool())
+                .await
+                .expect("seed user");
         id
     }
 
