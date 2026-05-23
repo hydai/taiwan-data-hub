@@ -32,9 +32,13 @@ import type { PageServerLoad } from './$types';
 /**
  * Strict cookie-presence check that survives values containing
  * the cookie's name as a substring (e.g.
- * `wat_tdh_session=hi`). Splits on `;`, trims each pair, and
- * matches the exact name before `=`. Mirrors the logic in
- * `$lib/account/gateway::extractCookie`.
+ * `wat_tdh_session=hi`). Splits on `;`, trims each pair,
+ * matches the exact name before `=`, AND requires a non-empty
+ * value — `tdh_session=` with no value would NOT authenticate
+ * the `/me` probe (the `withCookieHeader` helper drops empty
+ * values), so reporting it as "present" would put the page
+ * on the per-user cache branch without any per-user data to
+ * justify it.
  */
 function cookieHeaderHas(cookieHeader: string | null, name: string): boolean {
 	if (cookieHeader === null) return false;
@@ -42,7 +46,9 @@ function cookieHeaderHas(cookieHeader: string | null, name: string): boolean {
 		const trimmed = pair.trim();
 		const eq = trimmed.indexOf('=');
 		if (eq <= 0) continue;
-		if (trimmed.substring(0, eq) === name) return true;
+		if (trimmed.substring(0, eq) === name) {
+			return trimmed.substring(eq + 1).trim().length > 0;
+		}
 	}
 	return false;
 }

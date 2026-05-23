@@ -58,8 +58,14 @@ pub struct RenderedComment {
 }
 
 /// Why a comment write rejected. Distinct variants so the
-/// gateway can pick the right HTTP status (`403`, `404`,
-/// `409`, `400`).
+/// gateway can pick the right HTTP status. The current
+/// `gateway::comments_routes` mapping is `404`, `409`, and
+/// `400` (the latter shared across `DepthCapExceeded`,
+/// `ParentNotFound`, and `InvalidBody`); the `401` for the
+/// "no session" case is owned by the route handler, not by
+/// this enum. No `403` is emitted today because comment
+/// writes don't need a role gate (any authenticated user can
+/// post on their own).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentDenialReason {
     /// Author mismatch — caller is not the comment's owner.
@@ -255,12 +261,15 @@ impl CommentService {
             return Ok(Err(CommentDenialReason::EditWindowClosed));
         }
         // The DB-side guard uses integer seconds (its
-        // `make_interval(secs => …)` expression); round up so
-        // a sub-second window doesn't collapse to "0 seconds"
-        // and let the SQL predicate pass when the service
-        // would have rejected. `i64::div_ceil` is unstable, so
-        // do the manual `(a + b - 1) / b` form.
-        let edit_secs = (window_ms + 999) / 1000;
+        // `$edit_secs::bigint * INTERVAL '1 second'`
+        // expression); round up so a sub-second configured
+        // window doesn't collapse to "0 seconds" and let the
+        // SQL predicate pass when the service would have
+        // rejected. `i64::div_ceil` is unstable, so do the
+        // manual `(a + b - 1) / b` form, with a saturating
+        // add so an absurdly long window (clamped to
+        // `i64::MAX` above) doesn't overflow.
+        let edit_secs = window_ms.saturating_add(999) / 1000;
         let Some(row) = self
             .comments
             .edit(comment_id, author_id, &trimmed, edit_secs, now)
