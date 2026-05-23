@@ -81,12 +81,26 @@ export const load: PageServerLoad = async ({
 		return { state: 'unauthenticated' };
 	}
 	if (!bookmarksRes.ok || !collectionsRes.ok) {
-		const worst = bookmarksRes.ok ? collectionsRes.status : bookmarksRes.status;
-		const kind = classifyGatewayStatus(worst);
-		if (kind === 'unavailable') {
-			return { state: 'unavailable', message: friendlyLoadErrorMessage(worst) };
+		// Pick the worse classification across both responses
+		// so a (400 on one, 500 on the other) pair surfaces as
+		// "unavailable" — the more actionable signal for the
+		// operator. Status pairs that are both `unexpected`
+		// fall through to `unexpected`. Both statuses are
+		// logged so dashboard noise correlates back to the
+		// actual responses.
+		const bookmarksKind = bookmarksRes.ok ? null : classifyGatewayStatus(bookmarksRes.status);
+		const collectionsKind = collectionsRes.ok ? null : classifyGatewayStatus(collectionsRes.status);
+		console.error(
+			`[/account/bookmarks] non-ok responses: bookmarks=${bookmarksRes.status} (${bookmarksKind ?? 'ok'}) collections=${collectionsRes.status} (${collectionsKind ?? 'ok'})`
+		);
+		if (bookmarksKind === 'unavailable' || collectionsKind === 'unavailable') {
+			// Pick the status from whichever response was
+			// `unavailable`; if both are, prefer bookmarks (so
+			// the 404-means-feature-disabled message can land
+			// when the bookmarks subrouter is missing).
+			const status = bookmarksKind === 'unavailable' ? bookmarksRes.status : collectionsRes.status;
+			return { state: 'unavailable', message: friendlyLoadErrorMessage(status) };
 		}
-		console.error('[/account/bookmarks] unexpected status:', worst);
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
 

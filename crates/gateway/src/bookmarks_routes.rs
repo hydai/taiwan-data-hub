@@ -1,6 +1,9 @@
 //! `/api/v1/bookmarks` + `/api/v1/collections` HTTP routes
-//! (#5a.4). All endpoints are session-gated; reads + writes
-//! return the structured `{error, message}` envelope.
+//! (#5a.4). All endpoints are session-gated. Success
+//! responses return the raw payload (a JSON array for the
+//! collection-style endpoints, a JSON object for the
+//! item-style endpoints); only error responses use the
+//! `{error, message}` envelope from [`ApiError::IntoResponse`].
 
 use std::sync::Arc;
 

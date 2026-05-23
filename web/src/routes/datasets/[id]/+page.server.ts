@@ -1,6 +1,7 @@
 import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
 import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
+import { parseBookmarkArray } from '$lib/bookmarks/types';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
 import type { PageServerLoad } from './$types';
@@ -72,11 +73,15 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 				)
 			});
 			if (res.ok) {
-				const rows = (await res.json().catch(() => null)) as Array<{
-					target_kind: string;
-					target_id: string;
-				}> | null;
-				if (Array.isArray(rows)) {
+				// Run the response through the same runtime
+				// narrower the account page uses so a shape
+				// drift here can't throw an unchecked TypeError
+				// from `.some(...)` and bubble up to the outer
+				// catch as a noisy 500 trace. A `null` parse
+				// degrades to "not bookmarked" — same outcome
+				// as a network failure, no extra branch needed.
+				const rows = parseBookmarkArray(await res.json().catch(() => null));
+				if (rows !== null) {
 					bookmarked = rows.some(
 						(r) => r.target_kind === 'dataset' && r.target_id === commentTargetId
 					);
