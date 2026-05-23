@@ -1,0 +1,373 @@
+//! Retry-with-exponential-backoff envelope (#5b.1).
+//!
+//! Wraps any `Future<Output = Result<T, ConnectorError>>`
+//! and retries when the error is transient — server-side
+//! 5xx, 429, or a transport-level failure. The classifier
+//! is the single source of truth: bugs, decoder failures,
+//! and misconfiguration go straight to the DLQ on the
+//! first attempt because retrying them just wastes
+//! upstream bandwidth.
+//!
+//! On terminal failure the caller writes a DLQ row;
+//! this module stays storage-agnostic so it's unit-
+//! testable without a Postgres container.
+//!
+//! Module-level `dead_code` allow because the call-sites
+//! (`sources.toml` config loader + driver wiring) land
+//! in the next two commits of this same PR — splitting
+//! the framework into reviewable commits is more
+//! important than a clean `dead_code` gate per commit.
+//! The `cfg(test)` block exercises every public item,
+//! so the impls aren't actually untested.
+#![allow(dead_code)]
+
+use std::time::Duration;
+
+use connectors::ConnectorError;
+
+/// Per-source retry policy. Lives in `config/sources.toml`
+/// so an operator can tune a flaky source without a
+/// rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryConfig {
+    /// Maximum total attempts (including the first try).
+    /// `1` disables retry.
+    pub max_attempts: u32,
+    /// Backoff duration before the second attempt.
+    /// Subsequent waits double until [`Self::max_backoff`].
+    pub initial_backoff: Duration,
+    /// Upper bound on a single backoff sleep.
+    pub max_backoff: Duration,
+}
+
+impl RetryConfig {
+    /// Production-leaning default: 3 attempts, 30 s →
+    /// 60 s → 120 s. Total budget ≈ 3 min of waiting on
+    /// top of the actual request latency, which beats
+    /// the connection inactivity timeout most upstream
+    /// catalogs enforce.
+    #[must_use]
+    pub const fn default_prod() -> Self {
+        Self {
+            max_attempts: 3,
+            initial_backoff: Duration::from_secs(30),
+            max_backoff: Duration::from_secs(1800),
+        }
+    }
+}
+
+/// Outcome of [`with_retry`]. On success the caller gets
+/// the value; on failure they get the last error AND
+/// the total attempts so the DLQ writer can record both.
+#[derive(Debug)]
+pub enum RetryOutcome<T> {
+    Ok(T),
+    Err {
+        error: ConnectorError,
+        /// Includes the failing attempt — always ≥ 1.
+        attempts: u32,
+    },
+}
+
+/// Run `op` with retries. The operation is invoked
+/// repeatedly until it succeeds, returns a non-retriable
+/// error, or hits `cfg.max_attempts`.
+///
+/// `sleep` is injected so tests can use a deterministic
+/// stand-in instead of `tokio::time::sleep`. The
+/// production caller threads `tokio::time::sleep`
+/// through.
+pub async fn with_retry<F, Fut, S, SleepFut, T>(
+    cfg: RetryConfig,
+    mut op: F,
+    mut sleep: S,
+) -> RetryOutcome<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ConnectorError>>,
+    S: FnMut(Duration) -> SleepFut,
+    SleepFut: std::future::Future<Output = ()>,
+{
+    let mut attempt: u32 = 0;
+    let mut delay = cfg.initial_backoff;
+    loop {
+        attempt = attempt.saturating_add(1);
+        match op().await {
+            Ok(t) => return RetryOutcome::Ok(t),
+            Err(e) if !is_retriable(&e) => {
+                return RetryOutcome::Err {
+                    error: e,
+                    attempts: attempt,
+                };
+            }
+            Err(e) if attempt >= cfg.max_attempts => {
+                return RetryOutcome::Err {
+                    error: e,
+                    attempts: attempt,
+                };
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    backoff_secs = delay.as_secs(),
+                    error = %e,
+                    "retriable error; backing off",
+                );
+                sleep(delay).await;
+                delay = (delay * 2).min(cfg.max_backoff);
+            }
+        }
+    }
+}
+
+/// True when the error is worth retrying. Server-side
+/// failures (5xx, 429) and transport errors are
+/// retriable; client-side semantic failures (decode,
+/// config, invalid cursor, unsupported) are not — the
+/// next attempt would produce the identical error.
+#[must_use]
+pub fn is_retriable(err: &ConnectorError) -> bool {
+    match err {
+        ConnectorError::Transport(_) => true,
+        ConnectorError::BadStatus { status, .. } => *status >= 500 || *status == 429,
+        ConnectorError::Decode(_)
+        | ConnectorError::Config(_)
+        | ConnectorError::InvalidCursor { .. }
+        | ConnectorError::Unsupported(_) => false,
+    }
+}
+
+/// Translate a [`ConnectorError`] into the DLQ
+/// `error_kind` enum string. Kept here next to the
+/// classifier so the two stay in lockstep.
+#[must_use]
+pub fn dlq_error_kind(err: &ConnectorError) -> &'static str {
+    match err {
+        ConnectorError::Transport(_) => "transport",
+        ConnectorError::BadStatus { .. } => "bad_status",
+        ConnectorError::Decode(_) => "decode",
+        ConnectorError::Config(_) => "config",
+        ConnectorError::InvalidCursor { .. } => "invalid_cursor",
+        ConnectorError::Unsupported(_) => "unsupported",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use connectors::SourceId;
+
+    use super::*;
+
+    /// Stand-in for `tokio::time::sleep` — returns
+    /// immediately and records the durations the
+    /// envelope asked for so the test can assert the
+    /// backoff curve.
+    fn record_sleeps(
+        into: Rc<Cell<Vec<Duration>>>,
+    ) -> impl FnMut(Duration) -> std::future::Ready<()> {
+        move |d| {
+            let mut v = into.take();
+            v.push(d);
+            into.set(v);
+            std::future::ready(())
+        }
+    }
+
+    #[tokio::test]
+    async fn success_first_try_does_not_sleep() {
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let cfg = RetryConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_secs(1),
+        };
+        let calls = Rc::new(Cell::new(0u32));
+        let outcome = with_retry(
+            cfg,
+            || {
+                let c = calls.clone();
+                async move {
+                    c.set(c.get() + 1);
+                    Ok::<u32, ConnectorError>(42)
+                }
+            },
+            record_sleeps(sleeps.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Ok(42)));
+        assert_eq!(calls.get(), 1);
+        assert!(sleeps.take().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retries_transient_500_then_succeeds() {
+        let cfg = RetryConfig {
+            max_attempts: 4,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_secs(1),
+        };
+        let calls = Rc::new(Cell::new(0u32));
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let outcome = with_retry(
+            cfg,
+            || {
+                let c = calls.clone();
+                async move {
+                    let n = c.get() + 1;
+                    c.set(n);
+                    if n < 3 {
+                        Err(ConnectorError::BadStatus {
+                            status: 503,
+                            body: "upstream warming up".into(),
+                        })
+                    } else {
+                        Ok("ok")
+                    }
+                }
+            },
+            record_sleeps(sleeps.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Ok("ok")));
+        assert_eq!(calls.get(), 3);
+        // Sleeps recorded between attempts 1→2 and 2→3 only;
+        // no sleep after the final success.
+        let durations = sleeps.take();
+        assert_eq!(durations.len(), 2);
+        assert_eq!(durations[0], Duration::from_millis(10));
+        assert_eq!(durations[1], Duration::from_millis(20));
+    }
+
+    #[tokio::test]
+    async fn backoff_doubles_until_capped() {
+        let cfg = RetryConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(25),
+        };
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let outcome = with_retry(
+            cfg,
+            || async {
+                Err::<(), _>(ConnectorError::BadStatus {
+                    status: 500,
+                    body: "down".into(),
+                })
+            },
+            record_sleeps(sleeps.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Err { attempts: 5, .. }));
+        let durations = sleeps.take();
+        // 4 sleeps between 5 attempts. 10 → 20 → 25 → 25.
+        assert_eq!(
+            durations,
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(25),
+                Duration::from_millis(25),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retriable_short_circuits_to_dlq() {
+        let cfg = RetryConfig {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(100),
+        };
+        let calls = Rc::new(Cell::new(0u32));
+        let outcome = with_retry(
+            cfg,
+            || {
+                let c = calls.clone();
+                async move {
+                    c.set(c.get() + 1);
+                    Err::<(), _>(ConnectorError::Decode("bad shape".into()))
+                }
+            },
+            record_sleeps(Rc::new(Cell::new(Vec::new()))),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            RetryOutcome::Err {
+                attempts: 1,
+                error: ConnectorError::Decode(_),
+            }
+        ));
+        // Decode is non-retriable — single attempt, no
+        // sleep, straight to the caller.
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn classifier_treats_429_and_5xx_as_retriable() {
+        assert!(is_retriable(&ConnectorError::BadStatus {
+            status: 429,
+            body: String::new(),
+        }));
+        assert!(is_retriable(&ConnectorError::BadStatus {
+            status: 500,
+            body: String::new(),
+        }));
+        assert!(is_retriable(&ConnectorError::BadStatus {
+            status: 503,
+            body: String::new(),
+        }));
+        assert!(!is_retriable(&ConnectorError::BadStatus {
+            status: 404,
+            body: String::new(),
+        }));
+        assert!(!is_retriable(&ConnectorError::BadStatus {
+            status: 400,
+            body: String::new(),
+        }));
+    }
+
+    #[test]
+    fn classifier_treats_decode_config_invalidcursor_unsupported_as_terminal() {
+        assert!(!is_retriable(&ConnectorError::Decode("x".into())));
+        assert!(!is_retriable(&ConnectorError::Config("x".into())));
+        assert!(!is_retriable(&ConnectorError::InvalidCursor {
+            connector: SourceId::DataGovTw,
+            reason: "x".into(),
+        }));
+        assert!(!is_retriable(&ConnectorError::Unsupported("x")));
+    }
+
+    #[test]
+    fn dlq_kind_mapping_is_total() {
+        assert_eq!(
+            dlq_error_kind(&ConnectorError::BadStatus {
+                status: 500,
+                body: String::new(),
+            }),
+            "bad_status",
+        );
+        assert_eq!(
+            dlq_error_kind(&ConnectorError::Decode("x".into())),
+            "decode"
+        );
+        assert_eq!(
+            dlq_error_kind(&ConnectorError::Config("x".into())),
+            "config"
+        );
+        assert_eq!(
+            dlq_error_kind(&ConnectorError::InvalidCursor {
+                connector: SourceId::Twse,
+                reason: "x".into(),
+            }),
+            "invalid_cursor",
+        );
+        assert_eq!(
+            dlq_error_kind(&ConnectorError::Unsupported("x")),
+            "unsupported"
+        );
+    }
+}

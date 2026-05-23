@@ -25,6 +25,7 @@
 
 mod cache_pipeline;
 mod driver;
+mod retry;
 
 use std::env;
 
