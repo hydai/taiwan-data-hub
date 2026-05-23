@@ -59,21 +59,26 @@ export function parseReport(value: unknown): Report | null {
 	if (value === null || typeof value !== 'object') return null;
 	const v = value as Record<string, unknown>;
 	if (typeof v.id !== 'string') return null;
-	if (v.reporter_id !== undefined && typeof v.reporter_id !== 'string') return null;
 	if (typeof v.target_kind !== 'string') return null;
 	if (!(REPORT_TARGET_KINDS as readonly string[]).includes(v.target_kind)) return null;
 	if (typeof v.target_id !== 'string') return null;
 	if (typeof v.reason !== 'string') return null;
 	if (!(REPORT_REASONS as readonly string[]).includes(v.reason)) return null;
-	if (v.body !== undefined && typeof v.body !== 'string') return null;
 	if (typeof v.created_at !== 'string') return null;
-	if (v.resolved_at !== undefined && typeof v.resolved_at !== 'string') return null;
-	if (v.resolved_by !== undefined && typeof v.resolved_by !== 'string') return null;
-	if (v.action_taken !== undefined) {
+	// Optional fields: accept `undefined` (skipped field)
+	// AND `null` (Rust `Option::<T>::None` serialised
+	// without the `skip_serializing_if` adapter).
+	// `reporter_id` in particular can be NULL after a
+	// user deletion sets the FK to SET NULL.
+	if (!isOptionalString(v.reporter_id)) return null;
+	if (!isOptionalString(v.body)) return null;
+	if (!isOptionalString(v.resolved_at)) return null;
+	if (!isOptionalString(v.resolved_by)) return null;
+	if (v.action_taken !== undefined && v.action_taken !== null) {
 		if (typeof v.action_taken !== 'string') return null;
 		if (!(REPORT_ACTIONS as readonly string[]).includes(v.action_taken)) return null;
 	}
-	if (v.resolution_note !== undefined && typeof v.resolution_note !== 'string') return null;
+	if (!isOptionalString(v.resolution_note)) return null;
 	return {
 		id: v.id,
 		reporter_id: typeof v.reporter_id === 'string' ? v.reporter_id : undefined,
@@ -87,6 +92,16 @@ export function parseReport(value: unknown): Report | null {
 		action_taken: typeof v.action_taken === 'string' ? (v.action_taken as ReportAction) : undefined,
 		resolution_note: typeof v.resolution_note === 'string' ? v.resolution_note : undefined
 	};
+}
+
+/**
+ * Accept `undefined` (field omitted by serde's
+ * `skip_serializing_if`) and `null` (Rust `None`
+ * serialized without the skip adapter) as equivalent for
+ * a JS-side optional. Anything else must be a `string`.
+ */
+function isOptionalString(v: unknown): boolean {
+	return v === undefined || v === null || typeof v === 'string';
 }
 
 export function parseReportArray(value: unknown): Report[] | null {

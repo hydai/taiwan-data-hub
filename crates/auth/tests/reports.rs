@@ -47,8 +47,14 @@ impl ReportRepo for ReportStore {
             .map(|(id, _)| *id);
         let report_id = if let Some(id) = existing_id {
             let row = inner.get_mut(&id).unwrap();
-            row.reason = new.reason;
-            new.body.clone_into(&mut row.body);
+            // Resolved rows are immutable from this path
+            // — matches the production CASE WHEN guard so
+            // a reporter can't rewrite the audit trail
+            // after a moderator already dispositioned.
+            if row.resolved_at.is_none() {
+                row.reason = new.reason;
+                new.body.clone_into(&mut row.body);
+            }
             id
         } else {
             let id = Uuid::now_v7();
@@ -373,6 +379,52 @@ async fn resolve_delete_on_submission_rejected_at_service() {
         denied.unwrap_err(),
         ResolveDenialReason::CannotDeleteSubmission
     );
+}
+
+#[tokio::test]
+async fn resolved_report_is_immutable_via_resubmit() {
+    let (repo, svc) = make_service();
+    let reporter = Uuid::now_v7();
+    let target = Uuid::now_v7();
+    // 1) File initial report.
+    let first = svc
+        .submit(
+            reporter,
+            ReportTargetKind::Comment,
+            target,
+            ReportReason::Spam,
+            Some("payload one".into()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    // 2) Moderator resolves it.
+    svc.resolve(first.report_id, Uuid::now_v7(), ReportAction::Keep, None)
+        .await
+        .unwrap()
+        .unwrap();
+    // 3) Same reporter re-files with a different reason
+    //    and body. The upsert returns the same id, but
+    //    the persisted reason/body must stay frozen.
+    svc.submit(
+        reporter,
+        ReportTargetKind::Comment,
+        target,
+        ReportReason::Harassment,
+        Some("payload two — should be ignored".into()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stored = repo
+        .rows
+        .lock()
+        .unwrap()
+        .get(&first.report_id)
+        .cloned()
+        .unwrap();
+    assert_eq!(stored.reason, ReportReason::Spam);
+    assert_eq!(stored.body.as_deref(), Some("payload one"));
 }
 
 #[tokio::test]

@@ -40,6 +40,13 @@ pub struct ReportsState {
 #[derive(Debug, Serialize)]
 pub struct ReportResponse {
     pub id: Uuid,
+    // Skip serialising when None so the wire shape is
+    // consistent with the other optional fields. Reporter
+    // FK is SET NULL on user deletion, so a moderator
+    // could see a report row whose `reporter_id` is
+    // missing — clients should treat absent and null
+    // identically.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reporter_id: Option<Uuid>,
     pub target_kind: &'static str,
     pub target_id: Uuid,

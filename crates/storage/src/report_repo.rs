@@ -269,15 +269,26 @@ impl ReportRepo for Storage {
         let mut tx = self.pool().begin().await?;
         // Insert the report. ON CONFLICT keeps the
         // existing row so the moderator queue stays
-        // de-duped. We still return the row's id either
-        // way so the caller can echo it.
+        // de-duped, and the CASE WHEN guards make a
+        // resolved row immutable from this path — a
+        // reporter re-filing after a moderator already
+        // dispositioned can't rewrite the audit trail.
+        // The `DO UPDATE` body still executes
+        // unconditionally on conflict so RETURNING
+        // always emits the row id.
         let inserted = sqlx::query(
             "INSERT INTO reports
                  (reporter_id, target_kind, target_id, reason_category, body, created_at)
              VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT (reporter_id, target_kind, target_id) DO UPDATE
-                SET reason_category = EXCLUDED.reason_category,
-                    body            = EXCLUDED.body
+                SET reason_category = CASE WHEN reports.resolved_at IS NULL
+                                           THEN EXCLUDED.reason_category
+                                           ELSE reports.reason_category
+                                      END,
+                    body            = CASE WHEN reports.resolved_at IS NULL
+                                           THEN EXCLUDED.body
+                                           ELSE reports.body
+                                      END
              RETURNING id",
         )
         .bind(new.reporter_id)
