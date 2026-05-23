@@ -51,7 +51,18 @@ CREATE TABLE reports (
         OR action_taken IN ('hide', 'keep', 'delete', 'warn_author')
     ),
     CONSTRAINT reports_resolved_atoms CHECK (
-        (resolved_at IS NULL AND resolved_by IS NULL AND action_taken IS NULL)
+        -- Unresolved: all dispositioning columns must be
+        -- NULL — including resolution_note, so a
+        -- partially-written row can't slip through.
+        (
+            resolved_at IS NULL
+            AND resolved_by IS NULL
+            AND action_taken IS NULL
+            AND resolution_note IS NULL
+        )
+        -- Resolved: action + timestamp required. Note is
+        -- still optional — the moderator can disposition
+        -- without leaving a comment.
         OR (resolved_at IS NOT NULL AND action_taken IS NOT NULL)
     ),
     -- One report per (reporter, target). Re-filing is a

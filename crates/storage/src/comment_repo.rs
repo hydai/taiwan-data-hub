@@ -416,6 +416,7 @@ impl CommentRepo for Storage {
               WHERE id = $1
                 AND user_id = $2
                 AND deleted_at IS NULL
+                AND hidden_at IS NULL
                 AND $5 - created_at <= $4::bigint * INTERVAL '1 second'
              RETURNING id, target_kind, target_id, parent_id, user_id, body_md, depth,
                        created_at, edited_at, deleted_at, hidden_at",
@@ -443,6 +444,7 @@ impl CommentRepo for Storage {
               WHERE id = $1
                 AND user_id = $2
                 AND deleted_at IS NULL
+                AND hidden_at IS NULL
              RETURNING id, target_kind, target_id, parent_id, user_id, body_md, depth,
                        created_at, edited_at, deleted_at, hidden_at",
         )

@@ -93,6 +93,13 @@ pub enum CommentDenialReason {
     ParentNotFound,
     /// Body validation failed — empty (post-trim) or too long.
     InvalidBody(BodyError),
+    /// Comment is hidden by community reports or a
+    /// moderator. The DB-level edit/delete predicates
+    /// also reject the write, so this denial surfaces
+    /// the reason cleanly to the API (gateway → 409
+    /// conflict) instead of falling back to a
+    /// misleading "edit window closed".
+    Hidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,16 +313,20 @@ impl CommentService {
             //      session and the row's `user_id` mismatched.
             //
             // Distinguish (1) from (2/3) by re-reading the row.
-            // A still-present, still-owned, still-non-deleted
-            // row → window closed. Anything else → 404. This
-            // mirrors the spec the pre-read above started.
+            // A still-present, still-owned, still-non-deleted,
+            // still-non-hidden row → window closed.
+            // Owned-but-hidden → moderator/community hide.
+            // Anything else → 404.
             let recheck = self.comments.get(comment_id).await?;
-            let still_eligible =
-                recheck.is_some_and(|r| r.user_id == Some(author_id) && r.deleted_at.is_none());
-            return Ok(Err(if still_eligible {
-                CommentDenialReason::EditWindowClosed
-            } else {
-                CommentDenialReason::NotFoundOrNotYours
+            return Ok(Err(match recheck {
+                Some(r) if r.user_id == Some(author_id) && r.deleted_at.is_none() => {
+                    if r.hidden_at.is_some() {
+                        CommentDenialReason::Hidden
+                    } else {
+                        CommentDenialReason::EditWindowClosed
+                    }
+                }
+                _ => CommentDenialReason::NotFoundOrNotYours,
             }));
         };
         Ok(Ok(render_row(row)))
@@ -331,7 +342,23 @@ impl CommentService {
     ) -> Result<Result<RenderedComment, CommentDenialReason>, AuthError> {
         let now = Utc::now();
         let Some(row) = self.comments.delete(comment_id, author_id, now).await? else {
-            return Ok(Err(CommentDenialReason::NotFoundOrNotYours));
+            // The UPDATE rejected the soft-delete. Recheck
+            // so a hidden-by-moderator row surfaces as
+            // `Hidden` rather than a misleading "not
+            // found" — the author still owns it, the
+            // gateway just shouldn't let them drop the
+            // body and erase the audit trail.
+            let recheck = self.comments.get(comment_id).await?;
+            return Ok(Err(match recheck {
+                Some(r) if r.user_id == Some(author_id) && r.deleted_at.is_none() => {
+                    if r.hidden_at.is_some() {
+                        CommentDenialReason::Hidden
+                    } else {
+                        CommentDenialReason::NotFoundOrNotYours
+                    }
+                }
+                _ => CommentDenialReason::NotFoundOrNotYours,
+            }));
         };
         Ok(Ok(render_row(row)))
     }

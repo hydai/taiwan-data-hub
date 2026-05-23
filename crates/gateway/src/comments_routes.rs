@@ -273,6 +273,9 @@ impl ApiError {
                 "body_md too long (max {} characters)",
                 auth::MAX_COMMENT_BODY_LEN
             )),
+            CommentDenialReason::Hidden => Self::Conflict(
+                "this comment is hidden by community reports and cannot be edited or deleted by the author".to_owned(),
+            ),
         }
     }
 }
