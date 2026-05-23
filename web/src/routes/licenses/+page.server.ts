@@ -5,12 +5,15 @@
  * single place to audit what licensing terms apply to the data
  * surfaced via the marketplace.
  *
- * SSR-only load: the dataset list is static-ish (rebuilt at deploy
- * time from config/datasets.yaml), so there's no benefit to client
- * fetching and the page benefits from SSR's SEO crawl.
+ * Server-only load (`+page.server.ts`, `PageServerLoad`): the YAML
+ * fixture + parsing pipeline lives in `$lib/datasets/load.ts`,
+ * which we don't want to ship into the client bundle. Restricting
+ * this load to the server keeps the YAML parser and the entire
+ * dataset corpus out of the JS payload — the page receives only
+ * the small `licenses` array it actually renders.
  */
 import { loadAllDatasets } from '$lib/datasets/load';
-import type { PageLoad } from './$types';
+import type { PageServerLoad } from './$types';
 
 export const prerender = true;
 
@@ -27,7 +30,7 @@ interface LicenseGroup {
 	datasets: { slug: string; name: string }[];
 }
 
-export const load: PageLoad = () => {
+export const load: PageServerLoad = () => {
 	const all = loadAllDatasets();
 	const groups = new Map<string, LicenseGroup>();
 	// Walk in slug order so the "first dataset with a URL wins"
