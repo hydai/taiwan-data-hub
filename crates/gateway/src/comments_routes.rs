@@ -84,10 +84,18 @@ impl From<auth::RenderedComment> for CommentResponse {
     }
 }
 
+/// Query params for the list endpoint. Both fields are
+/// `Option<String>` (not bare `String`) so a request missing
+/// either one flows through this handler's `ApiError::Validation`
+/// path — the structured `{error, message}` body — instead of
+/// axum's default plain-text `QueryRejection`, which would
+/// bypass the rest of the route's error shape contract.
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    pub target_kind: String,
-    pub target_id: String,
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,8 +125,16 @@ async fn list_comments(
     State(svc): State<Arc<CommentService>>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<CommentResponse>>, ApiError> {
-    let target_kind = parse_kind(&query.target_kind)?;
-    let target_id = parse_uuid("target_id", &query.target_id)?;
+    let kind_str = query
+        .target_kind
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation("target_kind query param is required".to_owned()))?;
+    let id_str = query
+        .target_id
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation("target_id query param is required".to_owned()))?;
+    let target_kind = parse_kind(kind_str)?;
+    let target_id = parse_uuid("target_id", id_str)?;
     let rendered = svc
         .list_for_target(target_kind, target_id)
         .await
