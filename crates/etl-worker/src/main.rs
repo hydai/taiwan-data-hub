@@ -34,7 +34,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use connectors::{SourceConnector, SourceId, data_gov_tw::DataGovTwConnector, twse::TwseConnector};
+use connectors::{
+    SourceConnector, SourceId, data_gov_tw::DataGovTwConnector, moea::MoeaConnector,
+    twse::TwseConnector,
+};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use storage::{CacheState, DlqErrorKind, EtlDlqRepo, NewDlqEntry, Storage};
@@ -207,13 +210,19 @@ async fn build_connector_for(id: SourceId, sources_path: &str) -> Result<Arc<dyn
                 .context("could not build TWSE connector")?;
             Ok(Arc::new(c) as Arc<dyn SourceConnector>)
         }
-        SourceId::Moea | SourceId::Cwa | SourceId::FisheryMoa => {
-            // M5b.3–M5b.5 add cases here as connectors land. Until
+        SourceId::Moea => {
+            let c = MoeaConnector::new()
+                .await
+                .context("could not build MOEA connector")?;
+            Ok(Arc::new(c) as Arc<dyn SourceConnector>)
+        }
+        SourceId::Cwa | SourceId::FisheryMoa => {
+            // M5b.4–M5b.5 add cases here as connectors land. Until
             // then, an `enabled = true` row for an unimplemented
             // source fails boot loudly — better than a silently-
             // skipped crawl.
             anyhow::bail!(
-                "{id} connector is not yet implemented (see #5b.3–#5b.5); \
+                "{id} connector is not yet implemented (see #5b.4–#5b.5); \
                  set sources.{id}.enabled = false in {sources_path}"
             )
         }
@@ -683,24 +692,24 @@ mod tests {
 
     /// `build_connector_for` is the choke point that gates an
     /// `enabled = true` source against an actually-implemented
-    /// connector. Today `DataGovTw` + `Twse` are
+    /// connector. Today `DataGovTw` + `Twse` + `Moea` are
     /// implemented; the others must error loudly so a
     /// sources.toml typo or a premature flip can't
     /// silently drop a crawl.
     ///
-    /// `Twse` isn't asserted here because its construction
-    /// fetches a real `robots.txt` from `www.twse.com.tw`,
-    /// which a unit test shouldn't depend on. The TWSE
+    /// `Twse` and `Moea` aren't asserted here because their
+    /// constructors fetch real `robots.txt` from the upstream
+    /// hosts, which a unit test shouldn't depend on. Each
     /// builder's `auto_fetch_robots(false)` escape hatch
-    /// covers that surface in `connectors::twse::tests`.
+    /// covers that surface in the connector's own `tests`
+    /// module.
     #[tokio::test]
     async fn build_connector_implemented_sources_succeed() {
         let path = "config/sources.toml";
         assert!(build_connector_for(SourceId::DataGovTw, path).await.is_ok());
-        // M5b.3-5 will turn these into `Ok` as their connectors
+        // M5b.4–5 will turn these into `Ok` as their connectors
         // land; flipping the assertion in lockstep keeps the
         // test the spec.
-        assert!(build_connector_for(SourceId::Moea, path).await.is_err());
         assert!(build_connector_for(SourceId::Cwa, path).await.is_err());
         assert!(
             build_connector_for(SourceId::FisheryMoa, path)
@@ -718,19 +727,19 @@ mod tests {
     /// The error message must surface the actual loaded path,
     /// not the default — otherwise an operator using
     /// `SOURCES_CONFIG_PATH` to point at e.g. `/etc/td-hub/sources.toml`
-    /// would be told to edit the wrong file. Uses `Moea`
-    /// (still unimplemented until #5b.3) to exercise the
+    /// would be told to edit the wrong file. Uses `Cwa`
+    /// (still unimplemented until #5b.4) to exercise the
     /// path-aware error.
     #[tokio::test]
     async fn build_connector_error_message_carries_custom_path() {
         let path = "/etc/td-hub/sources.toml";
-        let result = build_connector_for(SourceId::Moea, path).await;
+        let result = build_connector_for(SourceId::Cwa, path).await;
         // Can't use `unwrap_err` because the Ok variant
         // (`Arc<dyn SourceConnector>`) doesn't implement
         // `Debug`. `let-else` keeps clippy's
         // `manual-let-else` lint happy.
         let Err(err) = result else {
-            panic!("expected Moea to be unimplemented")
+            panic!("expected Cwa to be unimplemented")
         };
         let msg = format!("{err}");
         assert!(

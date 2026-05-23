@@ -40,9 +40,11 @@ retry_initial_backoff_secs = 30
 retry_max_backoff_secs = 1800
 
 [sources.moea]
-# Enable when the MOEA Business Registry connector lands (#5b.3).
-enabled = false
-# 03:00 Asia/Taipei = 19:00 UTC. Off-peak window.
+enabled = true
+# 03:00 Asia/Taipei = 19:00 UTC. Off-peak window —
+# MOEA's open-data hub gets meaningful daytime traffic,
+# so the catalog walk runs in the dead of the night
+# Taipei-time to keep our footprint minimal.
 cron_utc = "0 0 19 * * * *"
 retry_max_attempts = 3
 retry_initial_backoff_secs = 30
