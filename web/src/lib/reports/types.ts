@@ -32,8 +32,31 @@ export const REASON_LABELS: Record<ReportReason, string> = {
 
 export interface ReportSubmitResponse {
 	id: string;
+	created: boolean;
 	reporter_count: number;
 	freshly_hidden: boolean;
+}
+
+/**
+ * Runtime narrower for the POST /api/v1/reports
+ * response. Mirrors `parseRatingView` / `parseBookmark`
+ * — returns `null` on shape mismatch so the consumer
+ * can degrade to "unexpected response" instead of
+ * silently treating a missing `freshly_hidden` as false.
+ */
+export function parseReportSubmitResponse(value: unknown): ReportSubmitResponse | null {
+	if (value === null || typeof value !== 'object') return null;
+	const v = value as Record<string, unknown>;
+	if (typeof v.id !== 'string') return null;
+	if (typeof v.created !== 'boolean') return null;
+	if (typeof v.reporter_count !== 'number' || !Number.isFinite(v.reporter_count)) return null;
+	if (typeof v.freshly_hidden !== 'boolean') return null;
+	return {
+		id: v.id,
+		created: v.created,
+		reporter_count: v.reporter_count,
+		freshly_hidden: v.freshly_hidden
+	};
 }
 
 export interface Report {

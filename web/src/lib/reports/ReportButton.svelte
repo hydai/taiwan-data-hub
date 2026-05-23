@@ -1,19 +1,26 @@
 <!--
 	Report button (#5a.6). Mounted alongside the
-	edit/delete affordances on a comment row (and the
-	submission detail view). Opens an inline disclosure
-	with the reason picker + optional context textarea;
-	submitting POSTs to `/api/v1/reports` and collapses
-	with a one-line confirmation.
+	edit/delete affordances on a comment row. Opens an
+	inline disclosure with the reason picker + optional
+	context textarea; submitting POSTs to
+	`/api/v1/reports` and collapses with a one-line
+	confirmation.
 
-	The component is polymorphic over `target_kind` so it
-	reuses for both comments and submissions; the
-	`onReported` callback lets the parent component
-	immediately reflect the new hidden state when the
-	auto-hide threshold trips.
+	The component is polymorphic over `target_kind` —
+	the gateway accepts both `comment` and `submission`
+	kinds — but only the comment thread mounts it
+	today. Wiring the same button into a submission
+	detail view is a follow-up (no user-facing
+	submission detail page exists yet; submissions are
+	reachable through `/admin/moderation` only).
+
+	The `onReported` callback lets the parent
+	component immediately reflect the new hidden state
+	when the auto-hide threshold trips.
 -->
 <script lang="ts">
 	import {
+		parseReportSubmitResponse,
 		REASON_LABELS,
 		REPORT_BODY_MAX_LEN,
 		REPORT_REASONS,
@@ -53,7 +60,15 @@
 	async function submit(): Promise<void> {
 		if (inFlight) return;
 		const trimmed = body.trim();
-		if (trimmed.length > REPORT_BODY_MAX_LEN) {
+		// Server caps by Unicode scalar count
+		// (`chars().count()` in Rust). `String.length`
+		// counts UTF-16 code units, so a surrogate-pair
+		// emoji counts as 2 there and 1 here — without
+		// the `[...trimmed].length` spread, the UI
+		// validation would disagree with the gateway and
+		// some inputs would slip past the client only to
+		// 400 on the server.
+		if ([...trimmed].length > REPORT_BODY_MAX_LEN) {
 			error = `Context too long (max ${REPORT_BODY_MAX_LEN} characters).`;
 			return;
 		}
@@ -85,7 +100,12 @@
 				}
 				return;
 			}
-			const payload = (await res.json().catch(() => null)) as ReportSubmitResponse | null;
+			// Runtime-narrow the response instead of trusting
+			// a bare cast — a gateway shape drift would
+			// otherwise silently treat `freshly_hidden` as
+			// undefined and skip the "hidden pending review"
+			// confirmation.
+			const payload = parseReportSubmitResponse(await res.json().catch(() => null));
 			if (payload === null) {
 				error = 'Gateway returned an unexpected response.';
 				return;

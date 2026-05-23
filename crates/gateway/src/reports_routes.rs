@@ -108,10 +108,18 @@ pub struct SubmitRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ListOpenQuery {
+    /// String-typed so axum's query extractor never
+    /// rejects a malformed timestamp with a plain-text
+    /// 400 — the parse happens in the handler so a bad
+    /// `?before=` returns the structured `{error,
+    /// message}` envelope every other endpoint uses.
     #[serde(default)]
-    pub before: Option<DateTime<Utc>>,
+    pub before: Option<String>,
+    /// Same shape as `before` — string-typed so a
+    /// non-integer `?limit=` doesn't bypass the
+    /// envelope.
     #[serde(default)]
-    pub limit: Option<i64>,
+    pub limit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,7 +212,7 @@ async fn list_mine(
     Query(query): Query<ListOpenQuery>,
 ) -> Result<Json<Vec<ReportResponse>>, ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
-    let limit = clamp_limit(query.limit);
+    let limit = parse_limit(query.limit.as_deref())?;
     let rows = state
         .reports
         .list_for_reporter(session.user_id, limit)
@@ -225,10 +233,11 @@ async fn list_open(
         .await
         .map_err(ApiError::from)?
         .map_err(ApiError::from_moderation_denial)?;
-    let limit = clamp_limit(query.limit);
+    let limit = parse_limit(query.limit.as_deref())?;
+    let before = parse_before(query.before.as_deref())?;
     let rows = state
         .reports
-        .list_open(query.before, limit)
+        .list_open(before, limit)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(rows.into_iter().map(ReportResponse::from).collect()))
@@ -287,13 +296,36 @@ fn parse_uuid(field: &str, raw: &str) -> Result<Uuid, ApiError> {
         .map_err(|_| ApiError::Validation(format!("{field} `{raw}` is not a valid UUID")))
 }
 
-fn clamp_limit(limit: Option<i64>) -> i64 {
-    let v = limit.unwrap_or(DEFAULT_LIST_LIMIT);
-    if v <= 0 {
+/// Parse `?limit=` into an i64, applying the default
+/// when missing/blank, clamping to `[1, MAX_LIST_LIMIT]`.
+/// A non-integer string returns `ApiError::Validation`
+/// so the response keeps the `{error, message}`
+/// envelope (raw `Option<i64>` on the query extractor
+/// would let axum reject with a plain-text 400 instead).
+fn parse_limit(raw: Option<&str>) -> Result<i64, ApiError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(DEFAULT_LIST_LIMIT);
+    };
+    let v: i64 = s
+        .parse()
+        .map_err(|_| ApiError::Validation(format!("limit `{s}` is not a valid integer")))?;
+    Ok(if v <= 0 {
         DEFAULT_LIST_LIMIT
     } else {
         v.min(MAX_LIST_LIMIT)
-    }
+    })
+}
+
+/// Parse `?before=` as an RFC3339 timestamp; same
+/// envelope-preserving rationale as `parse_limit`.
+fn parse_before(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed: DateTime<Utc> = s.parse().map_err(|_| {
+        ApiError::Validation(format!("before `{s}` is not a valid RFC3339 timestamp"))
+    })?;
+    Ok(Some(parsed))
 }
 
 #[derive(Debug)]
@@ -410,10 +442,38 @@ mod tests {
     }
 
     #[test]
-    fn clamp_limit_defaults_and_caps() {
-        assert_eq!(clamp_limit(None), DEFAULT_LIST_LIMIT);
-        assert_eq!(clamp_limit(Some(0)), DEFAULT_LIST_LIMIT);
-        assert_eq!(clamp_limit(Some(10)), 10);
-        assert_eq!(clamp_limit(Some(1_000)), MAX_LIST_LIMIT);
+    fn parse_limit_defaults_and_caps() {
+        assert_eq!(parse_limit(None).unwrap(), DEFAULT_LIST_LIMIT);
+        assert_eq!(parse_limit(Some("")).unwrap(), DEFAULT_LIST_LIMIT);
+        assert_eq!(parse_limit(Some("0")).unwrap(), DEFAULT_LIST_LIMIT);
+        assert_eq!(parse_limit(Some("10")).unwrap(), 10);
+        assert_eq!(parse_limit(Some("1000")).unwrap(), MAX_LIST_LIMIT);
+    }
+
+    #[test]
+    fn parse_limit_rejects_garbage() {
+        assert!(matches!(
+            parse_limit(Some("not-a-number")).unwrap_err(),
+            ApiError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn parse_before_accepts_rfc3339() {
+        assert!(
+            parse_before(Some("2026-05-23T10:00:00Z"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(parse_before(None).unwrap().is_none());
+        assert!(parse_before(Some("")).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_before_rejects_garbage() {
+        assert!(matches!(
+            parse_before(Some("not-a-date")).unwrap_err(),
+            ApiError::Validation(_)
+        ));
     }
 }
