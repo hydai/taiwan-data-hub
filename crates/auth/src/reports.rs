@@ -169,6 +169,11 @@ impl ReportService {
                     action,
                     resolution_note: resolution_note.as_deref(),
                     also_hide_target: matches!(action, ReportAction::Hide),
+                    // `Keep` is the moderator vouching for
+                    // the content — clear `hidden_at` so an
+                    // auto-hide trip can be undone without a
+                    // separate operator step.
+                    also_unhide_target: matches!(action, ReportAction::Keep),
                     also_delete_target: matches!(action, ReportAction::Delete),
                 },
                 Utc::now(),

@@ -189,8 +189,16 @@ impl ReportRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InsertOutcome {
     pub report_id: Uuid,
-    /// Distinct reporters on this target *after* this
-    /// insert, including the caller.
+    /// `true` when a fresh row was inserted. `false`
+    /// when the upsert hit an existing
+    /// `(reporter, target)` row (which the gateway maps
+    /// to 200 vs the freshly-created 201).
+    pub created: bool,
+    /// Unresolved reporters on this target *after* this
+    /// insert, including the caller. Resolved reports
+    /// don't count — once a moderator dispositions a
+    /// report it stops contributing to the auto-hide
+    /// threshold.
     pub reporter_count: i64,
     /// `true` when the target's `hidden_at` was just
     /// flipped from `NULL` → `now()` by this insert.
@@ -199,8 +207,8 @@ pub struct InsertOutcome {
 
 /// Disposition the service hands to
 /// [`ReportRepo::resolve`]. Bundles the action enum,
-/// optional moderator note, and the two side-effect
-/// flags into one record so the trait signature stays
+/// optional moderator note, and the side-effect flags
+/// into one record so the trait signature stays
 /// readable.
 #[derive(Debug, Clone)]
 pub struct ResolveSpec<'a> {
@@ -210,6 +218,14 @@ pub struct ResolveSpec<'a> {
     /// `now`. The service sets this in lockstep with
     /// [`ReportAction::Hide`].
     pub also_hide_target: bool,
+    /// When true, the target's `hidden_at` is cleared
+    /// (set to `NULL`). The service sets this on
+    /// [`ReportAction::Keep`] so an auto-hidden target
+    /// becomes visible again once a moderator vouches
+    /// for it. The unhide is unconditional — if the
+    /// target was visible to begin with, this is a
+    /// no-op.
+    pub also_unhide_target: bool,
     /// When true, the comment row is soft-deleted. Has
     /// no effect for submission targets — the service
     /// refuses that combination upstream.
@@ -276,6 +292,11 @@ impl ReportRepo for Storage {
         // The `DO UPDATE` body still executes
         // unconditionally on conflict so RETURNING
         // always emits the row id.
+        // `xmax = 0` on the RETURNING row means a fresh
+        // INSERT; `xmax != 0` means the ON CONFLICT DO
+        // UPDATE path fired. Postgres exposes the system
+        // column directly, so we get the created vs
+        // upserted signal without an extra round trip.
         let inserted = sqlx::query(
             "INSERT INTO reports
                  (reporter_id, target_kind, target_id, reason_category, body, created_at)
@@ -289,7 +310,7 @@ impl ReportRepo for Storage {
                                            THEN EXCLUDED.body
                                            ELSE reports.body
                                       END
-             RETURNING id",
+             RETURNING id, (xmax = 0) AS created",
         )
         .bind(new.reporter_id)
         .bind(new.target_kind.as_str())
@@ -300,14 +321,20 @@ impl ReportRepo for Storage {
         .fetch_one(&mut *tx)
         .await?;
         let report_id: Uuid = inserted.try_get("id")?;
-        // Count distinct reporters on this target now that
-        // the row is in. NULL reporter_id (deleted user) is
-        // counted as a distinct vote — the moderation
-        // signal stays.
+        let created: bool = inserted.try_get("created")?;
+        // Count UNRESOLVED reporters on this target. Once
+        // a moderator dispositions a report, it stops
+        // contributing to the auto-hide threshold —
+        // otherwise the historical count would stay ≥
+        // threshold forever and re-hide content on every
+        // new (possibly innocuous) report after a Keep.
+        // NULL reporter_id (deleted user) still counts;
+        // moderation signal trumps user-account churn.
         let count_row = sqlx::query(
             "SELECT COUNT(*)::BIGINT AS n
                FROM reports
-              WHERE target_kind = $1 AND target_id = $2",
+              WHERE target_kind = $1 AND target_id = $2
+                AND resolved_at IS NULL",
         )
         .bind(new.target_kind.as_str())
         .bind(new.target_id)
@@ -340,6 +367,7 @@ impl ReportRepo for Storage {
         tx.commit().await?;
         Ok(InsertOutcome {
             report_id,
+            created,
             reporter_count,
             freshly_hidden,
         })
@@ -440,6 +468,20 @@ impl ReportRepo for Storage {
             );
             sqlx::query(&sql)
                 .bind(now)
+                .bind(parsed.target_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        if spec.also_unhide_target {
+            let table = match parsed.target_kind {
+                ReportTargetKind::Comment => "comments",
+                ReportTargetKind::Submission => "submissions",
+            };
+            let sql = format!(
+                "UPDATE {table} SET hidden_at = NULL
+                  WHERE id = $1 AND hidden_at IS NOT NULL"
+            );
+            sqlx::query(&sql)
                 .bind(parsed.target_id)
                 .execute(&mut *tx)
                 .await?;

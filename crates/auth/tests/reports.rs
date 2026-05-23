@@ -45,17 +45,13 @@ impl ReportRepo for ReportStore {
                     && r.target_id == new.target_id
             })
             .map(|(id, _)| *id);
-        let report_id = if let Some(id) = existing_id {
+        let (report_id, created) = if let Some(id) = existing_id {
             let row = inner.get_mut(&id).unwrap();
-            // Resolved rows are immutable from this path
-            // — matches the production CASE WHEN guard so
-            // a reporter can't rewrite the audit trail
-            // after a moderator already dispositioned.
             if row.resolved_at.is_none() {
                 row.reason = new.reason;
                 new.body.clone_into(&mut row.body);
             }
-            id
+            (id, false)
         } else {
             let id = Uuid::now_v7();
             inner.insert(
@@ -74,12 +70,20 @@ impl ReportRepo for ReportStore {
                     resolution_note: None,
                 },
             );
-            id
+            (id, true)
         };
+        // Only count UNRESOLVED reports — resolved ones
+        // stop contributing to the threshold so a Keep
+        // followed by a new report doesn't immediately
+        // re-trip the auto-hide.
         let reporter_count = i64::try_from(
             inner
                 .values()
-                .filter(|r| r.target_kind == new.target_kind && r.target_id == new.target_id)
+                .filter(|r| {
+                    r.target_kind == new.target_kind
+                        && r.target_id == new.target_id
+                        && r.resolved_at.is_none()
+                })
                 .count(),
         )
         .unwrap_or(i64::MAX);
@@ -93,6 +97,7 @@ impl ReportRepo for ReportStore {
         }
         Ok(ReportInsertOutcome {
             report_id,
+            created,
             reporter_count,
             freshly_hidden,
         })
@@ -167,6 +172,10 @@ impl ReportRepo for ReportStore {
                 hidden.push(target_key);
             }
         }
+        if spec.also_unhide_target {
+            let mut hidden = self.hidden_targets.lock().unwrap();
+            hidden.retain(|t| t != &target_key);
+        }
         Ok(Some(snapshot))
     }
 }
@@ -195,10 +204,11 @@ async fn submit_round_trips_and_dedups_per_reporter() {
         .await
         .unwrap()
         .unwrap();
+    assert!(first.created);
     assert!(!first.freshly_hidden);
     assert_eq!(first.reporter_count, 1);
-    // Second filing from the SAME reporter is a no-op for
-    // the count (ON CONFLICT) — still 1.
+    // Second filing from the SAME reporter is an upsert
+    // (created=false), and the unresolved count stays 1.
     let second = svc
         .submit(
             reporter,
@@ -210,8 +220,100 @@ async fn submit_round_trips_and_dedups_per_reporter() {
         .await
         .unwrap()
         .unwrap();
+    assert!(!second.created);
     assert_eq!(second.reporter_count, 1);
     assert_eq!(second.report_id, first.report_id);
+}
+
+#[tokio::test]
+async fn keep_clears_auto_hide() {
+    let (repo, svc) = make_service();
+    let target = Uuid::now_v7();
+    let mut last_report_id = None;
+    for _ in 0..REPORT_AUTO_HIDE_THRESHOLD {
+        let outcome = svc
+            .submit(
+                Uuid::now_v7(),
+                ReportTargetKind::Comment,
+                target,
+                ReportReason::Spam,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        last_report_id = Some(outcome.report_id);
+    }
+    assert!(
+        repo.hidden_targets
+            .lock()
+            .unwrap()
+            .contains(&(ReportTargetKind::Comment, target))
+    );
+    // Moderator resolves the most recent report as Keep.
+    svc.resolve(
+        last_report_id.unwrap(),
+        Uuid::now_v7(),
+        ReportAction::Keep,
+        None,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        !repo
+            .hidden_targets
+            .lock()
+            .unwrap()
+            .contains(&(ReportTargetKind::Comment, target)),
+        "Keep should clear the auto-hide flag"
+    );
+}
+
+#[tokio::test]
+async fn unresolved_count_is_the_threshold() {
+    let (repo, svc) = make_service();
+    let target = Uuid::now_v7();
+    let mut report_ids = Vec::new();
+    for _ in 0..REPORT_AUTO_HIDE_THRESHOLD {
+        let outcome = svc
+            .submit(
+                Uuid::now_v7(),
+                ReportTargetKind::Comment,
+                target,
+                ReportReason::Spam,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        report_ids.push(outcome.report_id);
+    }
+    // Resolve all three as Keep — now the unresolved
+    // count is 0 and the target is visible again.
+    for id in &report_ids {
+        svc.resolve(*id, Uuid::now_v7(), ReportAction::Keep, None)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    repo.hidden_targets.lock().unwrap().clear();
+    // A single fresh reporter shouldn't re-trip the hide.
+    // The unresolved count is just 1 — well under the
+    // threshold — even though the all-time count is 4.
+    let outcome = svc
+        .submit(
+            Uuid::now_v7(),
+            ReportTargetKind::Comment,
+            target,
+            ReportReason::Spam,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!outcome.freshly_hidden);
+    assert_eq!(outcome.reporter_count, 1);
 }
 
 #[tokio::test]

@@ -30,7 +30,7 @@
 		parseRenderedComment,
 		parseRenderedCommentArray
 	} from '$lib/comments/gateway';
-	import { MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
+	import { HIDDEN_COMMENT_HTML, MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
 	import ReportButton from '$lib/reports/ReportButton.svelte';
 
 	let {
@@ -393,7 +393,11 @@
 										onReported={(r) => {
 											if (r.freshly_hidden) {
 												group.root.is_hidden = true;
-												group.root.body_html = '<p>[hidden by community reports]</p>';
+												group.root.body_html = HIDDEN_COMMENT_HTML;
+												// Match the server's "drop markdown on hide"
+												// behaviour so a future UI tweak can't surface
+												// the original body from the cached prop.
+												group.root.body_md = undefined;
 											}
 										}}
 									/>
@@ -471,7 +475,8 @@
 														onReported={(r) => {
 															if (r.freshly_hidden) {
 																reply.is_hidden = true;
-																reply.body_html = '<p>[hidden by community reports]</p>';
+																reply.body_html = HIDDEN_COMMENT_HTML;
+																reply.body_md = undefined;
 															}
 														}}
 													/>

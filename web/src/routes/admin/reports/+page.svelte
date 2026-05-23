@@ -3,7 +3,7 @@
 	import { REASON_LABELS, REPORT_ACTIONS, type ReportAction } from '$lib/reports/types';
 	import type { ActionData, PageData } from './$types';
 
-	let { data, form }: { data: PageData; form: ActionData } = $props();
+	let { data, form }: { data: PageData; form: ActionData | null } = $props();
 
 	// Per-row "which action did the moderator pick before
 	// submitting?" so the radio group remembers state when
@@ -15,11 +15,15 @@
 	}
 
 	function formatDate(iso: string): string {
-		try {
-			return new Date(iso).toLocaleString();
-		} catch {
-			return iso;
-		}
+		// `new Date(garbage)` returns an "Invalid Date"
+		// instance whose `getTime()` is NaN — it never
+		// throws, so a `try/catch` is the wrong defence.
+		// Explicit NaN check + raw-string fallback gives
+		// the moderator UI a stable display when a
+		// timestamp ever drifts off-shape.
+		const d = new Date(iso);
+		if (Number.isNaN(d.getTime())) return iso;
+		return d.toLocaleString();
 	}
 </script>
 

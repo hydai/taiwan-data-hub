@@ -85,6 +85,11 @@ impl From<ReportRow> for ReportResponse {
 #[derive(Debug, Serialize)]
 pub struct SubmitResponse {
     pub id: Uuid,
+    /// `true` for a fresh report row, `false` when the
+    /// upsert hit an existing one (handler maps to 200
+    /// in the existing-row case, 201 in the
+    /// fresh-insert case).
+    pub created: bool,
     pub reporter_count: i64,
     pub freshly_hidden: bool,
 }
@@ -167,14 +172,25 @@ async fn submit_report(
         .await
         .map_err(ApiError::from)?;
     match outcome {
-        Ok(o) => Ok((
-            StatusCode::CREATED,
-            Json(SubmitResponse {
-                id: o.report_id,
-                reporter_count: o.reporter_count,
-                freshly_hidden: o.freshly_hidden,
-            }),
-        )),
+        Ok(o) => {
+            // 201 only when a fresh row was inserted; the
+            // upsert's existing-row path returns 200 since
+            // nothing was created at the wire level.
+            let status = if o.created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            Ok((
+                status,
+                Json(SubmitResponse {
+                    id: o.report_id,
+                    created: o.created,
+                    reporter_count: o.reporter_count,
+                    freshly_hidden: o.freshly_hidden,
+                }),
+            ))
+        }
         Err(ReportDenialReason::BodyTooLong) => Err(ApiError::Validation(format!(
             "body too long (max {REPORT_BODY_MAX_LEN} characters)"
         ))),
