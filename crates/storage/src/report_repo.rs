@@ -487,6 +487,44 @@ impl ReportRepo for Storage {
         now: DateTime<Utc>,
     ) -> Result<Option<ReportRow>, StorageError> {
         let mut tx = self.pool().begin().await?;
+        // Step 1: peek at the report to pick the target
+        // table. No lock yet — the conditional UPDATE on
+        // step 3 still guards against a concurrent
+        // resolver via `resolved_at IS NULL`.
+        let target: Option<(String, Uuid)> = sqlx::query_as(
+            "SELECT target_kind, target_id FROM reports
+              WHERE id = $1 AND resolved_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((target_kind_str, target_id)) = target else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let target_kind = ReportTargetKind::from_wire(&target_kind_str).ok_or_else(|| {
+            StorageError::Decode(format!(
+                "unknown reports.target_kind {target_kind_str:?} (CHECK drift?)"
+            ))
+        })?;
+        let target_table = match target_kind {
+            ReportTargetKind::Comment => "comments",
+            ReportTargetKind::Submission => "submissions",
+        };
+        // Step 2: lock the target row BEFORE touching the
+        // `reports` row again. `insert` uses the same order
+        // (target FOR UPDATE → reports UPSERT), so insert
+        // and resolve can never deadlock on the same
+        // (target, report) pair.
+        let probe_sql = format!("SELECT 1 FROM {target_table} WHERE id = $1 FOR UPDATE");
+        sqlx::query(&probe_sql)
+            .bind(target_id)
+            .execute(&mut *tx)
+            .await?;
+        // Step 3: conditional UPDATE. If a racing resolver
+        // beat us between steps 1 and 3, this matches 0
+        // rows and we return None; the target lock taken
+        // in step 2 is released on commit.
         let maybe = sqlx::query(
             "UPDATE reports
                 SET resolved_at     = $2,
