@@ -94,6 +94,10 @@ export const load: PageServerLoad = async ({
 		if (kind === 'unauthenticated') {
 			return { state: 'unauthenticated' };
 		}
+		if (kind === 'unavailable') {
+			console.error('[/submit] gateway returned status:', response.status);
+			return { state: 'unavailable', message: GATEWAY_UNREACHABLE_MESSAGE };
+		}
 		console.error('[/submit] unexpected /me status:', response.status);
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
