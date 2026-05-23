@@ -38,7 +38,7 @@ cargo run --release -p etl-worker
 
 For Docker Compose, add it to the compose file's `environment:` block on the
 `etl-worker` service (or a `.env` file the compose stack reads — never check
-the key in to git).
+the key into git).
 
 For Kubernetes / Nomad / systemd, deliver it via the cluster's secret
 mechanism. The connector treats an empty `CWA_API_KEY` the same as missing,
