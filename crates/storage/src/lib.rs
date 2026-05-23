@@ -21,6 +21,7 @@ mod dataset_repo;
 mod oauth_repo;
 mod rate_limit_repo;
 mod rating_repo;
+mod report_repo;
 mod session_repo;
 mod sqlx_errors;
 mod submission_repo;
@@ -42,6 +43,10 @@ pub use dataset_repo::{
 pub use oauth_repo::{NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo};
 pub use rate_limit_repo::{CounterTick, RateLimitRepo};
 pub use rating_repo::{RatingAggregateRow, RatingRepo, RatingRow, RatingTargetKind, RatingView};
+pub use report_repo::{
+    InsertOutcome as ReportInsertOutcome, NewReport, ReportAction, ReportReason, ReportRepo,
+    ReportRow, ReportTargetKind, ResolveSpec,
+};
 pub use session_repo::{AuthenticatedSession, NewSession, SessionRepo};
 pub use submission_repo::{
     NewSubmission, SubmissionKind, SubmissionRepo, SubmissionRow, SubmissionStatus,

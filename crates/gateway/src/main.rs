@@ -20,6 +20,7 @@ mod comments_routes;
 mod moderation_routes;
 mod rate_limit_middleware;
 mod ratings_routes;
+mod reports_routes;
 mod session_middleware;
 mod submissions_routes;
 
@@ -469,7 +470,8 @@ fn build_auth_router_if_available(
     let comment_repo: Arc<dyn storage::CommentRepo> = Arc::new(storage.clone());
     let bookmark_repo: Arc<dyn storage::BookmarkRepo> = Arc::new(storage.clone());
     let collection_repo: Arc<dyn storage::CollectionRepo> = Arc::new(storage.clone());
-    let rating_repo: Arc<dyn storage::RatingRepo> = Arc::new(storage);
+    let rating_repo: Arc<dyn storage::RatingRepo> = Arc::new(storage.clone());
+    let report_repo: Arc<dyn storage::ReportRepo> = Arc::new(storage);
     let session_service = match auth::SessionService::new(session_repo, hmac_key) {
         Ok(svc) => Arc::new(svc),
         Err(e) => {
@@ -490,6 +492,11 @@ fn build_auth_router_if_available(
     let bookmark_service = Arc::new(auth::BookmarkService::new(bookmark_repo));
     let collection_service = Arc::new(auth::CollectionService::new(collection_repo));
     let rating_service = Arc::new(auth::RatingService::new(rating_repo, user_repo));
+    let report_service = Arc::new(auth::ReportService::new(report_repo));
+    let reports_state = reports_routes::ReportsState {
+        reports: report_service,
+        moderation: moderation_service.clone(),
+    };
 
     // Layer stack (axum applies bottom-up, so the order here
     // is the OUTER-TO-INNER request flow):
@@ -513,6 +520,8 @@ fn build_auth_router_if_available(
     let bookmarks = bookmarks_routes::bookmarks_router(bookmark_service);
     let collections = bookmarks_routes::collections_router(collection_service);
     let ratings = ratings_routes::ratings_router(rating_service);
+    let reports_user = reports_routes::user_router(reports_state.clone());
+    let reports_admin = reports_routes::admin_router(reports_state);
     // `/api/v1/me` mounts here too — it needs the session
     // middleware to read the cookie. Anonymous traffic still
     // gets a 200 with `{ user: null }` because the handler
@@ -532,6 +541,8 @@ fn build_auth_router_if_available(
         .merge(Router::new().nest("/api/v1/bookmarks", bookmarks))
         .merge(Router::new().nest("/api/v1/collections", collections))
         .merge(Router::new().nest("/api/v1/ratings", ratings))
+        .merge(Router::new().nest("/api/v1/reports", reports_user))
+        .merge(Router::new().nest("/api/v1/admin/reports", reports_admin))
         .route("/api/v1/me", api_routes::me_handler())
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter,

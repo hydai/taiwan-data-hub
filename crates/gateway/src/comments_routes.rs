@@ -63,6 +63,7 @@ pub struct CommentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<DateTime<Utc>>,
     pub is_deleted: bool,
+    pub is_hidden: bool,
 }
 
 impl From<auth::RenderedComment> for CommentResponse {
@@ -80,6 +81,7 @@ impl From<auth::RenderedComment> for CommentResponse {
             edited_at: c.edited_at,
             deleted_at: c.deleted_at,
             is_deleted: c.is_deleted,
+            is_hidden: c.is_hidden,
         }
     }
 }

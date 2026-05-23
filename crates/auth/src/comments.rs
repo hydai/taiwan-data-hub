@@ -58,6 +58,13 @@ pub struct RenderedComment {
     /// `[deleted]` tombstone content, so no separate
     /// styling decision is required.
     pub is_deleted: bool,
+    /// `true` iff the row is hidden by community reports
+    /// or a moderator. The web layer branches on this to
+    /// render a placeholder; `body_html` carries the
+    /// hidden-by-community substitution text. Distinct
+    /// from `is_deleted` so the moderation surface can
+    /// also tell apart the two cases.
+    pub is_hidden: bool,
 }
 
 /// Why a comment write rejected. Distinct variants so the
@@ -226,6 +233,7 @@ impl CommentService {
             created_at: now,
             edited_at: None,
             deleted_at: None,
+            hidden_at: None,
         })))
     }
 
@@ -341,15 +349,23 @@ fn validate_body(trimmed: &str) -> Result<(), BodyError> {
 
 fn render_row(row: CommentRow) -> RenderedComment {
     let is_deleted = row.deleted_at.is_some();
-    // Soft-deleted rows render a plain `[deleted]` paragraph;
-    // the web layer keys styling off the `is_deleted` flag
-    // rather than a backend-injected class name (Tailwind
-    // can't see server-generated selectors).
+    let is_hidden = row.hidden_at.is_some();
+    // Deleted takes precedence over hidden — once the
+    // author drops the body, the substitution text is the
+    // same regardless of whether moderators also hid it,
+    // and "[deleted]" is the more accurate signal.
     let body_html = if is_deleted {
         "<p>[deleted]</p>".to_owned()
+    } else if is_hidden {
+        "<p>[hidden by community reports]</p>".to_owned()
     } else {
         render_markdown(row.body_md.as_deref().unwrap_or(""))
     };
+    // Drop the source markdown on hide too so a client
+    // that ignores `is_hidden` can't render the original
+    // body anyway. (`is_deleted` already cleared `body_md`
+    // at write time via the soft-delete SQL.)
+    let body_md = if is_hidden { None } else { row.body_md };
     RenderedComment {
         id: row.id,
         target_kind: row.target_kind,
@@ -357,12 +373,13 @@ fn render_row(row: CommentRow) -> RenderedComment {
         parent_id: row.parent_id,
         user_id: row.user_id,
         depth: row.depth,
-        body_md: row.body_md,
+        body_md,
         body_html,
         created_at: row.created_at,
         edited_at: row.edited_at,
         deleted_at: row.deleted_at,
         is_deleted,
+        is_hidden,
     }
 }
 
