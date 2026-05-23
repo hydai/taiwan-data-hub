@@ -296,12 +296,19 @@ fn parse_uuid(field: &str, raw: &str) -> Result<Uuid, ApiError> {
         .map_err(|_| ApiError::Validation(format!("{field} `{raw}` is not a valid UUID")))
 }
 
-/// Parse `?limit=` into an i64, applying the default
-/// when missing/blank, clamping to `[1, MAX_LIST_LIMIT]`.
-/// A non-integer string returns `ApiError::Validation`
-/// so the response keeps the `{error, message}`
-/// envelope (raw `Option<i64>` on the query extractor
-/// would let axum reject with a plain-text 400 instead).
+/// Parse `?limit=` into an i64.
+///
+/// * Missing / blank / non-positive (`<= 0`) → falls
+///   back to `DEFAULT_LIST_LIMIT`. The "non-positive
+///   = default" path matches what client UIs expect
+///   when they send `?limit=0` to mean "page size
+///   please".
+/// * Positive value → clamped to `MAX_LIST_LIMIT`.
+/// * Non-integer string → `ApiError::Validation` so
+///   the response keeps the `{error, message}`
+///   envelope (raw `Option<i64>` on the query
+///   extractor would let axum reject with a
+///   plain-text 400 instead).
 fn parse_limit(raw: Option<&str>) -> Result<i64, ApiError> {
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(DEFAULT_LIST_LIMIT);

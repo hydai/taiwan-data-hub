@@ -156,9 +156,17 @@
 		</fieldset>
 		<label class="block text-xs">
 			Additional context (optional)
+			<!--
+				No `maxlength`: browsers count UTF-16 code
+				units while the server counts Unicode scalars
+				via `chars().count()`. The two disagree on
+				emoji-heavy input, so a hard `maxlength` would
+				occasionally block valid input. The explicit
+				scalar-count check in `submit` is the
+				authoritative length guard.
+			-->
 			<textarea
 				bind:value={body}
-				maxlength={REPORT_BODY_MAX_LEN}
 				rows="2"
 				placeholder="Anything a moderator should know"
 				class="mt-1 w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
