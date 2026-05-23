@@ -39,21 +39,30 @@ export interface UpsertRatingResponse {
 export function parseRatingView(value: unknown): RatingView | null {
 	if (value === null || typeof value !== 'object') return null;
 	const v = value as Record<string, unknown>;
-	// avg_score: null or a finite number in [0, SCORE_MAX].
+	// avg_score: null or a finite number. The server-side
+	// score CHECK clamps every rating to `[SCORE_MIN,
+	// SCORE_MAX]`, so the average is also bounded by the
+	// same range whenever there's at least one rating —
+	// we enforce that below in the count/avg invariant.
 	if (v.avg_score !== null) {
 		if (typeof v.avg_score !== 'number' || !Number.isFinite(v.avg_score)) return null;
-		if (v.avg_score < 0 || v.avg_score > SCORE_MAX) return null;
 	}
 	// count: non-negative integer.
 	if (typeof v.count !== 'number' || !Number.isInteger(v.count) || v.count < 0) return null;
 	// Enforce the avg/count invariant the server promises:
-	// `count == 0` must come with `avg_score == null`
-	// (no ratings → no average), and `count > 0` must
-	// come with a numeric avg. Reject either drift so a
-	// gateway shape regression can't leak a misleading
-	// "0.00 ★ · 0 ratings" line into the UI.
+	// `count == 0` must come with `avg_score == null` (no
+	// ratings → no average), and `count > 0` must come
+	// with a numeric avg in `[SCORE_MIN, SCORE_MAX]` —
+	// the SQL CHECK forces every rating into that range,
+	// so the average inherits it. Reject either drift so
+	// a gateway shape regression can't leak misleading
+	// values (e.g., "0.00 ★ · 3 ratings") into the UI.
 	if (v.count === 0 && v.avg_score !== null) return null;
-	if (v.count > 0 && v.avg_score === null) return null;
+	if (v.count > 0) {
+		if (v.avg_score === null) return null;
+		if (typeof v.avg_score !== 'number' || v.avg_score < SCORE_MIN || v.avg_score > SCORE_MAX)
+			return null;
+	}
 	// viewer_score: null or an integer in [SCORE_MIN, SCORE_MAX].
 	if (v.viewer_score !== null) {
 		if (
