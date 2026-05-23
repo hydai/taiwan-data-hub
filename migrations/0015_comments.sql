@@ -80,11 +80,14 @@ CREATE INDEX comments_target_idx
     ON comments (target_kind, target_id, created_at);
 
 -- Per-author lookup ("my comments" follow-up + moderator
--- audit). Partial filter on non-deleted rows keeps the index
--- small for the "active comments" access pattern.
+-- audit). Partial filter on non-deleted, non-anonymised rows
+-- keeps the index small for the "active comments by user X"
+-- access pattern — `user_id` can become NULL via the FK's
+-- `ON DELETE SET NULL`, and those rows are never looked up
+-- by author.
 CREATE INDEX comments_user_idx
     ON comments (user_id, created_at DESC)
-    WHERE deleted_at IS NULL;
+    WHERE deleted_at IS NULL AND user_id IS NOT NULL;
 
 COMMENT ON TABLE comments IS
     'Threaded comments (depth ≤ 1) on datasets / tools / connectors / playgrounds. body_md is the raw Markdown; the gateway renders it through comrak + ammonia on read.';
