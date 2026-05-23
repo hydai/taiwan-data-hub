@@ -15,6 +15,19 @@
 //! The list endpoint is intentionally session-aware (no gate)
 //! so a logged-out reader can see the thread; the write
 //! endpoints require a session.
+//!
+//! HTTP status mapping for the
+//! [`auth::CommentDenialReason`] variants:
+//!
+//!   * `NotFoundOrNotYours`  → 404
+//!   * `EditWindowClosed`    → 409
+//!   * `DepthCapExceeded`    → 400 (validation)
+//!   * `ParentNotFound`      → 400 (validation)
+//!   * `InvalidBody(*)`      → 400 (validation)
+//!
+//! The three "400 validation" cases share a status code but
+//! carry distinct `message` strings so a client (or a test)
+//! can still tell them apart from the response body.
 
 use std::sync::Arc;
 

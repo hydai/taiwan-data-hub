@@ -105,12 +105,15 @@ impl CommentRepo for CommentStore {
         if row.user_id != Some(author_id) || row.deleted_at.is_some() {
             return Ok(None);
         }
-        // Mirror the production SQL's `make_interval(secs => …)`
-        // comparison: whole-second resolution on the DB side.
-        // The service rounds the window UP so a sub-second
-        // configured window doesn't collapse to "0 seconds".
-        let elapsed_secs = (now - row.created_at).num_seconds();
-        if elapsed_secs < 0 || elapsed_secs > edit_window_secs {
+        // Mirror the production SQL's
+        // `$now - created_at <= $win * INTERVAL '1 second'`
+        // comparison: full sub-second precision (Postgres
+        // compares timestamps in microseconds). Using
+        // `num_seconds()` here would truncate 60.5s → 60 and
+        // let the fake accept edits the real DB would refuse.
+        let elapsed_ms = (now - row.created_at).num_milliseconds();
+        let window_ms = edit_window_secs.saturating_mul(1000);
+        if elapsed_ms < 0 || elapsed_ms > window_ms {
             return Ok(None);
         }
         row.body_md = Some(new_body.to_owned());

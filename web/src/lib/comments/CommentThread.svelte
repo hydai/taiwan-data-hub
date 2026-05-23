@@ -60,7 +60,12 @@
 
 	const fiveMinutes = 5 * 60 * 1000;
 	const isWithinEditWindow = (c: RenderedComment): boolean =>
-		!c.is_deleted && Date.parse(c.created_at) > Date.now() - fiveMinutes;
+		// Inclusive boundary to match the backend's
+		// `now - created_at <= window` SQL predicate. Without
+		// `>=`, the Edit UI would vanish at exactly the
+		// 5-minute mark even though the server would still
+		// accept the request.
+		!c.is_deleted && Date.parse(c.created_at) >= Date.now() - fiveMinutes;
 	const canMutate = (c: RenderedComment): boolean =>
 		currentUserId !== null && c.user_id === currentUserId && !c.is_deleted;
 
