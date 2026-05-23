@@ -195,11 +195,44 @@ pub enum ListResponse {
     NotModified,
 }
 
+/// Bytes payload returned by [`SourceConnector::fetch_data`] —
+/// the file-level fetch that follows the catalog walk.
+///
+/// The connector is responsible for choosing the wire format
+/// (CSV, JSON, XLSX, …); the ETL caller stores it in object
+/// storage / Parquet downstream. Carrying a `content_type` hint
+/// lets the ETL skip format sniffing.
+#[derive(Debug, Clone)]
+pub struct DataPayload {
+    /// Upstream-supplied MIME type, or the connector's best guess.
+    /// `None` means "ETL caller, sniff it yourself".
+    pub content_type: Option<String>,
+    /// Raw response body. Connectors should bound this — see the
+    /// connector-specific config for the per-source size cap.
+    pub bytes: Vec<u8>,
+    /// `Last-Modified` / `ETag` cues emitted by upstream so the
+    /// ETL can persist them and skip unchanged files on the next
+    /// crawl. Mirrors the catalog walk's [`ListResponse::Modified`]
+    /// shape.
+    #[allow(clippy::struct_field_names)]
+    pub fresh_cues: ConditionalCues,
+}
+
 /// Drives the catalog walk for one upstream source.
 ///
 /// Implementations are async + Send + Sync so the ETL scheduler in
 /// #1.4c can run multiple connectors concurrently behind a single
 /// tokio runtime.
+///
+/// The trait is **deliberately layered**: `list_datasets` is
+/// required (every catalog has one) while `fetch_metadata` and
+/// `fetch_data` come with `Unsupported` defaults. A connector that
+/// only exposes a catalog (no per-dataset detail endpoint, no file
+/// downloads) wires `list_datasets` and leaves the rest alone; a
+/// richer connector overrides the methods it actually supports.
+/// The framework checks [`Self::supports_incremental`] before
+/// asking for per-dataset fetches so the unsupported defaults stay
+/// unreachable at runtime.
 #[async_trait]
 pub trait SourceConnector: Send + Sync + 'static {
     /// Identifier matching the `datasets.source` SQL enum.
@@ -222,6 +255,57 @@ pub trait SourceConnector: Send + Sync + 'static {
         cursor: Option<Cursor>,
         cues: &ConditionalCues,
     ) -> Result<ListResponse, ConnectorError>;
+
+    /// Fetch the **full metadata** for one dataset, by its
+    /// upstream id. Useful when [`Self::list_datasets`] returns
+    /// summary records and a detail call is needed to populate
+    /// fields the list endpoint omits.
+    ///
+    /// The default returns
+    /// [`ConnectorError::Unsupported`] so a connector whose
+    /// catalog endpoint already delivers full metadata doesn't
+    /// have to implement this. Callers MUST guard the call with
+    /// [`Self::supports_incremental`] (or the connector-specific
+    /// capability check) so the default stays unreachable at
+    /// runtime.
+    async fn fetch_metadata(&self, source_id: &str) -> Result<DatasetMetadata, ConnectorError> {
+        let _ = source_id;
+        Err(ConnectorError::Unsupported(
+            "fetch_metadata not implemented for this connector",
+        ))
+    }
+
+    /// Fetch the **data payload** (file body) for one dataset.
+    /// `cues` lets the connector send conditional headers so an
+    /// unchanged file can short-circuit to a small 304.
+    ///
+    /// Defaults to [`ConnectorError::Unsupported`] for the same
+    /// reason as [`Self::fetch_metadata`]: not every connector
+    /// wraps a file-level endpoint, and the ones that don't
+    /// shouldn't carry a stub impl.
+    async fn fetch_data(
+        &self,
+        source_id: &str,
+        cues: &ConditionalCues,
+    ) -> Result<DataPayload, ConnectorError> {
+        let _ = (source_id, cues);
+        Err(ConnectorError::Unsupported(
+            "fetch_data not implemented for this connector",
+        ))
+    }
+
+    /// Whether this connector can do incremental fetches —
+    /// per-dataset metadata or data calls in addition to the
+    /// catalog walk. The default is `false`; connectors override
+    /// when they implement [`Self::fetch_metadata`] or
+    /// [`Self::fetch_data`].
+    ///
+    /// The ETL framework reads this BEFORE calling the per-
+    /// dataset methods, so a `false` here means the framework
+    /// stays on the catalog-only path.
+    fn supports_incremental(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +337,46 @@ mod trait_tests {
         assert_eq!(json, r#""data_gov_tw""#);
         let back: SourceId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, v);
+    }
+
+    /// A connector that only overrides `source_id` + `list_datasets`
+    /// — the minimum the trait requires. The defaults for
+    /// `fetch_metadata`, `fetch_data`, and `supports_incremental`
+    /// must keep this compiling and behave per the trait docs.
+    struct CatalogOnly;
+
+    #[async_trait]
+    impl SourceConnector for CatalogOnly {
+        fn source_id(&self) -> SourceId {
+            SourceId::DataGovTw
+        }
+
+        async fn list_datasets(
+            &self,
+            _cursor: Option<Cursor>,
+            _cues: &ConditionalCues,
+        ) -> Result<ListResponse, ConnectorError> {
+            Ok(ListResponse::NotModified)
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_only_default_supports_incremental_is_false() {
+        assert!(!CatalogOnly.supports_incremental());
+    }
+
+    #[tokio::test]
+    async fn catalog_only_default_fetch_metadata_is_unsupported() {
+        let err = CatalogOnly.fetch_metadata("anything").await.unwrap_err();
+        assert!(matches!(err, ConnectorError::Unsupported(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn catalog_only_default_fetch_data_is_unsupported() {
+        let err = CatalogOnly
+            .fetch_data("anything", &ConditionalCues::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ConnectorError::Unsupported(_)), "{err:?}");
     }
 }
