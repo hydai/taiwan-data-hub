@@ -415,15 +415,34 @@ mod tests {
 
     #[test]
     fn strips_script_tags() {
-        let html = render_markdown("<script>alert('xss')</script> hi");
-        assert!(!html.contains("<script"));
-        assert!(html.contains("hi"));
+        // The exact CommonMark behaviour for raw `<script>`
+        // varies (block-level HTML gets dropped entirely with
+        // `unsafe_=false`, surrounding text can disappear with
+        // it). The security-critical guarantee is just that no
+        // executable `<script` survives — assert that and
+        // nothing else.
+        let html = render_markdown("<script>alert('xss')</script>");
+        assert!(
+            !html.contains("<script"),
+            "html should not contain <script>; got {html}"
+        );
     }
 
     #[test]
-    fn strips_onclick_attribute() {
-        let html = render_markdown("[link](https://example.com){onclick=\"bad()\"}");
-        assert!(!html.contains("onclick"));
+    fn ammonia_strips_onclick_attribute() {
+        // Comrak with `unsafe_=false` escapes inline raw HTML
+        // before ammonia ever sees it, so this is really an
+        // ammonia smoke test. Feed the raw HTML straight in to
+        // prove the second sanitiser stage is doing its job:
+        // even if a future code path forgets to disable
+        // unsafe_ rendering, the cleaner still drops on*
+        // attributes.
+        let cleaned = ammonia::clean(r#"<a href="https://example.com" onclick="bad()">x</a>"#);
+        assert!(
+            !cleaned.contains("onclick"),
+            "cleaned should not contain onclick; got {cleaned}"
+        );
+        assert!(cleaned.contains("href=\"https://example.com\""));
     }
 
     #[test]
