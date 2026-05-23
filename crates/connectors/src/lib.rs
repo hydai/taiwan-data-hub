@@ -10,6 +10,7 @@
 //! `datasets.source` CHECK constraint in `migrations/0001_init.sql`:
 //! `data_gov_tw | twse | moea | cwa | fishery_moa | user_contrib`.
 
+pub mod cwa;
 pub mod data_gov_tw;
 pub mod moea;
 pub mod twse;
