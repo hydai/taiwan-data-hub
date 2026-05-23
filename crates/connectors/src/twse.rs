@@ -22,15 +22,19 @@
 //! issue's Definition of Done:
 //!
 //! - **robots.txt respect** — at construction the builder
-//!   fetches `<host>/robots.txt` from BOTH the TWSE host
-//!   AND the MOPS host, parses each `User-agent: *` group
-//!   (RFC 9309 §2.2.1 — multi-agent groups, case-
-//!   insensitive directive names), and stores the disallow
-//!   lists keyed by host. Every outbound request consults
-//!   the cached list for the host it's targeting via
-//!   [`TwseConnector::path_allowed_for_host`]. A disallowed
-//!   path produces [`ConnectorError::Config`] rather than a
-//!   silent skip — the worker should DLQ a misconfig loudly.
+//!   fetches `<origin>/robots.txt` from BOTH the TWSE
+//!   origin AND the MOPS origin (RFC 9309 §2.1 scopes
+//!   robots.txt to the origin = scheme + host + port,
+//!   NOT just host). Each `User-agent: *` group is
+//!   parsed (RFC 9309 §2.2.1 — multi-agent groups,
+//!   case-insensitive directive names) and stored in a
+//!   map keyed by [`origin_key`]'s ASCII serialisation.
+//!   Every outbound request consults the cached list
+//!   for the origin it's targeting via
+//!   [`TwseConnector::path_allowed_for_origin`]. A
+//!   disallowed path produces
+//!   [`ConnectorError::Config`] rather than a silent
+//!   skip — the worker should DLQ a misconfig loudly.
 //! - **per-page throttle** — a connector-wide minimum
 //!   interval between upstream calls, gated by an async mutex
 //!   on the last-request timestamp. The catalog walk doesn't
@@ -82,14 +86,16 @@ pub struct TwseConnector {
     twse_base_url: Url,
     mops_base_url: Url,
     throttle: RequestThrottle,
-    /// Per-host robots.txt disallow lists, keyed by host
-    /// string (`Url::host_str`). TWSE and MOPS publish
-    /// their own robots.txt independently; each
-    /// `polite_get_*` call consults the entry for the host
-    /// it's targeting. Order within each list reflects
-    /// what robots.txt published — prefix matching doesn't
+    /// Per-origin robots.txt disallow lists, keyed by the
+    /// origin's ASCII serialisation (`scheme://host[:port]`
+    /// per `Url::origin().ascii_serialization()`). RFC 9309
+    /// §2.1 scopes robots.txt to the origin, NOT just the
+    /// host — a host can serve different rules on
+    /// different ports / schemes, so the cache key has to
+    /// include all three. Order within each list reflects
+    /// what robots.txt published; prefix matching doesn't
     /// care about order, but preserving insertion order
-    /// keeps the doc honest and helps debugging.
+    /// helps debugging.
     robots_disallowed: Arc<BTreeMap<String, Vec<String>>>,
 }
 
@@ -113,19 +119,23 @@ impl TwseConnector {
     }
 
     /// Is `path` permitted by the cached robots.txt
-    /// disallow list **for the given host**? `path` is the
-    /// URL path component (e.g. `/exchangeReport/STOCK_DAY`).
-    /// The check is a simple prefix match against each
-    /// disallow entry for the host — matches the
-    /// `User-agent: *` directive's semantics for the cases
-    /// TWSE / MOPS publish. An unknown host (none of TWSE
-    /// or MOPS) is treated as permissive; the caller has
-    /// already chosen `polite_get_twse` vs `polite_get_mops`
-    /// so this is a defensive default rather than a real
-    /// fallback path.
+    /// disallow list **for the given origin**? `path` is
+    /// the URL path component (e.g.
+    /// `/exchangeReport/STOCK_DAY`); `origin` is the
+    /// ASCII-serialised origin
+    /// (`scheme://host[:port]`) — derive via
+    /// [`origin_key`] from any `Url`. The check is a
+    /// simple prefix match against each disallow entry
+    /// for the origin — matches the `User-agent: *`
+    /// directive's semantics for the cases TWSE / MOPS
+    /// publish. An unknown origin is treated as
+    /// permissive; the caller has already chosen
+    /// `polite_get_twse` vs `polite_get_mops` so this is
+    /// a defensive default rather than a real fallback
+    /// path.
     #[must_use]
-    pub fn path_allowed_for_host(&self, host: &str, path: &str) -> bool {
-        let Some(disallowed) = self.robots_disallowed.get(host) else {
+    pub fn path_allowed_for_origin(&self, origin: &str, path: &str) -> bool {
+        let Some(disallowed) = self.robots_disallowed.get(origin) else {
             return true;
         };
         !disallowed
@@ -134,12 +144,12 @@ impl TwseConnector {
     }
 
     /// For tests: snapshot of the disallow list for the
-    /// given host, or an empty slice if the host wasn't
-    /// fetched.
+    /// given origin, or an empty slice if the origin
+    /// wasn't fetched.
     #[cfg(test)]
-    pub(crate) fn robots_disallowed_for_host(&self, host: &str) -> &[String] {
+    pub(crate) fn robots_disallowed_for_origin(&self, origin: &str) -> &[String] {
         self.robots_disallowed
-            .get(host)
+            .get(origin)
             .map_or(&[][..], Vec::as_slice)
     }
 
@@ -181,10 +191,10 @@ impl TwseConnector {
         base: &Url,
         path: &str,
     ) -> Result<reqwest::Response, crate::ConnectorError> {
-        let host = base.host_str().unwrap_or("(unknown host)");
-        if !self.path_allowed_for_host(host, path) {
+        let origin = origin_key(base);
+        if !self.path_allowed_for_origin(&origin, path) {
             return Err(crate::ConnectorError::Config(format!(
-                "path {path:?} disallowed by robots.txt for {host}",
+                "path {path:?} disallowed by robots.txt for {origin}",
             )));
         }
         let url = base
@@ -468,24 +478,24 @@ impl Builder {
         let throttle = RequestThrottle::new(Duration::from_millis(self.throttle_ms));
         let mut robots_disallowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
         if self.auto_fetch_robots {
-            // Fetch robots.txt from EACH host independently —
-            // TWSE and MOPS publish their own files. Skipping
-            // the MOPS fetch would mean MOPS requests are
-            // checked against TWSE's rules, which violates
-            // the connector's robots-respect policy.
+            // Fetch robots.txt from EACH origin independently
+            // — RFC 9309 §2.1 scopes robots.txt to the
+            // origin (scheme + host + port). Skipping the
+            // MOPS fetch would mean MOPS requests are
+            // checked against TWSE's rules; a host-only
+            // dedup key would collapse two different
+            // wiremock servers on `127.0.0.1` with different
+            // ports into one cache entry.
             for base in [&twse_base_url, &mops_base_url] {
-                let host = base
-                    .host_str()
-                    .ok_or_else(|| BuildError::InvalidUrl(format!("{base} has no host")))?
-                    .to_string();
+                let origin = origin_key(base);
                 // If the operator pointed both URLs at the
-                // same host (e.g. a single wiremock server
-                // in tests), only fetch once.
-                if robots_disallowed.contains_key(&host) {
+                // same origin (truly identical scheme +
+                // host + port), only fetch once.
+                if robots_disallowed.contains_key(&origin) {
                     continue;
                 }
                 let disallowed = fetch_robots_disallowed(&http, base, &throttle).await?;
-                robots_disallowed.insert(host, disallowed);
+                robots_disallowed.insert(origin, disallowed);
             }
         }
         Ok(TwseConnector {
@@ -540,6 +550,17 @@ async fn fetch_robots_disallowed(
         source: e,
     })?;
     Ok(parse_user_agent_star_disallow(&body))
+}
+
+/// Origin cache key per RFC 9309 §2.1 — the ASCII
+/// serialisation of `Url::origin()`, which is
+/// `scheme://host[:port]` with default ports elided.
+/// This is the key both the fetcher and the lookup use,
+/// keeping cache writes and reads in lockstep so a host
+/// serving different rules on different ports (or
+/// schemes) can't collide.
+fn origin_key(url: &Url) -> String {
+    url.origin().ascii_serialization()
 }
 
 /// Pull `Disallow: ...` lines that fall under any group
@@ -734,13 +755,20 @@ Disallow:
     }
 
     #[tokio::test]
-    async fn path_allowed_for_host_uses_per_host_rules() {
-        // Per-host map: TWSE host disallows `/private/`,
-        // MOPS host disallows `/internal/`. Cross-checks
-        // must NOT bleed across.
+    async fn path_allowed_for_origin_uses_per_origin_rules() {
+        // Per-origin map: TWSE origin disallows `/private/`,
+        // MOPS origin disallows `/internal/`. Same host
+        // (`example.test`) but different ports — the
+        // origin key keeps them apart per RFC 9309 §2.1.
         let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        map.insert("twse.example".into(), vec!["/private/".to_string()]);
-        map.insert("mops.example".into(), vec!["/internal/".to_string()]);
+        map.insert(
+            "https://example.test:8001".into(),
+            vec!["/private/".to_string()],
+        );
+        map.insert(
+            "https://example.test:8002".into(),
+            vec!["/internal/".to_string()],
+        );
         let connector = TwseConnector::builder()
             .auto_fetch_robots(false)
             .build()
@@ -750,28 +778,27 @@ Disallow:
             robots_disallowed: Arc::new(map),
             ..connector
         };
-        // TWSE-side path against TWSE's disallow → rejected.
-        assert!(!connector.path_allowed_for_host("twse.example", "/private/secret"));
-        // Same path against MOPS's host → allowed (MOPS
-        // doesn't disallow `/private/`).
-        assert!(connector.path_allowed_for_host("mops.example", "/private/secret"));
-        // MOPS's own disallow only applies to MOPS-side
-        // requests.
-        assert!(!connector.path_allowed_for_host("mops.example", "/internal/x"));
-        assert!(connector.path_allowed_for_host("twse.example", "/internal/x"));
-        // Unknown host: permissive (defensive default).
-        assert!(connector.path_allowed_for_host("third.example", "/anything"));
+        // TWSE origin's disallow applies to its own paths.
+        assert!(
+            !connector.path_allowed_for_origin("https://example.test:8001", "/private/secret",)
+        );
+        // Same path against MOPS origin → allowed.
+        assert!(connector.path_allowed_for_origin("https://example.test:8002", "/private/secret",));
+        // MOPS origin's own disallow.
+        assert!(!connector.path_allowed_for_origin("https://example.test:8002", "/internal/x",));
+        assert!(connector.path_allowed_for_origin("https://example.test:8001", "/internal/x",));
+        // Unknown origin: permissive (defensive default).
+        assert!(connector.path_allowed_for_origin("https://other.example", "/anything"));
     }
 
     #[tokio::test]
-    async fn build_fetches_robots_for_each_host() {
-        // Two wiremocks → two separate origins (same
-        // 127.0.0.1, different ports). Both robots.txt
-        // routes must be hit. The builder de-dupes by host
-        // string, so when both URIs resolve to the same
-        // host (the wiremock localhost case), only one
-        // fetch happens — we assert at least that the
-        // cached rules are present under that host key.
+    async fn build_fetches_robots_per_origin_not_per_host() {
+        // Two wiremocks on `127.0.0.1` with different ports
+        // → two distinct origins. The builder MUST fetch
+        // robots.txt from both and store each list under
+        // its own origin key. A host-only dedup key would
+        // collapse them into one entry — exactly the bug
+        // Round 2 flagged.
         let twse_server = MockServer::start().await;
         let mops_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -797,20 +824,21 @@ Disallow:
             .build()
             .await
             .expect("build");
-        let twse_host = Url::parse(&twse_server.uri())
-            .unwrap()
-            .host_str()
-            .unwrap()
-            .to_string();
-        let twse_list = connector.robots_disallowed_for_host(&twse_host);
-        // Whether the two wiremocks share host or not, the
-        // TWSE host's disallow list must contain its own
-        // rule (TWSE is fetched first; the dedup-by-host
-        // short-circuit only skips the SECOND fetch if the
-        // host collides).
+        let twse_origin = origin_key(&Url::parse(&twse_server.uri()).unwrap());
+        let mops_origin = origin_key(&Url::parse(&mops_server.uri()).unwrap());
+        assert_ne!(
+            twse_origin, mops_origin,
+            "wiremock should produce distinct origins (different ports)",
+        );
+        let twse_list = connector.robots_disallowed_for_origin(&twse_origin);
+        let mops_list = connector.robots_disallowed_for_origin(&mops_origin);
         assert!(
             twse_list.iter().any(|p| p == "/twse-private/"),
-            "twse-private should be cached under {twse_host:?}, got {twse_list:?}",
+            "twse rule should be under twse origin {twse_origin:?}, got {twse_list:?}",
+        );
+        assert!(
+            mops_list.iter().any(|p| p == "/mops-private/"),
+            "mops rule should be under mops origin {mops_origin:?}, got {mops_list:?}",
         );
     }
 
@@ -830,13 +858,31 @@ Disallow:
             .build()
             .await
             .expect("build");
-        let host = Url::parse(&server.uri())
-            .unwrap()
-            .host_str()
-            .unwrap()
-            .to_string();
-        assert!(connector.robots_disallowed_for_host(&host).is_empty());
-        assert!(connector.path_allowed_for_host(&host, "/anything"));
+        let origin = origin_key(&Url::parse(&server.uri()).unwrap());
+        assert!(connector.robots_disallowed_for_origin(&origin).is_empty());
+        assert!(connector.path_allowed_for_origin(&origin, "/anything"));
+    }
+
+    #[test]
+    fn origin_key_includes_scheme_and_port() {
+        // Origin key per RFC 9309 §2.1 must include all
+        // three components so a host serving different
+        // rules on different ports / schemes can't
+        // collide.
+        let a = origin_key(&Url::parse("http://example.test:8001/foo").unwrap());
+        let b = origin_key(&Url::parse("http://example.test:8002/foo").unwrap());
+        let c = origin_key(&Url::parse("https://example.test/foo").unwrap());
+        let d = origin_key(&Url::parse("http://example.test/foo").unwrap());
+        assert_eq!(a, "http://example.test:8001");
+        assert_eq!(b, "http://example.test:8002");
+        assert_ne!(a, b);
+        // Default ports are elided in the canonical
+        // serialisation — `https://example.test/foo` and
+        // `https://example.test:443/foo` are the same
+        // origin per the URL spec.
+        assert_eq!(c, "https://example.test");
+        assert_eq!(d, "http://example.test");
+        assert_ne!(c, d);
     }
 
     #[tokio::test]
