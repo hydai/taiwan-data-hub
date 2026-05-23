@@ -68,9 +68,10 @@ retry_initial_backoff_secs = 30
 retry_max_backoff_secs = 1800
 
 [sources.fishery_moa]
-# Enable when the Fishery (MOA) connector lands (#5b.5).
-enabled = false
-# 04:00 Asia/Taipei = 20:00 UTC.
+enabled = true
+# 04:00 Asia/Taipei = 20:00 UTC. Off-peak window for the
+# MOA open-data hub; the catalog walk only emits two
+# synthetic rows, so footprint is tiny.
 cron_utc = "0 0 20 * * * *"
 retry_max_attempts = 3
 retry_initial_backoff_secs = 30

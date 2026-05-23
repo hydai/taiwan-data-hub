@@ -12,6 +12,7 @@
 
 pub mod cwa;
 pub mod data_gov_tw;
+pub mod fishery_moa;
 pub mod moea;
 pub mod twse;
 
