@@ -15,6 +15,7 @@
 mod api_key_repo;
 mod audit_repo;
 mod auth_repo;
+mod bookmark_repo;
 mod comment_repo;
 mod dataset_repo;
 mod oauth_repo;
@@ -26,6 +27,10 @@ mod submission_repo;
 pub use api_key_repo::{ApiKeyRepo, ApiKeyRow, NewApiKey};
 pub use audit_repo::{AuditAction, AuditLogRepo, AuditTargetKind, NewAuditLog};
 pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo, UserRole};
+pub use bookmark_repo::{
+    BookmarkRepo, BookmarkRow, BookmarkTargetKind, BookmarkToggleOutcome, CollectionItemRow,
+    CollectionRepo, CollectionRow, NewCollection,
+};
 pub use comment_repo::{CommentRepo, CommentRow, CommentTargetKind, NewComment};
 pub use dataset_repo::{
     CacheCandidate, CacheHitRatio, CacheRef, CacheState, DatasetCacheLookup, DatasetFileRow,

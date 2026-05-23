@@ -16,6 +16,7 @@
 //! and translate its return values into cookies + JSON responses.
 
 mod api_key;
+mod bookmarks;
 mod comments;
 mod error;
 mod mailer;
@@ -32,6 +33,10 @@ mod token;
 pub use api_key::{
     ALLOWED_TIERS, API_KEY_HUMAN_PREFIX, ApiKeyService, DEFAULT_RATE_LIMIT_TIER, IssuedApiKey,
     VerifiedApiKey,
+};
+pub use bookmarks::{
+    BookmarkService, COLLECTION_DESCRIPTION_MAX_LEN, COLLECTION_NAME_MAX_LEN,
+    CollectionDenialReason, CollectionService, InputError as CollectionInputError,
 };
 pub use comments::{
     BodyError, CommentDenialReason, CommentService, DEFAULT_EDIT_WINDOW, MAX_COMMENT_BODY_LEN,

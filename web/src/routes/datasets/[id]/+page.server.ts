@@ -1,4 +1,6 @@
+import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
+import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
 import type { PageServerLoad } from './$types';
@@ -33,13 +35,14 @@ import type { PageServerLoad } from './$types';
  * cache; `Vary: Cookie` is set only in the per-user branch so
  * unrelated cookies don't shred CDN hit rates.
  */
-export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
+export const load: PageServerLoad = async ({ fetch, params, parent, request, setHeaders }) => {
 	const dataset = findDatasetBySlug(params.id);
 	if (!dataset) {
 		throw error(404, `Dataset "${params.id}" not found`);
 	}
 	const parentData = await parent();
 	const currentUserId = parentData.user?.user_id ?? null;
+	const commentTargetId = datasetSlugToUuid(dataset.slug);
 	if (currentUserId !== null) {
 		setHeaders({
 			'cache-control': 'private, no-store',
@@ -50,15 +53,49 @@ export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
 			'cache-control': 'public, max-age=300, stale-while-revalidate=300'
 		});
 	}
+
+	// Probe the bookmark state for the currently-signed-in
+	// user so the heart renders pre-filled on first paint.
+	// Anonymous traffic skips the round trip; a failing probe
+	// degrades to "not bookmarked" without 500-ing the page.
+	let bookmarked = false;
+	if (currentUserId !== null) {
+		try {
+			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
+			const res = await fetch(`${base}/api/v1/bookmarks`, {
+				method: 'GET',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+			if (res.ok) {
+				const rows = (await res.json().catch(() => null)) as Array<{
+					target_kind: string;
+					target_id: string;
+				}> | null;
+				if (Array.isArray(rows)) {
+					bookmarked = rows.some(
+						(r) => r.target_kind === 'dataset' && r.target_id === commentTargetId
+					);
+				}
+			}
+		} catch (e) {
+			console.error('[/datasets/:id] bookmark probe failed:', e);
+		}
+	}
+
 	return {
 		dataset,
-		commentTargetId: datasetSlugToUuid(dataset.slug),
+		commentTargetId,
 		currentUserId,
 		// Mirror the layout's mode so the comment thread is
 		// SSR-skipped in personal-mode deploys (otherwise the
 		// section would render with "Loading comments…" until
 		// the client-side 404 detect hides it, and stay
-		// visible forever for no-JS readers).
-		commentsEnabled: parentData.mode === 'multi-user'
+		// visible forever for no-JS readers). The HeartButton
+		// rides the same flag — it'd 404 in personal mode too.
+		commentsEnabled: parentData.mode === 'multi-user',
+		bookmarked
 	};
 };
