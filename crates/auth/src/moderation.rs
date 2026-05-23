@@ -34,16 +34,34 @@ pub struct Decision {
 /// Why a moderation call rejected the caller's request.
 ///
 /// Distinct variants so the gateway can choose the right HTTP
-/// status — 403 on a permission gap, 404 on a missing row,
-/// 409 on a race / already-terminal row.
+/// status. The current `gateway::moderation_routes` mapping
+/// is:
+///
+///   * [`Self::Forbidden`] → 403 (insufficient role or
+///     unknown user — the gate deliberately folds both so a
+///     probing attacker can't enumerate accounts).
+///   * [`Self::NotFoundOrAlreadyDecided`] → 409 (the id
+///     either never existed in a pending state, or was
+///     decided by another moderator between this client's
+///     list-load and decision POST — the gateway uses a
+///     single status code for both because distinguishing
+///     them would let an attacker probe for valid IDs by
+///     watching the response code).
+///   * [`Self::MissingRejectReason`] → 400 (`reject` without
+///     a non-empty `reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModerationDenialReason {
-    /// Caller's role is below the moderation tier.
+    /// Caller's role is below the moderation tier, OR the
+    /// caller's user id is unknown to the row store. The
+    /// gate folds both so an attacker can't probe for valid
+    /// accounts by status code.
     Forbidden,
     /// The submission id doesn't exist OR the caller is acting
     /// on a row that the row store rejected (e.g. the row
     /// was already approved / rejected by another moderator
     /// between this client's list-load and decision POST).
+    /// The gateway maps both into 409 — the UI uses that to
+    /// know it should refresh the queue.
     NotFoundOrAlreadyDecided,
     /// The caller passed a reject without the required reason
     /// (or a reason that was blank after trim).
