@@ -22,6 +22,10 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# `sync` for the TWSE throttle's `tokio::sync::Mutex<Option<Instant>>`
+# (an std Mutex held across `.await` would block the runtime); `time`
+# for the throttle's sleep between calls.
+tokio = { workspace = true, default-features = false, features = ["sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }
 

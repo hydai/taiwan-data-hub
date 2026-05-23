@@ -30,10 +30,7 @@ retry_initial_backoff_secs = 30
 retry_max_backoff_secs = 1800
 
 [sources.twse]
-# Enable when the TWSE connector lands (#5b.2). Keeping
-# the row here documents the planned schedule so PR #5b.2
-# only has to flip `enabled = true` + add the impl.
-enabled = false
+enabled = true
 # 06:00 Asia/Taipei = 22:00 UTC. TWSE publishes the
 # previous trading day's data overnight; 06:00 TPE gives
 # a comfortable buffer for late publishes.
