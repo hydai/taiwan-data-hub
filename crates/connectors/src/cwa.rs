@@ -268,12 +268,36 @@ impl CwaConnector {
         url.query_pairs_mut()
             .append_pair(API_KEY_QUERY_PARAM, self.api_key.expose());
         self.throttle.tick().await;
-        let resp = self.http.get(url).send().await?;
+        // CRITICAL: strip the URL from any transport error
+        // before it propagates. `reqwest::Error::Display`
+        // includes the full request URL — which here carries
+        // `?Authorization=<api key>` — so a network / DNS /
+        // TLS failure would otherwise render the cleartext
+        // key into `ConnectorError::Transport`'s Display
+        // output and from there into operator logs. The
+        // `without_url()` helper drops the URL from the
+        // error struct so the rendered message stays
+        // shape-only ("error sending request"), defeating
+        // the leak.
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| crate::ConnectorError::from(e.without_url()))?;
         let status = resp.status();
         if status.is_success() {
             Ok(resp)
         } else {
-            let body = resp.text().await.unwrap_or_default();
+            // The response body is upstream-controlled and
+            // shouldn't carry our key (CWA isn't echoing the
+            // request URL back), but cap defensively in the
+            // same shape `BadStatus` already uses elsewhere.
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| crate::ConnectorError::from(e.without_url()))
+                .unwrap_or_default();
             Err(crate::ConnectorError::BadStatus {
                 status: status.as_u16(),
                 body,
@@ -1068,6 +1092,42 @@ mod tests {
         assert_eq!(redact_query("/api/x"), "/api/x");
         // Empty path: pass through.
         assert_eq!(redact_query(""), "");
+    }
+
+    #[tokio::test]
+    async fn polite_get_transport_error_does_not_leak_api_key() {
+        // `reqwest::Error::Display` normally includes the
+        // full request URL — which `polite_get` has just
+        // decorated with `?Authorization=<api key>`. A
+        // network failure would otherwise render that URL
+        // (and the cleartext key) into `ConnectorError::
+        // Transport`'s Display output. The `.without_url()`
+        // call in `polite_get` strips it; this test asserts
+        // the leak doesn't happen by pointing at a port no
+        // sane CI runner listens on and grepping both
+        // Display and Debug renderings for a sentinel key.
+        let connector = CwaConnector::builder()
+            .base_url("http://127.0.0.1:1")
+            .api_key("TRANSPORT-LEAK-MARKER-DEF456")
+            .throttle_ms(10)
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let err = connector
+            .polite_get("/api/v1/rest/datastore/O-A0001-001")
+            .await
+            .expect_err("connection refused");
+        let rendered = format!("{err}");
+        let debug = format!("{err:?}");
+        assert!(
+            !rendered.contains("TRANSPORT-LEAK-MARKER-DEF456"),
+            "transport error leaked key into Display: {rendered:?}"
+        );
+        assert!(
+            !debug.contains("TRANSPORT-LEAK-MARKER-DEF456"),
+            "transport error leaked key into Debug: {debug:?}"
+        );
     }
 
     #[tokio::test]
