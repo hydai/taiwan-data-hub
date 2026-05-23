@@ -66,6 +66,10 @@
 
 	const interactive = $derived(currentUserId !== null);
 	const displayScore = $derived(hoverScore ?? viewerScore ?? Math.round(avgScore ?? 0));
+	// The component is polymorphic over four target kinds;
+	// derive the wrapper label so screen readers announce
+	// the right noun rather than always saying "dataset".
+	const groupLabel = $derived(`Rate this ${targetKind}`);
 
 	function clamp(n: number): number {
 		return Math.max(SCORE_MIN, Math.min(SCORE_MAX, Math.round(n)));
@@ -195,7 +199,7 @@
 		without it, the label is silently dropped on most
 		screen readers (Chrome + JAWS / NVDA tested).
 	-->
-	<div role="group" aria-label="Rate this dataset" class="inline-flex items-center">
+	<div role="group" aria-label={groupLabel} class="inline-flex items-center">
 		{#each [1, 2, 3, 4, 5] as star (star)}
 			{@const filled = star <= displayScore}
 			<button

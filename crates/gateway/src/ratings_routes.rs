@@ -152,13 +152,11 @@ async fn withdraw_rating(
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     let target_kind = parse_kind(&kind)?;
     let target_id = parse_uuid("target_id", &target_id)?;
-    let removed = svc
-        .withdraw(session.user_id, target_kind, target_id)
-        .await
-        .map_err(ApiError::from)?;
     // 204 either way — withdraw is idempotent and the
     // gateway shouldn't leak whether the row existed.
-    let _ = removed;
+    svc.withdraw(session.user_id, target_kind, target_id)
+        .await
+        .map_err(ApiError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
