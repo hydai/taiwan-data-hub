@@ -41,8 +41,10 @@ CREATE TABLE comments (
     -- Markdown source the author submitted. NULL after a
     -- soft-delete; the service then renders a tombstone.
     body_md         TEXT,
-    -- Thread depth: 0 = root, 1 = reply, 2 reserved for a
-    -- future un-capping (currently rejected by CHECK).
+    -- Thread depth: 0 = root, 1 = reply. The CHECK below
+    -- caps the column at those two values; un-capping past 1
+    -- would need a CHECK update + a UI capable of rendering
+    -- deeper nesting, so it's not just a flag flip today.
     depth           SMALLINT     NOT NULL,
     created_at      TIMESTAMPTZ  NOT NULL DEFAULT now(),
     edited_at       TIMESTAMPTZ,

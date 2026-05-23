@@ -14,6 +14,177 @@ use uuid::Uuid;
 
 use crate::{Storage, StorageError};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers_modules::postgres::Postgres as PgContainer;
+    use testcontainers_modules::testcontainers::ContainerAsync;
+    use testcontainers_modules::testcontainers::ImageExt;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    /// Spin up a Postgres container, run every migration, and
+    /// return a [`Storage`] pointed at it. Mirrors the helper
+    /// in `dataset_repo::tests`.
+    async fn fresh_storage() -> (Storage, ContainerAsync<PgContainer>) {
+        let container = PgContainer::default()
+            .with_tag("18-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let host = container.get_host().await.expect("host");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        (Storage::from_pool(pool), container)
+    }
+
+    /// Seed a minimal user row — the comments FK requires it.
+    /// Argon2 hashes are irrelevant for the repo tests; any
+    /// non-empty string satisfies the column.
+    async fn seed_user(storage: &Storage) -> Uuid {
+        let email = format!("user-{}@example.test", Uuid::now_v7());
+        let (id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(&email)
+        .bind("placeholder")
+        .fetch_one(storage.pool())
+        .await
+        .expect("seed user");
+        id
+    }
+
+    fn target() -> (CommentTargetKind, Uuid) {
+        (CommentTargetKind::Dataset, Uuid::now_v7())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn insert_then_list_roundtrips() {
+        let (storage, _c) = fresh_storage().await;
+        let user_id = seed_user(&storage).await;
+        let (kind, tid) = target();
+        let id = storage
+            .insert(NewComment {
+                target_kind: kind,
+                target_id: tid,
+                parent_id: None,
+                user_id,
+                body_md: "hello".into(),
+                depth: 0,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let listed = storage.list_for_target(kind, tid).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+        assert_eq!(listed[0].body_md.as_deref(), Some("hello"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn edit_within_window_succeeds_past_window_fails() {
+        let (storage, _c) = fresh_storage().await;
+        let user_id = seed_user(&storage).await;
+        let (kind, tid) = target();
+        // Backdate the row by 2 seconds so a 1-second edit
+        // window is provably elapsed.
+        let created_at = Utc::now() - chrono::Duration::seconds(2);
+        let id = storage
+            .insert(NewComment {
+                target_kind: kind,
+                target_id: tid,
+                parent_id: None,
+                user_id,
+                body_md: "first".into(),
+                depth: 0,
+                created_at,
+            })
+            .await
+            .unwrap();
+        // Edit with a 1-second window — should fail.
+        let after = storage
+            .edit(id, user_id, "second", 1, Utc::now())
+            .await
+            .unwrap();
+        assert!(after.is_none(), "edit past the 1s window must be refused");
+        // Edit with a generous 60-second window — should succeed.
+        let after = storage
+            .edit(id, user_id, "second", 60, Utc::now())
+            .await
+            .unwrap()
+            .expect("60s window admits the edit");
+        assert_eq!(after.body_md.as_deref(), Some("second"));
+        assert!(after.edited_at.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn delete_soft_drops_body_md_and_sets_deleted_at() {
+        let (storage, _c) = fresh_storage().await;
+        let user_id = seed_user(&storage).await;
+        let (kind, tid) = target();
+        let id = storage
+            .insert(NewComment {
+                target_kind: kind,
+                target_id: tid,
+                parent_id: None,
+                user_id,
+                body_md: "to delete".into(),
+                depth: 0,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let after = storage
+            .delete(id, user_id, Utc::now())
+            .await
+            .unwrap()
+            .expect("first delete returns the row");
+        assert!(after.body_md.is_none());
+        assert!(after.deleted_at.is_some());
+        // Second delete is a no-op.
+        let again = storage.delete(id, user_id, Utc::now()).await.unwrap();
+        assert!(again.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn depth_check_rejects_depth_2() {
+        let (storage, _c) = fresh_storage().await;
+        let user_id = seed_user(&storage).await;
+        let (kind, tid) = target();
+        let err = storage
+            .insert(NewComment {
+                target_kind: kind,
+                target_id: tid,
+                parent_id: Some(Uuid::now_v7()),
+                user_id,
+                body_md: "too deep".into(),
+                depth: 2,
+                created_at: Utc::now(),
+            })
+            .await
+            .expect_err("CHECK rejects depth=2");
+        // sqlx surfaces CHECK violations as Database errors.
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("comments_depth_max_two") || msg.contains("violates check"),
+            "expected CHECK error, got {msg}"
+        );
+    }
+}
+
 /// Surface a comment is attached to. Wire format matches the
 /// `comments_target_kind_known` CHECK in migration 0015.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -159,6 +159,13 @@
 			editError = 'Comment cannot be empty.';
 			return;
 		}
+		// Unicode scalar count matches the server's
+		// `chars().count()` cap — keeps the client cap
+		// consistent with `submitNew`.
+		if ([...trimmed].length > MAX_COMMENT_BODY_LEN) {
+			editError = `Comment exceeds the ${MAX_COMMENT_BODY_LEN}-character limit.`;
+			return;
+		}
 		try {
 			const res = await fetch(commentByIdUrl(gatewayBase, editingId), {
 				method: 'PATCH',
@@ -219,19 +226,23 @@
 	};
 
 	function buildGroups(flat: RenderedComment[]): CommentGroup[] {
-		const roots = new Map<string, CommentGroup>();
+		// Plain object instead of Map to keep the Svelte
+		// `prefer-svelte-reactivity` lint happy — this is a
+		// transient pure-function structure with no reactivity
+		// needs, but the rule still fires on `new Map(...)`.
+		const roots: Record<string, CommentGroup> = {};
 		for (const c of flat) {
 			if (c.depth === 0) {
-				roots.set(c.id, { root: c, replies: [] });
+				roots[c.id] = { root: c, replies: [] };
 			}
 		}
 		for (const c of flat) {
 			if (c.depth === 1 && c.parent_id !== undefined) {
-				const g = roots.get(c.parent_id);
+				const g = roots[c.parent_id];
 				if (g !== undefined) g.replies.push(c);
 			}
 		}
-		return [...roots.values()];
+		return Object.values(roots);
 	}
 
 	function formatDate(iso: string): string {

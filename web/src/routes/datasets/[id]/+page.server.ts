@@ -1,8 +1,8 @@
 import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
-import { datasetSlugToUuid } from '$lib/comments/slug-uuid';
+import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
-import { normaliseGatewayBase } from '$lib/account/gateway';
+import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
 import { parseMeResponse } from '$lib/gateway/config';
 import type { PageServerLoad } from './$types';
 
@@ -44,10 +44,10 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	try {
 		const res = await fetch(`${gatewayBase}/api/v1/me`, {
 			method: 'GET',
-			headers: {
-				accept: 'application/json',
-				...(request.headers.get('cookie') ? { cookie: request.headers.get('cookie')! } : {})
-			}
+			headers: withCookieHeader(
+				new Headers({ accept: 'application/json' }),
+				request.headers.get('cookie')
+			)
 		});
 		if (res.ok) {
 			const parsed = parseMeResponse(await res.json().catch(() => null));
