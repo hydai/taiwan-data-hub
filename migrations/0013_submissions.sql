@@ -83,9 +83,20 @@ CREATE TABLE submissions (
     -- A row that carries reviewer metadata MUST be in a
     -- terminal-with-review state. Conversely a pending /
     -- withdrawn row must NOT carry reviewer metadata.
+    --
+    -- `reviewed_by` is NOT required to be NOT NULL on
+    -- terminal rows because the FK uses `ON DELETE SET NULL`:
+    -- when a moderator's account is later deleted, Postgres
+    -- nulls the reference but the timestamp + reason still
+    -- carry the decision audit trail. Requiring `reviewed_by
+    -- IS NOT NULL` here would block the FK's set-null action.
+    -- `reviewed_at` IS required because a terminal status
+    -- without a decision timestamp is a contradiction —
+    -- there's no way to forge a null `reviewed_at` from a
+    -- legitimate write path.
     CONSTRAINT submissions_review_consistency CHECK (
         (status IN ('approved', 'rejected')
-            AND reviewed_at IS NOT NULL AND reviewed_by IS NOT NULL)
+            AND reviewed_at IS NOT NULL)
         OR (status IN ('pending', 'withdrawn')
             AND reviewed_at IS NULL AND reviewed_by IS NULL
             AND review_reason IS NULL)
@@ -110,7 +121,15 @@ CREATE INDEX submissions_pending_idx
 CREATE INDEX submissions_kind_status_idx
     ON submissions (submission_kind, status, created_at DESC);
 
-CREATE TRIGGER submissions_set_updated_at_trg
-    BEFORE UPDATE ON submissions
-    FOR EACH ROW
-    EXECUTE FUNCTION users_set_updated_at();
+-- `updated_at` management lives in the SQL UPDATE statements,
+-- not a trigger. The `users_set_updated_at()` trigger function
+-- (defined in 0008) unconditionally overwrites `NEW.updated_at`
+-- with `now()`, which would silently kill the
+-- `GREATEST(updated_at, $now)` monotonic clamping the
+-- submission repo uses. The pattern matches `mcp_api_keys`
+-- (migration 0011) and `sessions` (0010), both of which write
+-- `last_used_at` / `expires_at` directly with `GREATEST` clamps
+-- and intentionally skip the trigger for the same reason. A row
+-- written without an explicit `updated_at` still gets the
+-- column's `DEFAULT now()` on INSERT, so no path leaves the
+-- column NULL.

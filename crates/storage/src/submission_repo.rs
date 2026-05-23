@@ -286,7 +286,11 @@ impl SubmissionRepo for Storage {
         // and the UPDATE returns no rows. `updated_at` is
         // clamped via `GREATEST` to stay monotonic under
         // multi-instance clock skew, mirroring the session +
-        // api-key repo patterns.
+        // api-key repo patterns. Migration 0013 intentionally
+        // does NOT install a `BEFORE UPDATE` trigger on this
+        // table — the trigger function shared by the `users`
+        // table would overwrite `NEW.updated_at` with `now()`
+        // and silently kill this clamp.
         let maybe = sqlx::query(
             "UPDATE submissions
                 SET status = 'withdrawn',

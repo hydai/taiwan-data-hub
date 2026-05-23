@@ -99,9 +99,17 @@ export const load: PageServerLoad = async ({
  */
 function buildPayload(kind: SubmissionKind, form: FormData): SubmissionPayload | { error: string } {
 	const get = (name: string): string => (form.get(name) ?? '').toString().trim();
+	// Count Unicode scalar values, matching Rust's
+	// `.chars().count()` on the gateway side. JS `string.length`
+	// counts UTF-16 code units, so non-BMP characters (emoji,
+	// older CJK plane B/C, etc.) would otherwise count double on
+	// the client and cause the preflight to reject inputs the
+	// server would accept (and vice versa).
+	const scalarLength = (s: string): number => [...s].length;
 	const required = (field: string, value: string, limit: number): string | { error: string } => {
 		if (value.length === 0) return { error: `${field} is required` };
-		if (value.length > limit) return { error: `${field} must be ${limit} characters or fewer` };
+		if (scalarLength(value) > limit)
+			return { error: `${field} must be ${limit} characters or fewer` };
 		return value;
 	};
 	const url = (field: string, value: string): string | { error: string } => {
