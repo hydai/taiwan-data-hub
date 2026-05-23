@@ -36,7 +36,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use connectors::{
     SourceConnector, SourceId, cwa::CwaConnector, data_gov_tw::DataGovTwConnector,
-    moea::MoeaConnector, twse::TwseConnector,
+    fishery_moa::FisheryMoaConnector, moea::MoeaConnector, twse::TwseConnector,
 };
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
@@ -223,14 +223,10 @@ async fn build_connector_for(id: SourceId, sources_path: &str) -> Result<Arc<dyn
             Ok(Arc::new(c) as Arc<dyn SourceConnector>)
         }
         SourceId::FisheryMoa => {
-            // #5b.5 adds the Fishery (MOA) arm. Until then,
-            // an `enabled = true` row for an unimplemented
-            // source fails boot loudly — better than a
-            // silently-skipped crawl.
-            anyhow::bail!(
-                "{id} connector is not yet implemented (see #5b.5); \
-                 set sources.{id}.enabled = false in {sources_path}"
-            )
+            let c = FisheryMoaConnector::new()
+                .await
+                .context("could not build Fishery (MOA) connector")?;
+            Ok(Arc::new(c) as Arc<dyn SourceConnector>)
         }
         SourceId::UserContrib => {
             anyhow::bail!("user_contrib is not ETL-driven; remove it from {sources_path}")
@@ -698,29 +694,22 @@ mod tests {
 
     /// `build_connector_for` is the choke point that gates an
     /// `enabled = true` source against an actually-implemented
-    /// connector. Today `DataGovTw` + `Twse` + `Moea` + `Cwa`
-    /// are implemented; `FisheryMoa` must error loudly so a
-    /// sources.toml typo or a premature flip can't silently
-    /// drop a crawl.
+    /// connector. All five ETL-driven sources (`DataGovTw` +
+    /// `Twse` + `Moea` + `Cwa` + `FisheryMoa`) are implemented
+    /// today; only the non-ETL `UserContrib` token must still
+    /// error loudly so a sources.toml typo can't silently drop
+    /// a crawl.
     ///
-    /// `Twse`, `Moea`, and `Cwa` aren't asserted as `Ok` here
-    /// because their constructors fetch real `robots.txt` from
-    /// the upstream hosts, which a unit test shouldn't depend
-    /// on. Each builder's `auto_fetch_robots(false)` escape
-    /// hatch covers that surface in the connector's own
-    /// `tests` module.
+    /// The four non-CKAN connectors aren't asserted as `Ok`
+    /// here because their constructors fetch real `robots.txt`
+    /// from the upstream hosts, which a unit test shouldn't
+    /// depend on. Each builder's `auto_fetch_robots(false)`
+    /// escape hatch covers that surface in the connector's
+    /// own `tests` module.
     #[tokio::test]
     async fn build_connector_implemented_sources_succeed() {
         let path = "config/sources.toml";
         assert!(build_connector_for(SourceId::DataGovTw, path).await.is_ok());
-        // M5b.5 will turn this into `Ok` as its connector
-        // lands; flipping the assertion in lockstep keeps
-        // the test the spec.
-        assert!(
-            build_connector_for(SourceId::FisheryMoa, path)
-                .await
-                .is_err()
-        );
         // user_contrib is never ETL-driven.
         assert!(
             build_connector_for(SourceId::UserContrib, path)
@@ -732,19 +721,19 @@ mod tests {
     /// The error message must surface the actual loaded path,
     /// not the default — otherwise an operator using
     /// `SOURCES_CONFIG_PATH` to point at e.g. `/etc/td-hub/sources.toml`
-    /// would be told to edit the wrong file. Uses `FisheryMoa`
-    /// (still unimplemented until #5b.5) to exercise the
+    /// would be told to edit the wrong file. Uses `UserContrib`
+    /// (never ETL-driven, so always errors) to exercise the
     /// path-aware error.
     #[tokio::test]
     async fn build_connector_error_message_carries_custom_path() {
         let path = "/etc/td-hub/sources.toml";
-        let result = build_connector_for(SourceId::FisheryMoa, path).await;
+        let result = build_connector_for(SourceId::UserContrib, path).await;
         // Can't use `unwrap_err` because the Ok variant
         // (`Arc<dyn SourceConnector>`) doesn't implement
         // `Debug`. `let-else` keeps clippy's
         // `manual-let-else` lint happy.
         let Err(err) = result else {
-            panic!("expected FisheryMoa to be unimplemented")
+            panic!("expected UserContrib to error")
         };
         let msg = format!("{err}");
         assert!(

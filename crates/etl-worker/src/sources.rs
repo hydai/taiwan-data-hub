@@ -568,16 +568,16 @@ enabled = false
     fn checked_in_sources_toml_loads() {
         let raw = include_str!("../../../config/sources.toml");
         let configs = parse(raw, "config/sources.toml").expect("checked-in file parses");
-        // Production has data.gov.tw + TWSE + MOEA + CWA
-        // enabled today (M5b.5 flips Fishery on when its
-        // connector lands). A future PR that turns on the
-        // remaining source should update this assertion in
-        // lockstep so the test is the spec.
+        // Production has all five ETL-driven sources enabled
+        // today: data.gov.tw + TWSE + MOEA + CWA + Fishery
+        // (MOA). UserContrib is never ETL-driven, so it's not
+        // in this list.
         let enabled_ids: Vec<SourceId> = configs.iter().map(|c| c.source_id).collect();
-        assert_eq!(configs.len(), 4, "{configs:?}");
+        assert_eq!(configs.len(), 5, "{configs:?}");
         assert!(enabled_ids.contains(&SourceId::DataGovTw));
         assert!(enabled_ids.contains(&SourceId::Twse));
         assert!(enabled_ids.contains(&SourceId::Moea));
         assert!(enabled_ids.contains(&SourceId::Cwa));
+        assert!(enabled_ids.contains(&SourceId::FisheryMoa));
     }
 }
