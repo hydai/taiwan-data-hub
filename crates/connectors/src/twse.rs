@@ -1124,39 +1124,59 @@ DISALLOW: /lower/
         assert_eq!(out, vec!["/lower/"]);
     }
 
-    #[tokio::test]
+    // The throttle tests below use `start_paused = true`
+    // so the tokio runtime's virtual clock advances only
+    // when no task can make progress. That makes the
+    // wall-clock assertions deterministic: a paused-time
+    // `sleep_until(t)` completes the moment `t` is
+    // reached on the virtual clock, with no real sleep.
+    // Two virtues for CI:
+    //
+    // - No upper-bound flakes on loaded runners (the old
+    //   `elapsed < 200ms` assertion would fail under CPU
+    //   contention even when the impl is correct).
+    // - Tests run instantly regardless of the configured
+    //   throttle interval.
+    //
+    // `tokio::time::Instant::now()` reads the virtual
+    // clock here, so `elapsed = now - start` is the
+    // SIMULATED elapsed time, exactly what the slot
+    // logic produced.
+
+    #[tokio::test(start_paused = true)]
     async fn throttle_enforces_minimum_interval_between_ticks() {
-        // Two ticks back-to-back with a 50ms throttle: the
-        // second must observe ≥ 45ms (a little slack for
-        // scheduler overhead) since the first.
+        // Two ticks back-to-back with a 50ms throttle:
+        // the slot-based impl claims slot 0 (no wait)
+        // and slot 1 (deadline = 50ms). Virtual elapsed
+        // = 50ms exactly.
         let connector = TwseConnector::builder()
             .auto_fetch_robots(false)
             .throttle_ms(50)
             .build()
             .await
             .unwrap();
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         connector.throttle_tick().await;
         connector.throttle_tick().await;
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed >= Duration::from_millis(45),
-            "expected ≥ 45ms between two ticks, got {elapsed:?}",
-        );
+        let elapsed = tokio::time::Instant::now().duration_since(start);
+        assert_eq!(elapsed, Duration::from_millis(50));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn throttle_concurrent_callers_get_distinct_slots() {
         // Three callers ticking at "the same moment"
-        // should claim slots 0, 1, 2 and complete in
-        // ≥ 2 * min_interval (the third caller's
-        // sleep). The buggy "hold mutex across sleep"
-        // implementation would have serialised them
-        // sequentially behind each other's sleep AND
-        // each caller would observe `last = now-after-
-        // its-own-sleep`, producing 3 * min_interval
-        // total. The slot-based throttle keeps it at
-        // 2 * min_interval.
+        // claim slots 0, 1, 2 at deadlines 0, 50ms,
+        // 100ms. The last completion is at 100ms.
+        //
+        // The buggy "hold mutex across sleep" impl
+        // would serialise sequentially: caller A sleeps
+        // 0ms, B sleeps 50ms behind A (50ms total), C
+        // sleeps 50ms behind B (100ms total = same as
+        // ours by coincidence). But B's "last" timestamp
+        // would be set AFTER its sleep, so C's deadline
+        // would be 100ms relative to that, producing
+        // 150ms total. With virtual time we can assert
+        // the exact 100ms outcome.
         let connector = std::sync::Arc::new(
             TwseConnector::builder()
                 .auto_fetch_robots(false)
@@ -1165,7 +1185,7 @@ DISALLOW: /lower/
                 .await
                 .unwrap(),
         );
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let mut handles = Vec::new();
         for _ in 0..3 {
             let c = connector.clone();
@@ -1174,41 +1194,23 @@ DISALLOW: /lower/
         for h in handles {
             h.await.unwrap();
         }
-        let elapsed = start.elapsed();
-        // Slot 0: deadline = now, no sleep
-        // Slot 1: deadline = now + 50ms
-        // Slot 2: deadline = now + 100ms
-        // Total wait ≈ 100ms. Allow some slack for
-        // scheduler overhead but cap below the "serial"
-        // outcome (3 * 50ms = 150ms + overhead).
-        assert!(
-            elapsed >= Duration::from_millis(90),
-            "expected ≥ 90ms wall time for 3 concurrent slots, got {elapsed:?}",
-        );
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "expected ≪ 200ms with concurrent slot claiming, got {elapsed:?} — \
-             this would fail under the buggy serialise-behind-sleep impl (\
-             expected ~150ms+) only barely; tighten if it flakes",
-        );
+        let elapsed = tokio::time::Instant::now().duration_since(start);
+        assert_eq!(elapsed, Duration::from_millis(100));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn throttle_does_not_block_first_call() {
-        // The very first tick should return immediately —
-        // there's no prior tick to space from.
+        // The very first tick claims slot 0 (deadline =
+        // now). Virtual elapsed = 0.
         let connector = TwseConnector::builder()
             .auto_fetch_robots(false)
             .throttle_ms(10_000) // 10s — would be obvious if it blocked
             .build()
             .await
             .unwrap();
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         connector.throttle_tick().await;
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "first tick should be ~immediate, got {elapsed:?}",
-        );
+        let elapsed = tokio::time::Instant::now().duration_since(start);
+        assert_eq!(elapsed, Duration::ZERO);
     }
 }

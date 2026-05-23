@@ -31,5 +31,8 @@ url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+# `test-util` for `#[tokio::test(start_paused = true)]` — the
+# throttle tests use the virtual clock so wall-clock assertions
+# stay deterministic on loaded CI runners.
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }

@@ -719,7 +719,7 @@ mod tests {
     /// not the default — otherwise an operator using
     /// `SOURCES_CONFIG_PATH` to point at e.g. `/etc/td-hub/sources.toml`
     /// would be told to edit the wrong file. Uses `Moea`
-    /// (still unimplemented in M5b.2) to exercise the
+    /// (still unimplemented until #5b.3) to exercise the
     /// path-aware error.
     #[tokio::test]
     async fn build_connector_error_message_carries_custom_path() {
