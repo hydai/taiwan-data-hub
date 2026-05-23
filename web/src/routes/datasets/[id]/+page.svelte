@@ -144,6 +144,21 @@
 		<dl class="rounded-lg border border-neutral-200 bg-white p-5">
 			<dt class="text-xs font-semibold tracking-wide text-neutral-500 uppercase">License</dt>
 			<dd class="mt-1 text-sm text-neutral-900">{dataset.license}</dd>
+			{#if dataset.source.licenseUrl}
+				<!-- #5b.6: clickable link to the license document when the
+					 source publishes one. Absence is silently graceful so
+					 pre-migration rows degrade to license name only. -->
+				<dd class="mt-1">
+					<a
+						class="text-sm break-all text-primary-700 underline underline-offset-2 hover:text-primary-800"
+						href={dataset.source.licenseUrl}
+						target="_blank"
+						rel="noopener noreferrer"
+					>
+						{dataset.source.licenseUrl}
+					</a>
+				</dd>
+			{/if}
 			<dt class="mt-4 text-xs font-semibold tracking-wide text-neutral-500 uppercase">
 				Update cadence
 			</dt>
