@@ -45,8 +45,12 @@ export interface DatasetSource {
 	 * Added in #5b.6 so the dataset detail page can render a
 	 * clickable license link and the /licenses page can group
 	 * datasets by shared license URL.
+	 *
+	 * Snake-case to match the other config/*.yaml keys
+	 * (`domain_slug`, `sort_order`, `anchor_datasets`) and
+	 * the SQL column name (`datasets.license_url`).
 	 */
-	licenseUrl?: string;
+	license_url?: string;
 }
 
 export interface DatasetResource {

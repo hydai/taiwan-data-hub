@@ -16,7 +16,7 @@
 #   source:
 #     publisher:    issuing agency, zh-TW
 #     url:          canonical landing page on the publisher's site
-#     licenseUrl:   (optional) URL of the license document for the
+#     license_url:   (optional) URL of the license document for the
 #                   row's declared `license`. When present, the
 #                   dataset detail page renders a clickable link;
 #                   /licenses groups datasets by license name and
@@ -46,7 +46,7 @@
   source:
     publisher: 教育部統計處
     url: https://data.gov.tw/dataset/6201
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: monthly
   resources:
     - kind: download
@@ -68,7 +68,7 @@
   source:
     publisher: 教育部統計處
     url: https://stats.moe.gov.tw/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: yearly
   resources:
     - kind: download
@@ -90,7 +90,7 @@
   source:
     publisher: 教育部高教司
     url: https://data.gov.tw/dataset/scholarship
-    licenseUrl: https://creativecommons.org/licenses/by/4.0/
+    license_url: https://creativecommons.org/licenses/by/4.0/
   updated: quarterly
   resources:
     - kind: download
@@ -112,7 +112,7 @@
   source:
     publisher: 教育部學生事務及特殊教育司
     url: https://data.gov.tw/dataset/loan
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: yearly
   resources:
     - kind: download
@@ -134,7 +134,7 @@
   source:
     publisher: 教育部終身教育司
     url: https://data.gov.tw/dataset/library
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: quarterly
   resources:
     - kind: download
@@ -156,7 +156,7 @@
   source:
     publisher: 行政院主計總處
     url: https://data.gov.tw/dataset/edu-budget
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: yearly
   resources:
     - kind: download
@@ -179,7 +179,7 @@
   source:
     publisher: 衛生福利部
     url: https://data.gov.tw/dataset/hospital
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: monthly
   resources:
     - kind: download
@@ -204,7 +204,7 @@
   source:
     publisher: 衛生福利部疾病管制署
     url: https://data.gov.tw/dataset/vaccine
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: weekly
   resources:
     - kind: download
@@ -226,7 +226,7 @@
   source:
     publisher: 衛生福利部食品藥物管理署
     url: https://data.gov.tw/dataset/recall
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: daily
   resources:
     - kind: download
@@ -251,7 +251,7 @@
   source:
     publisher: 衛生福利部中央健康保險署
     url: https://data.gov.tw/dataset/drug-price
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: monthly
   resources:
     - kind: download
@@ -273,7 +273,7 @@
   source:
     publisher: 衛生福利部國民健康署
     url: https://data.gov.tw/dataset/checkup
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: quarterly
   resources:
     - kind: download
@@ -295,7 +295,7 @@
   source:
     publisher: 衛生福利部中央健康保險署
     url: https://data.gov.tw/dataset/clinic-map
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: monthly
   resources:
     - kind: download
@@ -318,7 +318,7 @@
   source:
     publisher: 交通部觀光署
     url: https://data.gov.tw/dataset/attractions
-    licenseUrl: https://creativecommons.org/licenses/by/4.0/
+    license_url: https://creativecommons.org/licenses/by/4.0/
   updated: monthly
   resources:
     - kind: download
@@ -343,7 +343,7 @@
   source:
     publisher: 交通部觀光署
     url: https://data.gov.tw/dataset/hotels
-    licenseUrl: https://creativecommons.org/licenses/by/4.0/
+    license_url: https://creativecommons.org/licenses/by/4.0/
   updated: quarterly
   resources:
     - kind: download
@@ -365,7 +365,7 @@
   source:
     publisher: 交通部公共運輸及採購司
     url: https://tdx.transportdata.tw/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: daily
   resources:
     - kind: api
@@ -387,7 +387,7 @@
   source:
     publisher: 交通部中央氣象署
     url: https://opendata.cwa.gov.tw/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: daily
   resources:
     - kind: api
@@ -409,7 +409,7 @@
   source:
     publisher: 文化部
     url: https://data.gov.tw/dataset/festivals
-    licenseUrl: https://creativecommons.org/licenses/by/4.0/
+    license_url: https://creativecommons.org/licenses/by/4.0/
   updated: monthly
   resources:
     - kind: download
@@ -431,7 +431,7 @@
   source:
     publisher: 交通部觀光署
     url: https://data.gov.tw/dataset/night-markets
-    licenseUrl: https://creativecommons.org/licenses/by/4.0/
+    license_url: https://creativecommons.org/licenses/by/4.0/
   updated: yearly
   resources:
     - kind: download
@@ -454,7 +454,7 @@
   source:
     publisher: 內政部地政司
     url: https://lvr.land.moi.gov.tw/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: weekly
   resources:
     - kind: download
@@ -476,7 +476,7 @@
   source:
     publisher: 內政部地政司
     url: https://data.gov.tw/dataset/land-value
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: yearly
   resources:
     - kind: download
@@ -498,7 +498,7 @@
   source:
     publisher: 行政院公共工程委員會
     url: https://web.pcc.gov.tw/prkms/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: daily
   resources:
     - kind: api
@@ -520,7 +520,7 @@
   source:
     publisher: 立法院議事及法制局
     url: https://data.ly.gov.tw/
-    licenseUrl: https://creativecommons.org/publicdomain/mark/1.0/
+    license_url: https://creativecommons.org/publicdomain/mark/1.0/
   updated: daily
   resources:
     - kind: api
@@ -542,7 +542,7 @@
   source:
     publisher: 行政院主計總處
     url: https://www.dgbas.gov.tw/
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: yearly
   resources:
     - kind: download
@@ -564,7 +564,7 @@
   source:
     publisher: 外交部領事事務局
     url: https://data.gov.tw/dataset/visa
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: monthly
   resources:
     - kind: download
@@ -586,7 +586,7 @@
   source:
     publisher: 農業部農糧署
     url: https://data.gov.tw/dataset/agri-price
-    licenseUrl: https://data.gov.tw/license
+    license_url: https://data.gov.tw/license
   updated: daily
   resources:
     - kind: api

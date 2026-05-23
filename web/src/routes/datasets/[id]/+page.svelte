@@ -144,20 +144,20 @@
 		<dl class="rounded-lg border border-neutral-200 bg-white p-5">
 			<dt class="text-xs font-semibold tracking-wide text-neutral-500 uppercase">License</dt>
 			<dd class="mt-1 text-sm text-neutral-900">{dataset.license}</dd>
-			{#if dataset.source.licenseUrl}
+			{#if dataset.source.license_url}
 				<!-- #5b.6: clickable link to the license document when the
 					 YAML fixture (config/datasets.yaml) carries a
-					 `source.licenseUrl`. The field is optional — entries
+					 `source.license_url`. The field is optional — entries
 					 without it degrade to license name only, no broken
 					 link rendered. -->
 				<dd class="mt-1">
 					<a
 						class="text-sm break-all text-primary-700 underline underline-offset-2 hover:text-primary-800"
-						href={dataset.source.licenseUrl}
+						href={dataset.source.license_url}
 						target="_blank"
 						rel="noopener noreferrer"
 					>
-						{dataset.source.licenseUrl}
+						{dataset.source.license_url}
 					</a>
 				</dd>
 			{/if}

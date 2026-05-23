@@ -130,14 +130,14 @@ function assertValidDatasets(value: unknown): asserts value is Dataset[] {
 		if (!asNonEmptyString(source.url) || !isSafeHttpUrl(source.url as string)) {
 			throw new Error(`config/datasets.yaml (${tag}): source.url must be a non-empty http(s) URL`);
 		}
-		// `licenseUrl` is optional (some licenses don't have a
+		// `license_url` is optional (some licenses don't have a
 		// stable web home), but when present it must be a safe
 		// http(s) URL — same guard as `source.url` so a typo
 		// can't surface as a `javascript:` link on the page.
-		if (source.licenseUrl !== undefined) {
-			if (!asNonEmptyString(source.licenseUrl) || !isSafeHttpUrl(source.licenseUrl as string)) {
+		if (source.license_url !== undefined) {
+			if (!asNonEmptyString(source.license_url) || !isSafeHttpUrl(source.license_url as string)) {
 				throw new Error(
-					`config/datasets.yaml (${tag}): source.licenseUrl, when set, must be a non-empty http(s) URL`
+					`config/datasets.yaml (${tag}): source.license_url, when set, must be a non-empty http(s) URL`
 				);
 			}
 		}

@@ -40,13 +40,29 @@ export const load: PageServerLoad = () => {
 		const existing = groups.get(d.license);
 		if (existing) {
 			existing.datasets.push({ slug: d.slug, name: d.name['zh-TW'] });
-			if (!existing.url && d.source.licenseUrl) {
-				existing.url = d.source.licenseUrl;
+			if (d.source.license_url) {
+				if (existing.url && existing.url !== d.source.license_url) {
+					// Two datasets under the same license name point at
+					// different license_url values. Almost certainly a
+					// config typo (the YAML schema invariant is
+					// "same license → same URL"). Fail loud at
+					// prerender / build so a mistake can't ship a
+					// silently-wrong canonical link on /licenses or
+					// the per-dataset detail page.
+					throw new Error(
+						`config/datasets.yaml: divergent license_url within license "${d.license}" — ` +
+							`previously seen "${existing.url}", dataset "${d.slug}" declares "${d.source.license_url}". ` +
+							`All datasets under the same license name must point at the same license_url.`
+					);
+				}
+				if (!existing.url) {
+					existing.url = d.source.license_url;
+				}
 			}
 		} else {
 			groups.set(d.license, {
 				name: d.license,
-				url: d.source.licenseUrl,
+				url: d.source.license_url,
 				datasets: [{ slug: d.slug, name: d.name['zh-TW'] }]
 			});
 		}
