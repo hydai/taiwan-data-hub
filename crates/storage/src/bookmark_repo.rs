@@ -299,15 +299,26 @@ pub trait CollectionRepo: Send + Sync {
         user_id: Uuid,
     ) -> Result<Option<CollectionRow>, StorageError>;
 
-    /// Rename / update description. Ownership-scoped; the
-    /// `updated_at` clamp stays monotonic under multi-instance
-    /// clock skew via `GREATEST`.
+    /// Rename + optionally update description. Ownership-
+    /// scoped. `description` follows PATCH semantics:
+    ///
+    ///   * `None` → preserve the existing value.
+    ///   * `Some(None)` → set the column to SQL NULL.
+    ///   * `Some(Some("…"))` → replace with the new string.
+    ///
+    /// The conditional update uses a single `CASE` so a
+    /// rename + clear race can't interleave a separate
+    /// description write. The `Option<Option<T>>` shape is
+    /// the canonical three-state PATCH encoding; clippy's
+    /// `option_option` lint flags it by default — here it's
+    /// a deliberate protocol detail.
+    #[allow(clippy::option_option)]
     async fn update(
         &self,
         id: Uuid,
         user_id: Uuid,
         name: &str,
-        description: Option<&str>,
+        description: Option<Option<&str>>,
         now: DateTime<Utc>,
     ) -> Result<Option<CollectionRow>, StorageError>;
 
@@ -402,21 +413,32 @@ impl CollectionRepo for Storage {
         id: Uuid,
         user_id: Uuid,
         name: &str,
-        description: Option<&str>,
+        description: Option<Option<&str>>,
         now: DateTime<Utc>,
     ) -> Result<Option<CollectionRow>, StorageError> {
+        // `description` is `Option<Option<&str>>`:
+        //   None             → preserve (CASE → existing).
+        //   Some(None)       → set NULL.
+        //   Some(Some(s))    → replace with s.
+        // Encode that as one boolean ($4) + one nullable
+        // payload ($5) so the SQL is a single UPDATE.
+        let (should_set_desc, desc_value): (bool, Option<&str>) = match description {
+            None => (false, None),
+            Some(value) => (true, value),
+        };
         let maybe = sqlx::query(
             "UPDATE collections
                 SET name = $3,
-                    description = $4,
-                    updated_at = GREATEST(updated_at, $5)
+                    description = CASE WHEN $4::boolean THEN $5::text ELSE description END,
+                    updated_at = GREATEST(updated_at, $6)
               WHERE id = $1 AND user_id = $2
              RETURNING id, user_id, name, description, created_at, updated_at",
         )
         .bind(id)
         .bind(user_id)
         .bind(name)
-        .bind(description)
+        .bind(should_set_desc)
+        .bind(desc_value)
         .bind(now)
         .fetch_optional(self.pool())
         .await

@@ -151,7 +151,7 @@ impl CollectionRepo for CollectionStore {
         id: Uuid,
         user_id: Uuid,
         name: &str,
-        description: Option<&str>,
+        description: Option<Option<&str>>,
         now: DateTime<Utc>,
     ) -> Result<Option<CollectionRow>, StorageError> {
         let mut inner = self.rows.lock().unwrap();
@@ -171,7 +171,11 @@ impl CollectionRepo for CollectionStore {
             return Ok(None);
         }
         name.clone_into(&mut row.name);
-        row.description = description.map(str::to_owned);
+        // PATCH semantics: only touch description when the
+        // outer Option is Some(_).
+        if let Some(d) = description {
+            row.description = d.map(str::to_owned);
+        }
         row.updated_at = row.updated_at.max(now);
         Ok(Some(row.clone()))
     }

@@ -42,6 +42,17 @@ CREATE TABLE bookmarks (
 CREATE INDEX bookmarks_user_created_idx
     ON bookmarks (user_id, created_at DESC);
 
+-- "My bookmarks of kind X" — the kind-filtered listing path
+-- the gateway also hits (the dataset page's pre-paint probe
+-- uses `?kind=dataset`, and the /account/bookmarks tabs
+-- filter the same way). The three-column composite ordered
+-- by `created_at DESC` lets Postgres satisfy
+-- `WHERE user_id = $1 AND target_kind = $2 ORDER BY
+-- created_at DESC` with an index-only scan as bookmark
+-- counts grow.
+CREATE INDEX bookmarks_user_kind_created_idx
+    ON bookmarks (user_id, target_kind, created_at DESC);
+
 -- Reverse lookup — "is this row bookmarked by me?" answers
 -- come from the UNIQUE index above; no separate index
 -- needed.
@@ -87,6 +98,15 @@ CREATE TABLE collection_items (
 -- which folders?" detail page.
 CREATE INDEX collection_items_target_idx
     ON collection_items (target_kind, target_id);
+
+-- "List items in this collection, newest-first" — the
+-- detail-page access pattern. The PK on
+-- `(collection_id, target_kind, target_id)` filters but
+-- doesn't order by `added_at`; this composite ordered
+-- index covers `WHERE collection_id = $1 ORDER BY added_at
+-- DESC` without a sort step.
+CREATE INDEX collection_items_added_idx
+    ON collection_items (collection_id, added_at DESC);
 
 COMMENT ON TABLE collections IS
     'User-defined private collections (folders) over community-facing rows. Public-share lands in a follow-up milestone.';

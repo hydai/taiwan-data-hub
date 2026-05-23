@@ -155,20 +155,38 @@ impl CollectionService {
         Ok(self.repo.get_for_user(id, user_id).await?)
     }
 
+    /// Rename a collection and optionally update its
+    /// description. `description` follows PATCH semantics:
+    ///   * `None` → preserve the prior value.
+    ///   * `Some(None)` → clear the column.
+    ///   * `Some(Some(s))` → replace.
+    ///
+    /// The `Option<Option<T>>` shape is the canonical serde
+    /// pattern for three-state PATCH semantics; clippy's
+    /// `option_option` lint flags it by default because the
+    /// shape is usually a mistake — here it's a deliberate
+    /// protocol detail.
+    #[allow(clippy::option_option)]
     pub async fn rename(
         &self,
         id: Uuid,
         user_id: Uuid,
         name: String,
-        description: Option<String>,
+        description: Option<Option<String>>,
     ) -> Result<Result<CollectionRow, CollectionDenialReason>, AuthError> {
-        let (name, description) = match validate_inputs(&name, description.as_deref()) {
+        // Validate name + (when present) the new description.
+        // `description = None` (preserve) skips description
+        // validation entirely.
+        let name_check_input = description.as_ref().and_then(|d| d.as_deref());
+        let (name, validated_desc) = match validate_inputs(&name, name_check_input) {
             Ok(parts) => parts,
             Err(err) => return Ok(Err(CollectionDenialReason::InvalidInput(err))),
         };
+        let description_arg: Option<Option<&str>> =
+            description.as_ref().map(|_| validated_desc.as_deref());
         let outcome = self
             .repo
-            .update(id, user_id, &name, description.as_deref(), Utc::now())
+            .update(id, user_id, &name, description_arg, Utc::now())
             .await;
         match outcome {
             Ok(Some(row)) => Ok(Ok(row)),

@@ -172,6 +172,47 @@ pub struct CreateCollectionRequest {
     pub description: Option<String>,
 }
 
+/// Rename body — `description` is a `double Option` so PATCH
+/// can express three states:
+///
+///   * field omitted → `None` (preserve existing description)
+///   * `"description": null` → `Some(None)` (clear it)
+///   * `"description": "..."` → `Some(Some(...))` (set / replace)
+///
+/// Without the double-Option, an omitted field would
+/// deserialize to `None` and the handler would clear the
+/// description, surprising any caller doing a name-only
+/// PATCH.
+#[derive(Debug, Deserialize)]
+pub struct RenameCollectionRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    // The `Option<Option<T>>` shape is intentional: it's
+    // the canonical way to express three-state PATCH
+    // semantics (missing / null / set) in serde. clippy's
+    // `option_option` lint flags it by default because the
+    // shape is usually a mistake; here it's a deliberate
+    // protocol detail, and there's a doc comment on the
+    // struct above explaining the wire mapping.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    #[allow(clippy::option_option)]
+    pub description: Option<Option<String>>,
+}
+
+/// Serde dance: turn an explicit `null` into `Some(None)` and
+/// a present value into `Some(Some(_))`. A missing field
+/// falls back to `None` via `#[serde(default)]`. Without this
+/// custom deserializer, serde collapses both "missing" and
+/// "null" to `None`.
+#[allow(clippy::option_option)]
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ItemRequest {
     #[serde(default)]
@@ -237,7 +278,7 @@ async fn rename_collection(
     State(svc): State<Arc<CollectionService>>,
     session: Option<Extension<ValidatedSession>>,
     Path(id): Path<String>,
-    Json(body): Json<CreateCollectionRequest>,
+    Json(body): Json<RenameCollectionRequest>,
 ) -> Result<Json<CollectionResponse>, ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     let id = parse_uuid("collection id", &id)?;
