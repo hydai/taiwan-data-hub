@@ -489,8 +489,20 @@ impl RequestThrottle {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    #[error("invalid URL: {0}")]
-    InvalidUrl(String),
+    /// `which` names the configuration setting that held
+    /// the bad value (e.g. `twse_base_url`) so operators
+    /// can locate it without reading the parser detail in
+    /// context. `value` carries the offending string
+    /// verbatim — a stale env var or typo is immediately
+    /// visible. The underlying `url::ParseError` is
+    /// preserved via `#[source]` for chain walkers.
+    #[error("invalid {which} URL {value:?}")]
+    InvalidUrl {
+        which: &'static str,
+        value: String,
+        #[source]
+        source: url::ParseError,
+    },
     #[error("HTTP client could not be constructed: {0}")]
     Client(#[from] reqwest::Error),
     #[error("robots.txt fetch from {url} failed: {source}")]
@@ -565,12 +577,29 @@ impl Builder {
 
     pub async fn build(self) -> Result<TwseConnector, BuildError> {
         let twse_base_url =
-            Url::parse(&self.twse_base_url).map_err(|e| BuildError::InvalidUrl(e.to_string()))?;
+            Url::parse(&self.twse_base_url).map_err(|e| BuildError::InvalidUrl {
+                which: "twse_base_url",
+                value: self.twse_base_url.clone(),
+                source: e,
+            })?;
         let mops_base_url =
-            Url::parse(&self.mops_base_url).map_err(|e| BuildError::InvalidUrl(e.to_string()))?;
+            Url::parse(&self.mops_base_url).map_err(|e| BuildError::InvalidUrl {
+                which: "mops_base_url",
+                value: self.mops_base_url.clone(),
+                source: e,
+            })?;
+        // Disable HTTP redirects so the same-origin and
+        // robots-prefix checks above stay authoritative. A
+        // 3xx `Location` could point at a different origin,
+        // and reqwest's default policy would dutifully
+        // follow it — silently bypassing both guards. With
+        // `Policy::none()`, redirects surface as ordinary
+        // non-2xx responses and `polite_get` returns them
+        // through the normal `BadStatus` path.
         let http = Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(self.timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
         let throttle = RequestThrottle::new(Duration::from_millis(self.throttle_ms));
         let mut robots_disallowed: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -617,7 +646,11 @@ async fn fetch_robots_disallowed(
 ) -> Result<Vec<String>, BuildError> {
     let url = base
         .join("/robots.txt")
-        .map_err(|e| BuildError::InvalidUrl(e.to_string()))?;
+        .map_err(|e| BuildError::InvalidUrl {
+            which: "robots.txt URL",
+            value: format!("{base}/robots.txt"),
+            source: e,
+        })?;
     throttle.tick().await;
     let url_str = url.to_string();
     let response = http
@@ -1072,6 +1105,68 @@ Disallow:
             .await
             .expect_err("503 should fail");
         assert!(matches!(err, BuildError::RobotsStatus { status: 503, .. }));
+    }
+
+    #[tokio::test]
+    async fn polite_get_does_not_follow_redirects() {
+        // Defence-in-depth: even though `polite_get`
+        // validates the request URL against the configured
+        // origin, the HTTP client's redirect policy could
+        // quietly carry the request to a different host via
+        // `Location`. We disable redirects at the builder so
+        // a 3xx surfaces as a `BadStatus` instead of being
+        // followed — keeping the same-origin and
+        // robots-prefix checks authoritative.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/redirect-me"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("Location", "https://evil.example/owned"),
+            )
+            .mount(&server)
+            .await;
+        let connector = TwseConnector::builder()
+            .twse_base_url(server.uri())
+            .mops_base_url(server.uri())
+            .throttle_ms(10)
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let err = connector
+            .polite_get_twse("/redirect-me")
+            .await
+            .expect_err("3xx must surface as BadStatus, not be followed");
+        assert!(
+            matches!(&err, crate::ConnectorError::BadStatus { status: 302, .. }),
+            "got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn build_error_invalid_url_carries_input_value() {
+        // The previous shape captured only the parse error,
+        // making it ambiguous which configured URL was bad
+        // (`twse_base_url` vs `mops_base_url`). The struct
+        // variant names the setting AND echoes the value back
+        // so operators can find the misconfiguration without
+        // re-deriving it from a parser-level message.
+        let err = TwseConnector::builder()
+            .twse_base_url("not a url")
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .expect_err("malformed twse_base_url must fail");
+        match &err {
+            BuildError::InvalidUrl { which, value, .. } => {
+                assert_eq!(*which, "twse_base_url");
+                assert_eq!(value, "not a url");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        let rendered = err.to_string();
+        assert!(rendered.contains("twse_base_url"), "got {rendered:?}");
+        assert!(rendered.contains("not a url"), "got {rendered:?}");
     }
 
     #[test]
