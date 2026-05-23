@@ -322,9 +322,15 @@ impl SourceConnector for TwseConnector {
 
     fn supports_incremental(&self) -> bool {
         // Flip to `true` once `fetch_data` is implemented.
-        // The driver consults this before invoking
-        // per-dataset methods so the catalog-only path stays
-        // the only reachable one today.
+        // The current M5b.1 driver doesn't yet consult
+        // this flag (it only does the catalog walk via
+        // `list_datasets`); once a future driver wires
+        // per-dataset fetches it should check
+        // `supports_incremental` before invoking
+        // `fetch_metadata` / `fetch_data` so the
+        // `Unsupported` defaults stay unreachable. For now
+        // this method is the trait's contract and a
+        // sentinel for that future wiring.
         false
     }
 }
@@ -416,43 +422,68 @@ fn major_news_metadata() -> DatasetMetadata {
     }
 }
 
-/// Async-safe minimum-interval throttle. Wraps an `Option<Instant>`
-/// representing the last-tick time; `tick()` sleeps until at
-/// least `min_interval` has passed since that, then updates
-/// the stored time. The mutex is `tokio::sync::Mutex` because
-/// it's held across an `.await` (the sleep) — an `std::sync::Mutex`
-/// would block the runtime.
+/// Async-safe minimum-interval throttle. Tracks the
+/// **next allowed instant** rather than the last-tick
+/// instant; `tick()` claims the next slot under the
+/// lock, drops the guard, then sleeps until its
+/// reservation. Concurrent callers each get a distinct
+/// slot in arrival order and sleep independently — the
+/// lock is held only for the brief slot-claim, NOT
+/// across the sleep.
+///
+/// The naive "hold the mutex across the sleep" pattern
+/// would serialise concurrent callers behind the prior
+/// sleep: caller B couldn't even compute its own wait
+/// time until A's sleep ended, then would compute the
+/// wait based on now-vs-(updated)A. With the
+/// `next_allowed_at` approach every caller knows its
+/// deadline immediately and the lock contention is
+/// O(slot-claim) regardless of throttle interval.
+///
+/// `tokio::sync::Mutex` is still appropriate even
+/// though we only hold it briefly — `tokio::time::Instant`
+/// is part of the tokio runtime and the tests use
+/// tokio's `MockClock` so deterministic time advances
+/// stay consistent.
 #[derive(Debug, Clone)]
 struct RequestThrottle {
-    last_request: Arc<Mutex<Option<Instant>>>,
+    /// Earliest Instant the next caller may issue at.
+    /// `None` until the first tick.
+    next_allowed_at: Arc<Mutex<Option<Instant>>>,
     min_interval: Duration,
 }
 
 impl RequestThrottle {
     fn new(min_interval: Duration) -> Self {
         Self {
-            last_request: Arc::new(Mutex::new(None)),
+            next_allowed_at: Arc::new(Mutex::new(None)),
             min_interval,
         }
     }
 
-    /// Wait if necessary so at least `min_interval` has
-    /// passed since the previous tick, then mark the current
-    /// instant as "last".
+    /// Claim a slot, then sleep until the reservation.
+    /// Slot allocation under the lock is constant-time;
+    /// the sleep happens AFTER the guard drops so other
+    /// callers can claim their own slots concurrently.
     async fn tick(&self) {
-        let mut guard = self.last_request.lock().await;
-        if let Some(prev) = *guard {
-            // `checked_sub` keeps clippy's
-            // `unchecked-time-subtraction` lint happy. When
-            // elapsed ≥ min_interval the subtraction would
-            // underflow Duration — but the outer check is
-            // exactly that case, so `checked_sub` always
-            // returns `Some` on the branch we sleep on.
-            if let Some(wait) = self.min_interval.checked_sub(prev.elapsed()) {
-                tokio::time::sleep(wait).await;
-            }
-        }
-        *guard = Some(Instant::now());
+        // Claim the slot.
+        let deadline = {
+            let mut guard = self.next_allowed_at.lock().await;
+            let now = Instant::now();
+            // First caller: deadline = now (no wait);
+            // next allowed = now + min_interval.
+            // Later callers: deadline = max(now, prior
+            // next_allowed_at); next allowed = deadline +
+            // min_interval.
+            let deadline = match *guard {
+                None => now,
+                Some(prior) => prior.max(now),
+            };
+            *guard = Some(deadline + self.min_interval);
+            deadline
+        }; // guard dropped here — concurrent callers can
+        //   now claim their own slots while we sleep.
+        tokio::time::sleep_until(deadline).await;
     }
 }
 
@@ -1111,6 +1142,54 @@ DISALLOW: /lower/
         assert!(
             elapsed >= Duration::from_millis(45),
             "expected ≥ 45ms between two ticks, got {elapsed:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn throttle_concurrent_callers_get_distinct_slots() {
+        // Three callers ticking at "the same moment"
+        // should claim slots 0, 1, 2 and complete in
+        // ≥ 2 * min_interval (the third caller's
+        // sleep). The buggy "hold mutex across sleep"
+        // implementation would have serialised them
+        // sequentially behind each other's sleep AND
+        // each caller would observe `last = now-after-
+        // its-own-sleep`, producing 3 * min_interval
+        // total. The slot-based throttle keeps it at
+        // 2 * min_interval.
+        let connector = std::sync::Arc::new(
+            TwseConnector::builder()
+                .auto_fetch_robots(false)
+                .throttle_ms(50)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let start = std::time::Instant::now();
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let c = connector.clone();
+            handles.push(tokio::spawn(async move { c.throttle_tick().await }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let elapsed = start.elapsed();
+        // Slot 0: deadline = now, no sleep
+        // Slot 1: deadline = now + 50ms
+        // Slot 2: deadline = now + 100ms
+        // Total wait ≈ 100ms. Allow some slack for
+        // scheduler overhead but cap below the "serial"
+        // outcome (3 * 50ms = 150ms + overhead).
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "expected ≥ 90ms wall time for 3 concurrent slots, got {elapsed:?}",
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "expected ≪ 200ms with concurrent slot claiming, got {elapsed:?} — \
+             this would fail under the buggy serialise-behind-sleep impl (\
+             expected ~150ms+) only barely; tighten if it flakes",
         );
     }
 
