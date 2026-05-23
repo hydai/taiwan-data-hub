@@ -33,15 +33,46 @@
 	// reconciles after the network round trip lands. Seed
 	// from the SSR prop via an IIFE so the Svelte
 	// `state_referenced_locally` lint doesn't fire on
-	// `$state(initialBookmarked)` (the prop is read only at
-	// mount; later prop changes intentionally don't override
-	// the user's pending optimistic flip).
+	// `$state(initialBookmarked)`; the `$effect` below
+	// handles the "props changed because SvelteKit reused
+	// this instance across /datasets/A → /datasets/B"
+	// case.
 	let bookmarked = $state((() => initialBookmarked)());
 	let inFlight = $state(false);
 	let error = $state<string | null>(null);
 
+	// Track the (kind, id) pair this state was seeded for.
+	// SvelteKit reuses the same HeartButton instance when
+	// the user navigates between dataset pages, so the
+	// component sees new props instead of remounting.
+	// Without this, the heart would stay stuck on the
+	// previous dataset's bookmark state.
+	//
+	// The key starts empty so the first `$effect` run on
+	// mount unconditionally re-seeds — keeps the prop reads
+	// inside the closure (the Svelte lint forbids reading
+	// `$props()` values at top level for exactly this
+	// "snapshot once" reason).
+	let lastTargetKey = '';
+	$effect(() => {
+		const key = `${targetKind}|${targetId}`;
+		if (key === lastTargetKey) return;
+		lastTargetKey = key;
+		bookmarked = initialBookmarked;
+		error = null;
+		// Any in-flight toggle is for the previous target;
+		// `inFlight` stays true until that response lands
+		// and the key-mismatch check drops it on the floor.
+	});
+
 	async function toggle(): Promise<void> {
 		if (currentUserId === null || inFlight) return;
+		// Snapshot the target at the start so a response
+		// that lands after the user has navigated to a
+		// different dataset doesn't bleed its outcome into
+		// the new target's state. Same key shape as the
+		// effect above.
+		const startKey = `${targetKind}|${targetId}`;
 		const previous = bookmarked;
 		bookmarked = !bookmarked;
 		inFlight = true;
@@ -59,6 +90,11 @@
 					target_id: targetId
 				})
 			});
+			// If the user navigated away before the response
+			// landed, drop it on the floor. The effect above
+			// already re-seeded state for the new target;
+			// reverting/reconciling here would corrupt it.
+			if (`${targetKind}|${targetId}` !== startKey) return;
 			if (!res.ok) {
 				bookmarked = previous;
 				error = `Failed to update bookmark (${res.status}).`;
@@ -73,6 +109,10 @@
 			// Reconcile with the server's authoritative answer.
 			bookmarked = body.outcome === 'bookmarked';
 		} catch (e) {
+			// Same stale-response guard for the network-fail
+			// branch — don't revert if the user has already
+			// moved on.
+			if (`${targetKind}|${targetId}` !== startKey) return;
 			bookmarked = previous;
 			console.error('[heart] toggle failed:', e);
 			error = 'Network error — please try again.';
