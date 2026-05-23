@@ -132,12 +132,16 @@ impl ReportService {
 
     /// Moderator queue. Caller must have already passed
     /// [`crate::ModerationService::require_moderator`].
+    /// `after` is the cursor (last report id on the
+    /// previous page); the storage layer paginates by
+    /// `id > after` in ASC order so the cursor is a
+    /// stable tie-breaker.
     pub async fn list_open(
         &self,
-        before: Option<chrono::DateTime<Utc>>,
+        after: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<ReportRow>, AuthError> {
-        Ok(self.repo.list_open(before, limit).await?)
+        Ok(self.repo.list_open(after, limit).await?)
     }
 
     /// Reporter's own filed reports (with resolution

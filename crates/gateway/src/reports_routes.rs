@@ -108,14 +108,17 @@ pub struct SubmitRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ListOpenQuery {
-    /// String-typed so axum's query extractor never
-    /// rejects a malformed timestamp with a plain-text
-    /// 400 — the parse happens in the handler so a bad
-    /// `?before=` returns the structured `{error,
-    /// message}` envelope every other endpoint uses.
+    /// Cursor — the id of the last report on the
+    /// previous page. `UUIDv7` ids are time-ordered so
+    /// `?after=<uuid>` doubles as a pagination key AND
+    /// a stable tie-breaker (two reports with the
+    /// same `created_at` still have distinct ids).
+    /// String-typed so a malformed UUID returns the
+    /// structured `{error, message}` envelope rather
+    /// than axum's plain-text 400.
     #[serde(default)]
-    pub before: Option<String>,
-    /// Same shape as `before` — string-typed so a
+    pub after: Option<String>,
+    /// Same shape as `after` — string-typed so a
     /// non-integer `?limit=` doesn't bypass the
     /// envelope.
     #[serde(default)]
@@ -234,10 +237,10 @@ async fn list_open(
         .map_err(ApiError::from)?
         .map_err(ApiError::from_moderation_denial)?;
     let limit = parse_limit(query.limit.as_deref())?;
-    let before = parse_before(query.before.as_deref())?;
+    let after = parse_after(query.after.as_deref())?;
     let rows = state
         .reports
-        .list_open(before, limit)
+        .list_open(after, limit)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(rows.into_iter().map(ReportResponse::from).collect()))
@@ -323,15 +326,15 @@ fn parse_limit(raw: Option<&str>) -> Result<i64, ApiError> {
     })
 }
 
-/// Parse `?before=` as an RFC3339 timestamp; same
+/// Parse `?after=` as a UUID cursor; same
 /// envelope-preserving rationale as `parse_limit`.
-fn parse_before(raw: Option<&str>) -> Result<Option<DateTime<Utc>>, ApiError> {
+fn parse_after(raw: Option<&str>) -> Result<Option<Uuid>, ApiError> {
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let parsed: DateTime<Utc> = s.parse().map_err(|_| {
-        ApiError::Validation(format!("before `{s}` is not a valid RFC3339 timestamp"))
-    })?;
+    let parsed: Uuid = s
+        .parse()
+        .map_err(|_| ApiError::Validation(format!("after `{s}` is not a valid UUID")))?;
     Ok(Some(parsed))
 }
 
@@ -466,20 +469,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_before_accepts_rfc3339() {
-        assert!(
-            parse_before(Some("2026-05-23T10:00:00Z"))
-                .unwrap()
-                .is_some()
-        );
-        assert!(parse_before(None).unwrap().is_none());
-        assert!(parse_before(Some("")).unwrap().is_none());
+    fn parse_after_accepts_uuid() {
+        let u = Uuid::now_v7().to_string();
+        assert!(parse_after(Some(&u)).unwrap().is_some());
+        assert!(parse_after(None).unwrap().is_none());
+        assert!(parse_after(Some("")).unwrap().is_none());
     }
 
     #[test]
-    fn parse_before_rejects_garbage() {
+    fn parse_after_rejects_garbage() {
         assert!(matches!(
-            parse_before(Some("not-a-date")).unwrap_err(),
+            parse_after(Some("not-a-uuid")).unwrap_err(),
             ApiError::Validation(_)
         ));
     }

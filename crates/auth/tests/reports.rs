@@ -131,17 +131,17 @@ impl ReportRepo for ReportStore {
 
     async fn list_open(
         &self,
-        before: Option<DateTime<Utc>>,
+        after: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<ReportRow>, StorageError> {
         let inner = self.rows.lock().unwrap();
         let mut rows: Vec<ReportRow> = inner
             .values()
             .filter(|r| r.resolved_at.is_none())
-            .filter(|r| before.is_none_or(|b| r.created_at < b))
+            .filter(|r| after.is_none_or(|cursor| r.id > cursor))
             .cloned()
             .collect();
-        rows.sort_by_key(|r| r.created_at);
+        rows.sort_by_key(|r| r.id);
         rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(rows)
     }

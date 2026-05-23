@@ -245,9 +245,16 @@ pub trait ReportRepo: Send + Sync {
     ) -> Result<InsertOutcome, StorageError>;
 
     /// List open reports (oldest first), paginated.
+    /// `after` is the last report id from the previous
+    /// page; rows with `id > after` come back in ASC
+    /// order. Using the `UUIDv7` id (rather than
+    /// `created_at`) makes the cursor a unique tie-
+    /// breaker — two rows with identical `created_at`
+    /// timestamps still have distinct ids and can't
+    /// straddle a page boundary.
     async fn list_open(
         &self,
-        before: Option<DateTime<Utc>>,
+        after: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<ReportRow>, StorageError>;
 
@@ -413,19 +420,26 @@ impl ReportRepo for Storage {
 
     async fn list_open(
         &self,
-        before: Option<DateTime<Utc>>,
+        after: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<ReportRow>, StorageError> {
+        // ORDER BY id ASC is equivalent to ORDER BY
+        // created_at ASC for the partial index (uuidv7
+        // is time-ordered), but it's a strict total
+        // order — no two rows tie. The cursor predicate
+        // `id > $1` therefore can't drop rows that
+        // share a `created_at` with the previous page's
+        // last item.
         let rows = sqlx::query(
             "SELECT id, reporter_id, target_kind, target_id, reason_category, body,
                     created_at, resolved_at, resolved_by, action_taken, resolution_note
                FROM reports
               WHERE resolved_at IS NULL
-                AND ($1::TIMESTAMPTZ IS NULL OR created_at < $1::TIMESTAMPTZ)
-              ORDER BY created_at ASC
+                AND ($1::UUID IS NULL OR id > $1::UUID)
+              ORDER BY id ASC
               LIMIT $2",
         )
-        .bind(before)
+        .bind(after)
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
