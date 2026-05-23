@@ -186,7 +186,7 @@ mod tests {
 
 /// Surface a comment is attached to. Wire format matches the
 /// `comments_target_kind_known` CHECK in migration 0015.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommentTargetKind {
     Dataset,
     Tool,

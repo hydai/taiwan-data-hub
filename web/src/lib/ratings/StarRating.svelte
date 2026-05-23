@@ -1,0 +1,259 @@
+<!--
+	5-star rating component (#5a.5).
+
+	UI states:
+	- Anonymous viewer: stars are read-only, aggregate is
+	  rendered. Click is a no-op (covered by `interactive`).
+	- Signed-in viewer: stars are interactive — hover-to-
+	  preview, click-to-set, re-click the selected star to
+	  withdraw.
+
+	The 24h account-age anti-spam gate is enforced server-
+	side, not in the UI. A fresh account that tries to rate
+	gets a 403 with `error: "account_too_new"` and the
+	component surfaces "Ratings are unlocked 24h after
+	sign-up." via the sr-only live region. The optimistic
+	flip is reverted on the same path. A proactive disabled
+	state would need the server to plumb an eligibility hint
+	through `RatingView`; deferred until that turns into a
+	UX complaint.
+
+	Mirrors the HeartButton patterns from #5a.4 — re-seeds
+	on (kind, id) change so SvelteKit's same-instance reuse
+	across /datasets/A → /datasets/B doesn't bleed state,
+	and drops stale responses if the user navigates mid-
+	flight.
+-->
+<script lang="ts">
+	import { SCORE_MAX, SCORE_MIN, parseRatingView, type RatingTargetKind } from '$lib/ratings/types';
+	import { ratingByTargetUrl, ratingsUrl } from '$lib/ratings/gateway';
+	import type { RatingView, UpsertRatingResponse } from '$lib/ratings/types';
+
+	let {
+		targetKind,
+		targetId,
+		currentUserId,
+		initialView
+	}: {
+		targetKind: RatingTargetKind;
+		targetId: string;
+		currentUserId: string | null;
+		initialView: RatingView;
+	} = $props();
+
+	// IIFE-wrapped seeds for the same reason HeartButton
+	// uses them — the `$effect` below resyncs on route
+	// navigation.
+	let avgScore = $state((() => initialView.avg_score)());
+	let count = $state((() => initialView.count)());
+	let viewerScore = $state((() => initialView.viewer_score)());
+	let hoverScore = $state<number | null>(null);
+	let inFlight = $state(false);
+	let error = $state<string | null>(null);
+
+	let lastTargetKey = '';
+	$effect(() => {
+		const key = `${targetKind}|${targetId}`;
+		if (key === lastTargetKey) return;
+		lastTargetKey = key;
+		avgScore = initialView.avg_score;
+		count = initialView.count;
+		viewerScore = initialView.viewer_score;
+		hoverScore = null;
+		error = null;
+		inFlight = false;
+	});
+
+	const interactive = $derived(currentUserId !== null);
+	const displayScore = $derived(hoverScore ?? viewerScore ?? Math.round(avgScore ?? 0));
+	// The component is polymorphic over four target kinds;
+	// derive the wrapper label so screen readers announce
+	// the right noun rather than always saying "dataset".
+	const groupLabel = $derived(`Rate this ${targetKind}`);
+	// Generate the star indices from the shared score
+	// constants so a future range tweak (e.g. extend to
+	// SCORE_MAX = 10) only needs to touch one place.
+	const stars = Array.from({ length: SCORE_MAX - SCORE_MIN + 1 }, (_, i) => SCORE_MIN + i);
+
+	function clamp(n: number): number {
+		return Math.max(SCORE_MIN, Math.min(SCORE_MAX, Math.round(n)));
+	}
+
+	async function pickScore(n: number): Promise<void> {
+		if (!interactive || inFlight) return;
+		const startKey = `${targetKind}|${targetId}`;
+		const newScore = clamp(n);
+		// Re-clicking the currently-rated star withdraws.
+		const isWithdraw = viewerScore === newScore;
+		const previousViewer = viewerScore;
+		// Only `viewerScore` flips optimistically. The
+		// aggregate (count + avg) settles on the canonical
+		// GET in `refreshView`. Updating count without avg
+		// would let a network-fail leave a mismatched
+		// "N+1 ratings, stale avg" on the page; keeping the
+		// aggregate frozen until the server confirms is more
+		// honest about the failure mode.
+		viewerScore = isWithdraw ? null : newScore;
+		inFlight = true;
+		error = null;
+		try {
+			const res = isWithdraw
+				? await fetch(ratingByTargetUrl(targetKind, targetId), {
+						method: 'DELETE',
+						credentials: 'include',
+						headers: { accept: 'application/json' }
+					})
+				: await fetch(ratingsUrl(), {
+						method: 'POST',
+						credentials: 'include',
+						headers: {
+							accept: 'application/json',
+							'content-type': 'application/json'
+						},
+						body: JSON.stringify({
+							target_kind: targetKind,
+							target_id: targetId,
+							score: newScore
+						})
+					});
+			// Stale-target guard.
+			if (`${targetKind}|${targetId}` !== startKey) return;
+			if (!res.ok) {
+				viewerScore = previousViewer;
+				const body = (await res.json().catch(() => null)) as {
+					error?: string;
+					message?: string;
+				} | null;
+				if (res.status === 403 && body?.error === 'account_too_new') {
+					error = 'Ratings are unlocked 24h after sign-up.';
+				} else if (res.status === 401) {
+					error = 'Please sign in again.';
+				} else {
+					error = body?.message ?? `Failed to save rating (${res.status}).`;
+				}
+				return;
+			}
+			if (!isWithdraw) {
+				const body = (await res.json().catch(() => null)) as UpsertRatingResponse | null;
+				if (body && typeof body.score === 'number') {
+					viewerScore = body.score;
+				}
+			}
+			// Pull the canonical aggregate (avg + count) from
+			// the server now that the write has landed. The
+			// previous optimistic count/avg update was removed
+			// — keeping the aggregate frozen until this GET
+			// confirms avoids the "stale avg + bumped count"
+			// inconsistency a refresh failure would otherwise
+			// leave on the page.
+			await refreshView(startKey);
+		} catch (e) {
+			if (`${targetKind}|${targetId}` !== startKey) return;
+			viewerScore = previousViewer;
+			console.error('[stars] toggle failed:', e);
+			error = 'Network error — please try again.';
+		} finally {
+			if (`${targetKind}|${targetId}` === startKey) {
+				inFlight = false;
+			}
+		}
+	}
+
+	async function refreshView(startKey: string): Promise<void> {
+		try {
+			const res = await fetch(ratingByTargetUrl(targetKind, targetId), {
+				method: 'GET',
+				credentials: 'include',
+				headers: { accept: 'application/json' }
+			});
+			if (`${targetKind}|${targetId}` !== startKey) return;
+			if (!res.ok) return;
+			// Route the response through the same runtime
+			// narrower the SSR load uses so a gateway shape
+			// drift can't push `undefined` into component
+			// state and break the template render.
+			const body = parseRatingView(await res.json().catch(() => null));
+			if (body === null) return;
+			avgScore = body.avg_score;
+			count = body.count;
+			viewerScore = body.viewer_score;
+		} catch (e) {
+			console.error('[stars] refresh failed:', e);
+		}
+	}
+</script>
+
+<div class="flex items-center gap-2">
+	<!--
+		Plain `<button>` group rather than role="radiogroup".
+		A real radiogroup needs roving-tabindex + arrow-key
+		traversal per WAI-ARIA practices, and screen readers
+		that hear the radio role expect that behaviour. We
+		don't implement it, so the buttons stay as buttons;
+		the per-star `aria-label` ("4 stars") + `aria-pressed`
+		on the active rating give assistive tech the same
+		"this is the chosen rating" signal without lying
+		about the keyboard contract.
+	-->
+	<!--
+		`role="group"` is required for `aria-label` on a
+		generic container to be announced by assistive tech;
+		without it, the label is silently dropped on most
+		screen readers (Chrome + JAWS / NVDA tested).
+	-->
+	<div role="group" aria-label={groupLabel} class="inline-flex items-center">
+		{#each stars as star (star)}
+			{@const filled = star <= displayScore}
+			<button
+				type="button"
+				aria-pressed={interactive ? viewerScore === star : undefined}
+				aria-label={`${star} ${star === 1 ? 'star' : 'stars'}`}
+				disabled={!interactive || inFlight}
+				onclick={() => pickScore(star)}
+				onmouseenter={() => interactive && (hoverScore = star)}
+				onmouseleave={() => (hoverScore = null)}
+				onfocus={() => interactive && (hoverScore = star)}
+				onblur={() => (hoverScore = null)}
+				class={`p-0.5 transition focus-visible:ring-2 focus-visible:ring-amber-400 focus-visible:outline-none ${
+					interactive ? 'cursor-pointer hover:scale-110' : 'cursor-default disabled:opacity-100'
+				}`}
+			>
+				<svg
+					class="h-5 w-5"
+					viewBox="0 0 24 24"
+					fill={filled ? 'currentColor' : 'none'}
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+					class:text-amber-400={filled}
+					class:text-neutral-300={!filled}
+				>
+					<path d="M12 2 14.39 8.36H21l-5.3 4.04 2 6.6L12 15.27l-5.7 3.73 2-6.6L3 8.36h6.61z" />
+				</svg>
+			</button>
+		{/each}
+	</div>
+	<span class="text-sm text-neutral-600">
+		{#if count > 0 && avgScore !== null}
+			{avgScore.toFixed(2)} · {count}
+			{count === 1 ? 'rating' : 'ratings'}
+		{:else}
+			No ratings yet
+		{/if}
+	</span>
+	<!--
+		Screen-reader announcement on rating failure /
+		state change. `role="status"` (implicit
+		`aria-live="polite"`) so a failure lands without
+		interrupting a screen reader's current speech.
+		Avoids `role="alert"`, which carries an implicit
+		assertive contract that some AT/UAs treat as
+		interruptive regardless of an explicit
+		`aria-live="polite"` override.
+	-->
+	<span class="sr-only" role="status">
+		{#if error}{error}{/if}
+	</span>
+</div>

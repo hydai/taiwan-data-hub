@@ -24,6 +24,7 @@ mod moderation;
 mod oauth;
 mod password;
 mod rate_limit;
+mod ratings;
 mod redact;
 mod service;
 mod session;
@@ -54,6 +55,9 @@ pub use password::{hash_password, verify_password};
 pub use rate_limit::{
     DEFAULT_IP_RPM, DEFAULT_QUERY_ROWS_RPM, InMemoryRateLimiter, PgRateLimiter, RateLimitOutcome,
     RateLimiter, WINDOW_SECONDS, tier_rpm,
+};
+pub use ratings::{
+    MIN_ACCOUNT_AGE_FOR_RATING, RatingDenialReason, RatingService, SCORE_MAX, SCORE_MIN,
 };
 pub use service::{
     AuthService, AuthenticatedUser, DEFAULT_MAX_INFLIGHT_SENDS, DEFAULT_RESET_TTL,

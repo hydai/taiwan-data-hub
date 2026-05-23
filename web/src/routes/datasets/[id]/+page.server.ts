@@ -4,7 +4,15 @@ import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
 import { parseBookmarkArray } from '$lib/bookmarks/types';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
+import { parseRatingView, type RatingView } from '$lib/ratings/types';
 import type { PageServerLoad } from './$types';
+
+/** Default view when the gateway probe fails — degrades to "no ratings yet". */
+const EMPTY_RATING_VIEW: RatingView = {
+	avg_score: null,
+	count: 0,
+	viewer_score: null
+};
 
 /**
  * Resolves the dataset record for /datasets/[id]. 404s cleanly if the
@@ -93,20 +101,77 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 		}
 	}
 
+	// Pre-paint the rating view (aggregate + viewer's own
+	// score) so the stars render with the correct fill on
+	// first byte. Anonymous traffic still sees the aggregate
+	// — the gateway endpoint is anonymous-readable. A probe
+	// failure degrades to "no ratings yet" rather than
+	// 500-ing the page.
+	//
+	// Gated on multi-user mode because the gateway doesn't
+	// mount `/api/v1/ratings` in personal mode (same gate as
+	// HeartButton + CommentThread) — without this we'd
+	// 404-spam the gateway on every dataset render.
+	let ratingView: RatingView = EMPTY_RATING_VIEW;
+	if (parentData.mode === 'multi-user') {
+		try {
+			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
+			// Cache-correctness: when the layout has NOT
+			// resolved a current user, this response is
+			// served with `cache-control: public, ...`, so
+			// the probe must be cookie-free — otherwise the
+			// gateway could return a personalized
+			// `viewer_score` (if a valid session cookie is
+			// present but `/api/v1/me` failed to parse it)
+			// and that score would land in a shared cache.
+			//
+			// Just passing `null` to `withCookieHeader` isn't
+			// enough: when `GATEWAY_HTTP_URL` is empty
+			// (same-origin via reverse proxy), SvelteKit's
+			// `event.fetch` auto-forwards the inbound cookie
+			// jar. To truly drop the session here we need to
+			// (a) explicitly set `cookie: ''` so the
+			// auto-forward has nothing to merge, AND (b)
+			// `credentials: 'omit'` so the cross-origin path
+			// stays clean too.
+			const ratingHeaders =
+				currentUserId !== null
+					? withCookieHeader(
+							new Headers({ accept: 'application/json' }),
+							request.headers.get('cookie')
+						)
+					: new Headers({ accept: 'application/json', cookie: '' });
+			const res = await fetch(`${base}/api/v1/ratings/dataset/${commentTargetId}`, {
+				method: 'GET',
+				credentials: currentUserId !== null ? 'include' : 'omit',
+				headers: ratingHeaders
+			});
+			if (res.ok) {
+				const parsed = parseRatingView(await res.json().catch(() => null));
+				if (parsed !== null) {
+					ratingView = parsed;
+				}
+			}
+		} catch (e) {
+			console.error('[/datasets/:id] rating probe failed:', e);
+		}
+	}
+
 	return {
 		dataset,
 		commentTargetId,
 		currentUserId,
 		// Mirror the layout's mode so community-facing
-		// surfaces (comments thread + HeartButton) are
-		// SSR-skipped in personal-mode deploys — the gateway
-		// doesn't mount their subrouters there, so a probe
-		// would 404 and the components would render as
-		// "Loading…" stubs that the client only hides at
-		// hydration. One flag covers both because the auth
-		// subrouter is the shared gate; if either feature
-		// ships separately in the future, split the flag.
+		// surfaces (comments thread + HeartButton + stars)
+		// are SSR-skipped in personal-mode deploys — the
+		// gateway doesn't mount their subrouters there, so
+		// a probe would 404 and the components would render
+		// as "Loading…" stubs that the client only hides at
+		// hydration. One flag covers all because the auth
+		// subrouter is the shared gate; if features ship
+		// separately in the future, split the flag.
 		communityEnabled: parentData.mode === 'multi-user',
-		bookmarked
+		bookmarked,
+		ratingView
 	};
 };
