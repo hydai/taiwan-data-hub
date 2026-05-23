@@ -162,9 +162,11 @@
 		</ul>
 	</section>
 
-	<CommentThread
-		targetKind="dataset"
-		targetId={data.commentTargetId}
-		currentUserId={data.currentUserId}
-	/>
+	{#if data.commentsEnabled}
+		<CommentThread
+			targetKind="dataset"
+			targetId={data.commentTargetId}
+			currentUserId={data.currentUserId}
+		/>
+	{/if}
 </div>

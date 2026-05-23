@@ -53,7 +53,10 @@ pub struct RenderedComment {
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
     /// `true` iff the row is soft-deleted. The web layer
-    /// branches on this to render the tombstone styling.
+    /// branches on this to hide the Edit / Delete / Reply
+    /// affordances; `body_html` already carries the
+    /// `[deleted]` tombstone content, so no separate
+    /// styling decision is required.
     pub is_deleted: bool,
 }
 

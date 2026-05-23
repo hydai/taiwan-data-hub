@@ -53,6 +53,12 @@ export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
 	return {
 		dataset,
 		commentTargetId: datasetSlugToUuid(dataset.slug),
-		currentUserId
+		currentUserId,
+		// Mirror the layout's mode so the comment thread is
+		// SSR-skipped in personal-mode deploys (otherwise the
+		// section would render with "Loading comments…" until
+		// the client-side 404 detect hides it, and stay
+		// visible forever for no-JS readers).
+		commentsEnabled: parentData.mode === 'multi-user'
 	};
 };
