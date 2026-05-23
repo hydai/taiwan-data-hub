@@ -22,10 +22,17 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# `sync` for the TWSE throttle's `tokio::sync::Mutex<Option<Instant>>`
+# (an std Mutex held across `.await` would block the runtime); `time`
+# for the throttle's sleep between calls.
+tokio = { workspace = true, default-features = false, features = ["sync", "time"] }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+# `test-util` for `#[tokio::test(start_paused = true)]` — the
+# throttle tests use the virtual clock so wall-clock assertions
+# stay deterministic on loaded CI runners.
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "test-util"] }
 wiremock = { workspace = true }
