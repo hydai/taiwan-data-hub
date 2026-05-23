@@ -106,12 +106,38 @@ impl BookmarkRepo for Storage {
         target_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<BookmarkToggleOutcome, StorageError> {
-        // Two-step transaction: delete-if-present, otherwise
-        // insert. Wrapped so a concurrent toggle from the same
-        // session can't end up with a duplicate row OR
-        // accidentally cancel itself between the two writes.
+        // Insert-first, delete-on-conflict. This shape stays
+        // deterministic under concurrent toggles from the
+        // same user/session — the prior delete-then-insert
+        // shape let two concurrent "first heart" requests
+        // race past the delete (both saw zero rows) and hit
+        // a UNIQUE-violation 500 on the second INSERT.
+        //
+        // With `ON CONFLICT DO NOTHING RETURNING id`, the
+        // happy "first heart" path returns the freshly-
+        // inserted UUID. The conflict path returns no rows;
+        // we then DELETE the existing entry and report the
+        // toggle-off outcome. Both halves run in a single
+        // transaction so an interleaved rollback can't leave
+        // an unbookmarked row claiming to be bookmarked.
         let mut tx = self.pool().begin().await?;
-        let deleted = sqlx::query(
+        let inserted: Option<(Uuid,)> = sqlx::query_as(
+            "INSERT INTO bookmarks (user_id, target_kind, target_id, created_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, target_kind, target_id) DO NOTHING
+             RETURNING id",
+        )
+        .bind(user_id)
+        .bind(target_kind.as_str())
+        .bind(target_id)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((id,)) = inserted {
+            tx.commit().await?;
+            return Ok(BookmarkToggleOutcome::Bookmarked(id));
+        }
+        sqlx::query(
             "DELETE FROM bookmarks
               WHERE user_id = $1 AND target_kind = $2 AND target_id = $3",
         )
@@ -120,23 +146,8 @@ impl BookmarkRepo for Storage {
         .bind(target_id)
         .execute(&mut *tx)
         .await?;
-        if deleted.rows_affected() > 0 {
-            tx.commit().await?;
-            return Ok(BookmarkToggleOutcome::Removed);
-        }
-        let (id,): (Uuid,) = sqlx::query_as(
-            "INSERT INTO bookmarks (user_id, target_kind, target_id, created_at)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id",
-        )
-        .bind(user_id)
-        .bind(target_kind.as_str())
-        .bind(target_id)
-        .bind(now)
-        .fetch_one(&mut *tx)
-        .await?;
         tx.commit().await?;
-        Ok(BookmarkToggleOutcome::Bookmarked(id))
+        Ok(BookmarkToggleOutcome::Removed)
     }
 
     async fn list_for_user(

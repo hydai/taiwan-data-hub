@@ -62,7 +62,9 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 	if (currentUserId !== null) {
 		try {
 			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-			const res = await fetch(`${base}/api/v1/bookmarks`, {
+			// Filter to `kind=dataset` so the probe stays cheap
+			// for users with many bookmarks across kinds.
+			const res = await fetch(`${base}/api/v1/bookmarks?kind=dataset`, {
 				method: 'GET',
 				headers: withCookieHeader(
 					new Headers({ accept: 'application/json' }),

@@ -314,11 +314,23 @@ async fn add_collection_item(
         .await
         .map_err(ApiError::from)?;
     if added {
-        Ok(StatusCode::CREATED)
+        return Ok(StatusCode::CREATED);
+    }
+    // `added == false` could mean two things: (a) the
+    // collection is not owned by the caller / doesn't
+    // exist, or (b) the (kind, id) is already in the
+    // collection. Re-read the collection to distinguish
+    // them — owner-confirmed → 204 (idempotent), unowned
+    // / missing → 404. Avoids surfacing "already saved"
+    // as a misleading 404 to the client.
+    if svc
+        .get_for_user(id, session.user_id)
+        .await
+        .map_err(ApiError::from)?
+        .is_some()
+    {
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        // Either collection not owned/missing, or item already
-        // present. Both fold into 404 — the client refreshes
-        // and re-renders the deduped state.
         Err(ApiError::NotFound)
     }
 }
