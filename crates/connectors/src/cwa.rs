@@ -211,17 +211,17 @@ impl CwaConnector {
         // contract honest: the request never leaves the
         // configured host.
         validate_relative_path(path)?;
-        let mut url = self
-            .base_url
-            .join(path)
-            .map_err(|e| crate::ConnectorError::Config(format!("invalid path {path:?}: {e}")))?;
+        let mut url = self.base_url.join(path).map_err(|e| {
+            crate::ConnectorError::Config(format!("invalid path {:?}: {e}", redact_query(path)))
+        })?;
         // Belt + suspenders: even if `validate_relative_path`
         // someday admits a corner case, refuse the request
         // when `Url::join` produced a different origin than
         // the configured base.
         if url.origin() != self.base_url.origin() {
             return Err(crate::ConnectorError::Config(format!(
-                "path {path:?} resolved to a different origin than {}",
+                "path {:?} resolved to a different origin than {}",
+                redact_query(path),
                 origin_key(&self.base_url),
             )));
         }
@@ -250,10 +250,16 @@ impl CwaConnector {
             .query_pairs()
             .any(|(k, _)| k.eq_ignore_ascii_case(API_KEY_QUERY_PARAM))
         {
+            // CRITICAL: do NOT echo the full path here. The
+            // whole point of this guard is that the caller's
+            // query string may carry a real (stale) key under
+            // `Authorization=...`; logging it verbatim would
+            // defeat the `ApiKey` newtype's redaction.
             return Err(crate::ConnectorError::Config(format!(
-                "path {path:?} already specifies an {API_KEY_QUERY_PARAM:?} query \
+                "path {:?} already specifies an {API_KEY_QUERY_PARAM:?} query \
                  parameter — the connector injects the API key automatically and \
-                 refuses to send a duplicate"
+                 refuses to send a duplicate",
+                redact_query(path),
             )));
         }
         // Inject the API key as a query parameter. Done after
@@ -281,20 +287,35 @@ impl CwaConnector {
 fn validate_relative_path(path: &str) -> Result<(), crate::ConnectorError> {
     if !path.starts_with('/') {
         return Err(crate::ConnectorError::Config(format!(
-            "path {path:?} must start with '/' (got a non-relative path)",
+            "path {:?} must start with '/' (got a non-relative path)",
+            redact_query(path),
         )));
     }
     if path.starts_with("//") {
         return Err(crate::ConnectorError::Config(format!(
-            "path {path:?} must not start with '//' (scheme-relative URLs are forbidden)",
+            "path {:?} must not start with '//' (scheme-relative URLs are forbidden)",
+            redact_query(path),
         )));
     }
     if path.contains("://") {
         return Err(crate::ConnectorError::Config(format!(
-            "path {path:?} must not contain '://' (absolute URLs are forbidden)",
+            "path {:?} must not contain '://' (absolute URLs are forbidden)",
+            redact_query(path),
         )));
     }
     Ok(())
+}
+
+/// Strip the query string before echoing a path back into
+/// an error message. Callers may inadvertently include a
+/// real `Authorization=...` value in the query string (the
+/// exact misconfiguration the duplicate-rejection guard
+/// catches); echoing the full path verbatim would defeat
+/// the `ApiKey` newtype's redaction and leak the key into
+/// logs. The path component alone is sufficient context for
+/// debugging the shape error.
+fn redact_query(path: &str) -> &str {
+    path.split_once('?').map_or(path, |(prefix, _)| prefix)
 }
 
 #[async_trait]
@@ -978,6 +999,53 @@ mod tests {
             matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("Authorization")),
             "got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn polite_get_error_does_not_leak_caller_supplied_key() {
+        // The duplicate-Authorization guard catches a real
+        // misconfiguration: a caller passing `?Authorization=
+        // <stale-key>`. The error message MUST NOT echo the
+        // key back — that would defeat the `ApiKey` newtype's
+        // redaction by leaking the stale value into logs.
+        let connector = CwaConnector::builder()
+            .base_url("https://example.test")
+            .api_key("test-key")
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let leak_marker = "MUST-NOT-APPEAR-IN-ERROR-XYZ123";
+        let err = connector
+            .polite_get(&format!(
+                "/api/v1/rest/datastore/O-A0001-001?Authorization={leak_marker}",
+            ))
+            .await
+            .expect_err("duplicate must be rejected");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains(leak_marker),
+            "error message leaked caller's key: {rendered:?}"
+        );
+        // The path component (sans query) IS allowed — and
+        // useful — for debugging the shape of the problem.
+        assert!(
+            rendered.contains("/api/v1/rest/datastore/O-A0001-001"),
+            "error should still name the path component: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn redact_query_strips_query_string() {
+        assert_eq!(redact_query("/api/x?Authorization=secret"), "/api/x");
+        assert_eq!(redact_query("/api/x?a=1&b=2"), "/api/x");
+        // No query string: pass through unchanged.
+        assert_eq!(redact_query("/api/x"), "/api/x");
+        // Empty path: pass through.
+        assert_eq!(redact_query(""), "");
+        // Fragment without query: pass through (fragment is
+        // an upstream-side detail, never carries a key).
+        assert_eq!(redact_query("/api/x#frag"), "/api/x#frag");
     }
 
     #[tokio::test]
