@@ -312,11 +312,13 @@ fn validate_relative_path(path: &str) -> Result<(), crate::ConnectorError> {
 /// in either the query string (the exact misconfiguration
 /// the duplicate-rejection guard catches) or — more
 /// pathologically — in a URL fragment. Fragments are
-/// upstream-side and never sent over the wire, but they
-/// CAN end up in error messages and log output, so the
-/// sanitizer is conservative: drop everything from the
-/// earliest of `?` or `#`. The path component alone is
-/// sufficient context for debugging the shape error.
+/// client-side: they're stripped before the request is
+/// sent to the server, so an upstream never sees them.
+/// But they CAN still land in our own error messages and
+/// log output, so the sanitizer is conservative: drop
+/// everything from the earliest of `?` or `#`. The path
+/// component alone is sufficient context for debugging
+/// the shape error.
 fn redact_query(path: &str) -> &str {
     let q = path.find('?');
     let h = path.find('#');
