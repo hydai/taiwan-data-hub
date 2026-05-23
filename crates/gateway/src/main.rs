@@ -17,6 +17,7 @@ mod api_keys_routes;
 mod api_routes;
 mod rate_limit_middleware;
 mod session_middleware;
+mod submissions_routes;
 
 use std::net::SocketAddr;
 
@@ -458,7 +459,8 @@ fn build_auth_router_if_available(
     };
 
     let session_repo: Arc<dyn storage::SessionRepo> = Arc::new(storage.clone());
-    let api_key_repo: Arc<dyn storage::ApiKeyRepo> = Arc::new(storage);
+    let api_key_repo: Arc<dyn storage::ApiKeyRepo> = Arc::new(storage.clone());
+    let submission_repo: Arc<dyn storage::SubmissionRepo> = Arc::new(storage);
     let session_service = match auth::SessionService::new(session_repo, hmac_key) {
         Ok(svc) => Arc::new(svc),
         Err(e) => {
@@ -470,6 +472,7 @@ fn build_auth_router_if_available(
         }
     };
     let api_key_service = Arc::new(auth::ApiKeyService::new(api_key_repo));
+    let submission_service = Arc::new(auth::SubmissionService::new(submission_repo));
 
     // Layer stack (axum applies bottom-up, so the order here
     // is the OUTER-TO-INNER request flow):
@@ -487,15 +490,19 @@ fn build_auth_router_if_available(
     // session extension + the `X-RateLimit-*` headers added by
     // the rate-limit middleware on the outgoing response.
     let api_keys = api_keys_routes::router(api_key_service);
+    let submissions = submissions_routes::router(submission_service);
     // `/api/v1/me` mounts here too — it needs the session
     // middleware to read the cookie. Anonymous traffic still
     // gets a 200 with `{ user: null }` because the handler
     // extracts via `Option<Extension<…>>`. We mount it as a
     // sibling route on a fresh `Router` (not nested under
     // api-keys) so its path is `/api/v1/me` rather than
-    // `/v1/api-keys/api/v1/me`.
+    // `/v1/api-keys/api/v1/me`. `/api/v1/submissions` follows
+    // the same pattern — session-required (not session-aware)
+    // because submitting anonymously is never valid.
     let authed = axum::Router::new()
         .merge(Router::new().nest("/v1/api-keys", api_keys))
+        .merge(Router::new().nest("/api/v1/submissions", submissions))
         .route("/api/v1/me", api_routes::me_handler())
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter,
@@ -515,7 +522,7 @@ fn build_auth_router_if_available(
     // log line uses "session middleware mounted" so operators
     // don't misread this as a 401-on-anonymous endpoint.
     tracing::info!(
-        "api-keys subrouter enabled at /v1/api-keys; /api/v1/me has session middleware mounted"
+        "api-keys subrouter enabled at /v1/api-keys; /api/v1/submissions enabled; /api/v1/me has session middleware mounted"
     );
     Some(authed)
 }

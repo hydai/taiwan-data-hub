@@ -19,6 +19,7 @@ mod oauth_repo;
 mod rate_limit_repo;
 mod session_repo;
 mod sqlx_errors;
+mod submission_repo;
 
 pub use api_key_repo::{ApiKeyRepo, ApiKeyRow, NewApiKey};
 pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
@@ -31,3 +32,6 @@ pub use dataset_repo::{
 pub use oauth_repo::{NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo};
 pub use rate_limit_repo::{CounterTick, RateLimitRepo};
 pub use session_repo::{AuthenticatedSession, NewSession, SessionRepo};
+pub use submission_repo::{
+    NewSubmission, SubmissionKind, SubmissionRepo, SubmissionRow, SubmissionStatus,
+};

@@ -24,6 +24,7 @@ mod rate_limit;
 mod redact;
 mod service;
 mod session;
+mod submission;
 mod token;
 
 pub use api_key::{
@@ -49,6 +50,10 @@ pub use service::{
 pub use session::{
     DEFAULT_ABSOLUTE_MAX, DEFAULT_IDLE_TTL, IssuedSession, SESSION_COOKIE_NAME, SessionService,
     ValidatedSession,
+};
+pub use submission::{
+    MAX_DESCRIPTION_LEN, MAX_NAME_LEN, MAX_URL_LEN, SubmissionPayload, SubmissionService,
+    TITLE_MAX_LEN,
 };
 pub use token::{
     GeneratedToken, TOKEN_ENTROPY_BYTES, TOKEN_HASH_BYTES, digest_token, generate_token,

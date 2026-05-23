@@ -1269,6 +1269,13 @@ pub enum StorageError {
     /// SQLSTATE codes themselves.
     #[error("unique constraint violated: {0}")]
     UniqueViolation(String),
+    /// A row read from Postgres carried a value that didn't
+    /// match the Rust-side enum / shape — almost certainly a
+    /// CHECK constraint drift between a migration and the
+    /// enum definitions in this crate. HTTP boundary maps to
+    /// 500 (it's a data-integrity bug, not a user error).
+    #[error("row decoding failed: {0}")]
+    Decode(String),
 }
 
 // Read-side SQL — column lists are explicit (rather than `SELECT *`)
