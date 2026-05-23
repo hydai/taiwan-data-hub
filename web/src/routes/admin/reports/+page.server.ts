@@ -18,6 +18,7 @@ import {
 	withCookieHeader
 } from '$lib/account/gateway';
 import {
+	parseReport,
 	parseReportArray,
 	REPORT_ACTIONS,
 	type Report,
@@ -122,6 +123,17 @@ export const actions: Actions = {
 				message: errBody?.message ?? 'Could not resolve the report.'
 			});
 		}
-		return { resolved: { id, action } };
+		// Runtime-narrow the gateway response so a shape
+		// drift fails closed with a clear 502 instead of
+		// reporting a misleading "resolved" toast on a 2xx
+		// with an unexpected body. Matches the
+		// `/admin/moderation` pattern.
+		const resolved = parseReport(await response.json().catch(() => null));
+		if (resolved === null) {
+			return fail(502, {
+				message: 'The gateway returned an unexpected response shape.'
+			});
+		}
+		return { resolved: { id: resolved.id, action: resolved.action_taken ?? action } };
 	}
 };
