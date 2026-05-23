@@ -73,13 +73,20 @@ impl RatingService {
         if !(SCORE_MIN..=SCORE_MAX).contains(&score) {
             return Ok(Err(RatingDenialReason::ScoreOutOfRange));
         }
-        match self.check_account_age(user_id, Utc::now()).await? {
+        // Capture `now` once and reuse — sampling `Utc::now()`
+        // twice could deny a rating that becomes eligible
+        // between the gate check and the write (race around
+        // the 24h boundary), and would leave the row's
+        // created_at/updated_at slightly newer than the
+        // timestamp the gate accepted.
+        let now = Utc::now();
+        match self.check_account_age(user_id, now).await? {
             Ok(()) => {}
             Err(reason) => return Ok(Err(reason)),
         }
         let row = self
             .repo
-            .upsert(user_id, target_kind, target_id, score, Utc::now())
+            .upsert(user_id, target_kind, target_id, score, now)
             .await?;
         Ok(Ok(row))
     }

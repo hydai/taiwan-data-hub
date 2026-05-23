@@ -82,16 +82,14 @@
 		// Re-clicking the currently-rated star withdraws.
 		const isWithdraw = viewerScore === newScore;
 		const previousViewer = viewerScore;
-		const previousAvg = avgScore;
-		const previousCount = count;
+		// Only `viewerScore` flips optimistically. The
+		// aggregate (count + avg) settles on the canonical
+		// GET in `refreshView`. Updating count without avg
+		// would let a network-fail leave a mismatched
+		// "N+1 ratings, stale avg" on the page; keeping the
+		// aggregate frozen until the server confirms is more
+		// honest about the failure mode.
 		viewerScore = isWithdraw ? null : newScore;
-		// Optimistic aggregate update — recomputed on
-		// reconcile when the server returns the canonical
-		// view in a follow-up GET. Keep it simple: don't
-		// guess avg, just nudge count.
-		count = isWithdraw
-			? Math.max(0, previousCount - (previousViewer !== null ? 1 : 0))
-			: previousCount + (previousViewer === null ? 1 : 0);
 		inFlight = true;
 		error = null;
 		try {
@@ -118,8 +116,6 @@
 			if (`${targetKind}|${targetId}` !== startKey) return;
 			if (!res.ok) {
 				viewerScore = previousViewer;
-				avgScore = previousAvg;
-				count = previousCount;
 				const body = (await res.json().catch(() => null)) as {
 					error?: string;
 					message?: string;
@@ -139,15 +135,17 @@
 					viewerScore = body.score;
 				}
 			}
-			// Refresh the aggregate from the canonical view
-			// so the optimistic count + avg settle to the
-			// server's truth.
+			// Pull the canonical aggregate (avg + count) from
+			// the server now that the write has landed. The
+			// previous optimistic count/avg update was removed
+			// — keeping the aggregate frozen until this GET
+			// confirms avoids the "stale avg + bumped count"
+			// inconsistency a refresh failure would otherwise
+			// leave on the page.
 			await refreshView(startKey);
 		} catch (e) {
 			if (`${targetKind}|${targetId}` !== startKey) return;
 			viewerScore = previousViewer;
-			avgScore = previousAvg;
-			count = previousCount;
 			console.error('[stars] toggle failed:', e);
 			error = 'Network error — please try again.';
 		} finally {
