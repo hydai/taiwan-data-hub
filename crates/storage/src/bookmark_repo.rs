@@ -479,8 +479,7 @@ impl CollectionRepo for Storage {
         .fetch_all(self.pool())
         .await?;
         if !rows.is_empty() {
-            let parsed: Result<Vec<_>, _> =
-                rows.iter().map(CollectionItemRow::from_row).collect();
+            let parsed: Result<Vec<_>, _> = rows.iter().map(CollectionItemRow::from_row).collect();
             return Ok(Some(parsed?));
         }
         // Zero rows: re-probe the ownership-only state.
