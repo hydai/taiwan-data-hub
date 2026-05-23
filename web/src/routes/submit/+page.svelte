@@ -20,9 +20,15 @@
 	);
 
 	// Multi-step state. Step 1 = pick a kind, step 2 = fill
-	// per-kind fields, step 3 = success view. We track `step`
-	// + `kind` separately so the user can navigate back without
-	// the kind change clearing entered values mid-stream.
+	// per-kind fields, step 3 = success view. `step` + `kind`
+	// are tracked separately so a "change type" click only
+	// switches the form schema without unmounting the page.
+	// Field values entered on step 2 are NOT preserved across
+	// a back-to-step-1 navigation — once the user clicks
+	// "change type", the next render mounts a fresh form. The
+	// only path that re-populates step 2 inputs is the action
+	// failure branch, which echoes `failure.values` from the
+	// server snapshot.
 	let step = $state<1 | 2 | 3>(1);
 	let kind = $state<SubmissionKind | null>(null);
 

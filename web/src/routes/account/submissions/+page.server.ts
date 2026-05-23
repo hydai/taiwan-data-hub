@@ -24,6 +24,20 @@ import type { SubmissionSummary } from '$lib/submissions/types';
 const GATEWAY_UNREACHABLE_MESSAGE =
 	'Gateway temporarily unreachable. Please try again in a moment.';
 
+/**
+ * Map a load-time HTTP failure to user-facing copy. Mirrors
+ * the helper in `/account/+page.server.ts`: 404 specifically
+ * means the submissions subrouter is not mounted (gateway
+ * missing `DATABASE_URL` or `SESSION_HMAC_KEY`), which is a
+ * distinct operator-actionable state from "gateway down".
+ */
+function friendlyLoadErrorMessage(status: number): string {
+	if (status === 404) {
+		return 'Submissions are not enabled on this deployment. Ask your operator to configure the gateway with DATABASE_URL and SESSION_HMAC_KEY.';
+	}
+	return GATEWAY_UNREACHABLE_MESSAGE;
+}
+
 type LoadOk = {
 	state: 'ok';
 	submissions: SubmissionSummary[];
@@ -59,8 +73,13 @@ export const load: PageServerLoad = async ({
 	if (!response.ok) {
 		const kind = classifyGatewayStatus(response.status);
 		if (kind === 'unauthenticated') return { state: 'unauthenticated' };
-		if (kind === 'unavailable')
-			return { state: 'unavailable', message: GATEWAY_UNREACHABLE_MESSAGE };
+		if (kind === 'unavailable') {
+			console.error('[/account/submissions] gateway returned status:', response.status);
+			return {
+				state: 'unavailable',
+				message: friendlyLoadErrorMessage(response.status)
+			};
+		}
 		console.error('[/account/submissions] unexpected status:', response.status);
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
