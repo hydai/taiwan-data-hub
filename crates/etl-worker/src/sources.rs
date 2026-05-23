@@ -14,12 +14,6 @@
 //! and an enum `SourceId` instead of strings. Validation
 //! happens once at boot; the cron-job closures see
 //! already-parsed values.
-//!
-//! Module-level `dead_code` allow because `main.rs`
-//! wiring lands in the next commit of this PR. The
-//! `cfg(test)` block covers every code path including
-//! the checked-in `config/sources.toml`.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::fs;

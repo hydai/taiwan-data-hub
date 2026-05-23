@@ -1,14 +1,15 @@
 //! cron-driven ETL worker that mirrors upstream data sources.
 //!
-//! Schedule: nightly at **02:00 Asia/Taipei** (per docs/DESIGN.md §4.4).
-//! The cron expression is hand-converted to UTC (`0 0 18 * * * *` =
-//! 18:00 UTC = 02:00 TPE; Taiwan does not observe DST) and passed
-//! through [`tokio_cron_scheduler::Job::new_async_tz`] with an explicit
-//! [`chrono::Utc`] timezone so the schedule is decoupled from whatever
-//! local timezone the host process happens to inherit. (`new_async`
-//! also defaults to `Utc` in 0.15.1, but the call site is more
-//! defensive against future API changes if it spells the timezone
-//! out.)
+//! The registry of sources, schedules, and retry policies lives in
+//! `config/sources.toml`. Each enabled source gets one cron job
+//! registered with `tokio-cron-scheduler`; jobs run independently
+//! and their crawl passes go through the retry-with-backoff
+//! envelope. On terminal failure the envelope writes an `etl_dlq`
+//! row so operators can read a single table to find sources that
+//! need manual attention.
+//!
+//! The cache pipeline (#3.6) keeps its independent 6-hour cron — it
+//! isn't a "source", it's a maintenance task.
 //!
 //! Configuration is via environment variables:
 //!
@@ -16,12 +17,12 @@
 //! |---------------------------|----------|------------------------------------------|
 //! | `DATABASE_URL`            | yes      | —                                        |
 //! | `DATA_GOV_TW_URL`         | no       | `https://data.gov.tw`                    |
+//! | `SOURCES_CONFIG_PATH`     | no       | `config/sources.toml`                    |
 //! | `ETL_DB_MAX_CONNECTIONS`  | no       | `20` (must be a positive integer if set) |
 //! | `ETL_RUN_AT_STARTUP`      | no       | `false`                                  |
 //!
-//! When `ETL_RUN_AT_STARTUP=true` (handy for local dev / CI smoke
-//! tests) the worker runs a single immediate pass before settling
-//! into the cron loop.
+//! When `ETL_RUN_AT_STARTUP=true` the worker runs one immediate
+//! pass per enabled source before settling into cron.
 
 mod cache_pipeline;
 mod driver;
@@ -29,35 +30,29 @@ mod retry;
 mod sources;
 
 use std::env;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use connectors::data_gov_tw::DataGovTwConnector;
+use connectors::{SourceConnector, SourceId, data_gov_tw::DataGovTwConnector};
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
-use storage::Storage;
+use storage::{CacheState, DlqErrorKind, EtlDlqRepo, NewDlqEntry, Storage};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing_subscriber::EnvFilter;
 
-use std::sync::Arc;
-use storage::CacheState;
-
 use crate::cache_pipeline::{CacheTickConfig, run_cache_tick};
-use crate::driver::run_one_pass;
-
-/// "Nightly at 02:00 Asia/Taipei" expressed in UTC. Taiwan does not
-/// observe DST so this is fixed year-round (TPE = UTC+8 → 02:00 TPE
-/// = 18:00 UTC the previous calendar day).
-///
-/// Format is the 7-field cron spec `tokio-cron-scheduler` expects:
-/// `sec min hour day-of-month month day-of-week year`.
-const NIGHTLY_TPE_2AM_IN_UTC: &str = "0 0 18 * * * *";
+use crate::driver::{CrawlError, run_one_pass};
+use crate::retry::{RetryConfig, RetryOutcome, dlq_error_kind, with_retry};
+use crate::sources::SourceConfig;
 
 /// #3.6 hot-cache pipeline tick: every 6 hours at the top of the
-/// hour (UTC 00:00 / 06:00 / 12:00 / 18:00). 6h matches the
-/// issue's "frequently-queried" sensitivity — promotion / demotion
-/// catches up to query traffic without churning the catalog. Same
-/// 7-field cron format as the nightly crawl.
+/// hour (UTC 00:00 / 06:00 / 12:00 / 18:00). Independent of the
+/// source-registry cadence — promotion / demotion catches up to
+/// query traffic without churning the catalog.
 const CACHE_TICK_CRON: &str = "0 0 0,6,12,18 * * * *";
+
+const DEFAULT_SOURCES_PATH: &str = "config/sources.toml";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -71,44 +66,47 @@ async fn main() -> Result<()> {
         env::var("DATABASE_URL").context("DATABASE_URL is required for the ETL worker")?;
     let storage = connect_storage(&database_url).await?;
 
-    let connector = build_data_gov_tw_connector()?;
-
-    if run_at_startup()? {
-        tracing::info!("ETL_RUN_AT_STARTUP=true; running an immediate pass");
-        match run_one_pass(&connector, &storage).await {
-            Ok(summary) => tracing::info!(?summary, "startup pass complete"),
-            Err(e) => tracing::error!(error = %e, "startup pass failed; continuing into cron"),
-        }
+    let sources_path = read_optional_env("SOURCES_CONFIG_PATH")?
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_SOURCES_PATH.to_owned());
+    let configs = sources::load(&sources_path)
+        .with_context(|| format!("could not load source registry from {sources_path}"))?;
+    if configs.is_empty() {
+        tracing::warn!(
+            sources_path,
+            "no ETL sources enabled — only the cache pipeline will run",
+        );
+    } else {
+        tracing::info!(
+            sources_path,
+            count = configs.len(),
+            "loaded enabled ETL sources",
+        );
     }
 
     let mut scheduler = JobScheduler::new()
         .await
         .context("could not start cron scheduler")?;
 
-    // The job closure captures `storage` + `connector` (both cheap to
-    // clone — pool is Arc-backed, connector holds a reqwest::Client).
-    let storage_for_cron = storage.clone();
-    let connector_for_cron = connector.clone();
-    let job = Job::new_async_tz(NIGHTLY_TPE_2AM_IN_UTC, Utc, move |_uuid, _l| {
-        let storage = storage_for_cron.clone();
-        let connector = connector_for_cron.clone();
-        Box::pin(async move {
-            tracing::info!("cron tick: starting nightly crawl");
-            match run_one_pass(&connector, &storage).await {
-                Ok(summary) => tracing::info!(?summary, "nightly crawl complete"),
-                Err(e) => tracing::error!(error = %e, "nightly crawl failed"),
-            }
-        })
-    })
-    .context("failed to construct cron job")?;
-    scheduler.add(job).await.context("failed to register job")?;
+    // Build each enabled connector + register its cron job. A
+    // source that's enabled in the TOML but unimplemented in
+    // `build_connector_for` fails boot — much louder than a
+    // silently-skipped crawl.
+    for cfg in &configs {
+        let connector = build_connector_for(cfg.source_id)?;
+        register_source_job(&mut scheduler, *cfg, connector, storage.clone()).await?;
+    }
 
-    // #3.6 hot-cache pipeline: runs every 6 hours so promotion/
-    // demotion catches up to query traffic without overloading
-    // Postgres (the candidate queries scan usage_records). 6h
-    // is also short enough that an editorial pin shows up in
-    // the next tick the operator can correlate with their
-    // dataset edit.
+    if run_at_startup()? {
+        tracing::info!("ETL_RUN_AT_STARTUP=true; running one immediate pass per source");
+        for cfg in &configs {
+            let connector = build_connector_for(cfg.source_id)?;
+            crawl_with_retry_and_dlq(connector, storage.clone(), cfg.retry, cfg.source_id).await;
+        }
+    }
+
+    // Cache tick — independent of the source registry.
     let cache_state: Arc<dyn CacheState> = Arc::new(storage.clone());
     let cache_state_for_cron = cache_state.clone();
     let cache_job = Job::new_async_tz(CACHE_TICK_CRON, Utc, move |_uuid, _l| {
@@ -140,7 +138,6 @@ async fn main() -> Result<()> {
         .context("failed to start scheduler")?;
 
     tracing::info!(
-        cron_utc = NIGHTLY_TPE_2AM_IN_UTC,
         cache_cron_utc = CACHE_TICK_CRON,
         "ETL worker scheduled; waiting for shutdown signal"
     );
@@ -154,21 +151,131 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Construct the connector for one [`SourceId`]. Adding a new
+/// connector is: implement the trait in `crates/connectors`, add
+/// a case here, and flip `enabled = true` in `config/sources.toml`.
+fn build_connector_for(id: SourceId) -> Result<Arc<dyn SourceConnector>> {
+    match id {
+        SourceId::DataGovTw => {
+            let c = build_data_gov_tw_connector()?;
+            Ok(Arc::new(c) as Arc<dyn SourceConnector>)
+        }
+        SourceId::Twse | SourceId::Moea | SourceId::Cwa | SourceId::FisheryMoa => {
+            // M5b.2–M5b.5 add cases here as connectors land. Until
+            // then, an `enabled = true` row for an unimplemented
+            // source fails boot loudly — better than a silently-
+            // skipped crawl.
+            anyhow::bail!(
+                "{id} connector is not yet implemented (see #5b.2–#5b.5); \
+                 set sources.{id}.enabled = false in config/sources.toml"
+            )
+        }
+        SourceId::UserContrib => {
+            anyhow::bail!("user_contrib is not ETL-driven; remove it from sources.toml")
+        }
+    }
+}
+
+/// Register one cron job for an enabled source. The closure
+/// captures clones of the connector + storage so the scheduler can
+/// outlive the registration call. `crawl_with_retry_and_dlq`
+/// handles the actual work.
+async fn register_source_job(
+    scheduler: &mut JobScheduler,
+    cfg: SourceConfig,
+    connector: Arc<dyn SourceConnector>,
+    storage: Storage,
+) -> Result<()> {
+    let job = Job::new_async_tz(cfg.cron_utc, Utc, move |_uuid, _l| {
+        let storage = storage.clone();
+        let connector = connector.clone();
+        Box::pin(async move {
+            tracing::info!(source = %cfg.source_id, "cron tick: starting crawl");
+            crawl_with_retry_and_dlq(connector, storage, cfg.retry, cfg.source_id).await;
+        })
+    })
+    .with_context(|| format!("failed to construct cron job for {}", cfg.source_id))?;
+    scheduler
+        .add(job)
+        .await
+        .with_context(|| format!("failed to register cron job for {}", cfg.source_id))?;
+    tracing::info!(
+        source = %cfg.source_id,
+        cron_utc = cfg.cron_utc,
+        retry_max_attempts = cfg.retry.max_attempts,
+        "ETL source scheduled",
+    );
+    Ok(())
+}
+
+/// Run one crawl pass through the retry envelope. On terminal
+/// failure, write an `etl_dlq` row.
+async fn crawl_with_retry_and_dlq(
+    connector: Arc<dyn SourceConnector>,
+    storage: Storage,
+    retry_cfg: RetryConfig,
+    source_id: SourceId,
+) {
+    let outcome = with_retry(
+        retry_cfg,
+        || {
+            let connector = connector.clone();
+            let storage = storage.clone();
+            async move {
+                match run_one_pass(&*connector, &storage).await {
+                    Ok(summary) => {
+                        tracing::info!(source = %source_id, ?summary, "crawl pass complete");
+                        Ok(summary)
+                    }
+                    // `CrawlError::Connector` carries the original
+                    // `ConnectorError` — bubble it so the
+                    // classifier can decide retriable-or-not.
+                    Err(CrawlError::Connector(e)) => Err(e),
+                    // Storage failures are terminal: failing once
+                    // means our DB is unhealthy, and retrying the
+                    // upstream crawl would re-issue the same write
+                    // and fail again. Map to `Config` so the
+                    // classifier short-circuits to the DLQ path.
+                    Err(CrawlError::Storage(e)) => Err(connectors::ConnectorError::Config(
+                        format!("storage failure during crawl: {e}"),
+                    )),
+                }
+            }
+        },
+        tokio::time::sleep,
+    )
+    .await;
+    if let RetryOutcome::Err { error, attempts } = outcome {
+        tracing::error!(
+            source = %source_id,
+            attempts,
+            error = %error,
+            "crawl pass failed after retries; writing to etl_dlq",
+        );
+        let error_kind =
+            DlqErrorKind::from_wire(dlq_error_kind(&error)).unwrap_or(DlqErrorKind::Other);
+        let entry = NewDlqEntry {
+            source: source_id.as_str().to_string(),
+            job_kind: "list_datasets".to_string(),
+            attempts: i32::try_from(attempts).unwrap_or(i32::MAX),
+            error_kind,
+            error_message: format!("{error}"),
+            payload: Some(json!({})),
+        };
+        if let Err(e) = EtlDlqRepo::insert(&storage, entry).await {
+            tracing::error!(error = %e, "could not write DLQ row");
+        }
+    }
+}
+
 /// Default pool size — wider than `Storage::connect`'s gateway-tuned
-/// 5 because the binary may eventually run multiple connectors in
-/// parallel (#5b adds TWSE / MOEA / CWA / Fishery) and each crawl
-/// already alternates between dataset upserts and domain-id lookups
-/// against the same pool. Today `run_one_pass` processes datasets
-/// sequentially, so 5 would also work; 20 leaves headroom for the
+/// 5 because the binary runs multiple connectors in parallel and
+/// each crawl already alternates between dataset upserts and domain-
+/// id lookups against the same pool. 20 leaves headroom for the
 /// multi-connector scheduler without monopolising connection slots
 /// when the gateway and the worker share a Postgres.
 const DEFAULT_ETL_MAX_CONNECTIONS: u32 = 20;
 
-/// Construct the ETL-tuned `Storage`. `Storage::connect` is sized for
-/// the gateway (`max_connections`=5) and explicitly says the crawler
-/// should build its own pool via `from_pool`. Honour the contract:
-/// read `ETL_DB_MAX_CONNECTIONS` (default 20), build a `PgPool`, and
-/// wrap it.
 async fn connect_storage(database_url: &str) -> Result<Storage> {
     let max_connections = parse_max_connections(read_optional_env("ETL_DB_MAX_CONNECTIONS")?)?;
     let pool = PgPoolOptions::new()
@@ -208,48 +315,24 @@ fn parse_max_connections(raw: Option<String>) -> Result<u32> {
 
 fn build_data_gov_tw_connector() -> Result<DataGovTwConnector> {
     let mut builder = DataGovTwConnector::builder();
-    // Trim + empty-skip the override so `DATA_GOV_TW_URL=` (empty
-    // value, common in Docker / k8s optional-var templating) behaves
-    // like "unset" rather than passing `""` to `base_url` and failing
-    // URL parsing at boot. Same shape as `parse_max_connections`.
-    // `read_optional_env` bubbles up `VarError::NotUnicode` so a
-    // garbled value doesn't silently degrade to the default URL.
     let override_url = read_optional_env("DATA_GOV_TW_URL")?
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
     if let Some(url) = override_url {
         builder = builder.base_url(url);
     }
-    // `.context` preserves `BuildError` as the underlying source so
-    // anyhow's chain reporting surfaces "invalid URL" vs. "reqwest
-    // client build failed" verbatim. A bare `anyhow!(\"...: {e}\")`
-    // flattens that chain into a string and drops the root cause.
     builder
         .build()
         .context("could not build data.gov.tw connector")
 }
 
 fn run_at_startup() -> Result<bool> {
-    // Trim before matching so `ETL_RUN_AT_STARTUP=" true "` (common
-    // when templated env files leave surrounding whitespace) still
-    // resolves to true — consistent with the trim+empty-skip pattern
-    // applied to `ETL_DB_MAX_CONNECTIONS` and `DATA_GOV_TW_URL`.
     Ok(read_optional_env("ETL_RUN_AT_STARTUP")?
         .as_deref()
         .map(str::trim)
         .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes")))
 }
 
-/// Read an optional env var, distinguishing the three states the
-/// caller usually cares about:
-///
-/// - `Ok(None)` — not set; caller should fall back to a default
-/// - `Ok(Some(s))` — set to a valid UTF-8 string `s`
-/// - `Err(_)` — set, but the value isn't valid UTF-8
-///
-/// `env::var(...).ok()` collapses the third case into the first
-/// (silently using the default for a garbled value), which weakens
-/// the "fail fast on misconfig" contract this binary leans on.
 fn read_optional_env(name: &str) -> Result<Option<String>> {
     match env::var(name) {
         Ok(value) => Ok(Some(value)),
@@ -260,21 +343,6 @@ fn read_optional_env(name: &str) -> Result<Option<String>> {
     }
 }
 
-/// Sleep until a shutdown signal arrives so the scheduler can run
-/// indefinitely under `docker compose` / systemd / k8s, or Windows
-/// (the README still lists Windows in the Quickstart).
-///
-/// Unix gets the rich SIGTERM/SIGINT pair (so `docker stop` SIGTERM
-/// drains cleanly). If installing those handlers fails — possible
-/// inside containers that have dropped `CAP_KILL` or similarly
-/// restricted capabilities — we log the failure and fall back to
-/// `ctrl_c()` so the worker still has *some* shutdown signal rather
-/// than crashing at boot. The non-Unix path always uses `ctrl_c()`.
-///
-/// `ctrl_c()` itself returns a `Result`; an error there is rare
-/// (e.g. the signal stream became unhealthy) but we surface it as
-/// an error log and still proceed to shutdown — keeping the worker
-/// hanging on a broken watcher would be worse than exiting cleanly.
 async fn wait_for_shutdown() {
     #[cfg(unix)]
     {
@@ -307,13 +375,6 @@ async fn wait_for_shutdown() {
     }
 }
 
-// main.rs is glue. Crawl driver logic lives in `driver.rs` and is
-// covered by the testcontainers + wiremock integration test there;
-// the cron string is validated at process boot when the scheduler
-// rejects malformed expressions. The env-var parser below has its
-// own unit tests so the contract is verifiable without spinning up
-// a tokio runtime or a Postgres container.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,7 +402,6 @@ mod tests {
     #[test]
     fn positive_integer_passes_through() {
         assert_eq!(parse_max_connections(Some("42".into())).unwrap(), 42);
-        // Surrounding whitespace is tolerated (shell + YAML often leak it).
         assert_eq!(parse_max_connections(Some("  7 ".into())).unwrap(), 7);
     }
 
@@ -365,15 +425,27 @@ mod tests {
 
     #[test]
     fn negative_is_rejected() {
-        // `u32::from_str` rejects "-1" outright, so it lands in the same
-        // parse-error path as non-numeric input.
         assert!(parse_max_connections(Some("-1".into())).is_err());
     }
 
-    // `read_optional_env` isn't unit-tested directly: exercising the
-    // `NotUnicode` branch needs `std::env::{set_var, remove_var}` which
-    // are `unsafe` under Rust 2024, and the workspace forbids unsafe.
-    // The function's contract is small enough to verify by inspection,
-    // and `connect_storage` / `build_data_gov_tw_connector` exercise
-    // the happy path on every boot.
+    /// `build_connector_for` is the choke point that gates an
+    /// `enabled = true` source against an actually-implemented
+    /// connector. Today only `DataGovTw` is implemented; the
+    /// others must error loudly so a sources.toml typo or a
+    /// premature flip can't silently drop a crawl.
+    #[test]
+    fn build_connector_only_data_gov_tw_succeeds() {
+        // DataGovTw is the only enabled-AND-implemented source
+        // in the checked-in sources.toml.
+        assert!(build_connector_for(SourceId::DataGovTw).is_ok());
+        // M5b.2-5 will turn these into `Ok` as their connectors
+        // land; flipping the assertion in lockstep keeps the
+        // test the spec.
+        assert!(build_connector_for(SourceId::Twse).is_err());
+        assert!(build_connector_for(SourceId::Moea).is_err());
+        assert!(build_connector_for(SourceId::Cwa).is_err());
+        assert!(build_connector_for(SourceId::FisheryMoa).is_err());
+        // user_contrib is never ETL-driven.
+        assert!(build_connector_for(SourceId::UserContrib).is_err());
+    }
 }

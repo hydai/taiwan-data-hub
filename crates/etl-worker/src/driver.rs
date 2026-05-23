@@ -78,7 +78,7 @@ pub enum CrawlError {
 /// mapping override config for the tail-of-the-tail cases.
 pub async fn run_one_pass<C, W>(connector: &C, storage: &W) -> Result<CrawlSummary, CrawlError>
 where
-    C: SourceConnector,
+    C: SourceConnector + ?Sized,
     W: DatasetWriter,
 {
     let source = connector.source_id();

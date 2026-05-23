@@ -11,15 +11,6 @@
 //! On terminal failure the caller writes a DLQ row;
 //! this module stays storage-agnostic so it's unit-
 //! testable without a Postgres container.
-//!
-//! Module-level `dead_code` allow because the call-sites
-//! (`sources.toml` config loader + driver wiring) land
-//! in the next two commits of this same PR — splitting
-//! the framework into reviewable commits is more
-//! important than a clean `dead_code` gate per commit.
-//! The `cfg(test)` block exercises every public item,
-//! so the impls aren't actually untested.
-#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -38,22 +29,6 @@ pub struct RetryConfig {
     pub initial_backoff: Duration,
     /// Upper bound on a single backoff sleep.
     pub max_backoff: Duration,
-}
-
-impl RetryConfig {
-    /// Production-leaning default: 3 attempts, 30 s →
-    /// 60 s → 120 s. Total budget ≈ 3 min of waiting on
-    /// top of the actual request latency, which beats
-    /// the connection inactivity timeout most upstream
-    /// catalogs enforce.
-    #[must_use]
-    pub const fn default_prod() -> Self {
-        Self {
-            max_attempts: 3,
-            initial_backoff: Duration::from_secs(30),
-            max_backoff: Duration::from_secs(1800),
-        }
-    }
 }
 
 /// Outcome of [`with_retry`]. On success the caller gets
