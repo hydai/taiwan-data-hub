@@ -79,7 +79,8 @@
 						<summary
 							class="cursor-pointer text-sm text-neutral-700 underline underline-offset-2 hover:text-primary-700"
 						>
-							Show datasets under this license
+							Show {license.datasets.length}
+							{license.datasets.length === 1 ? 'dataset' : 'datasets'} under {license.name}
 						</summary>
 						<ul role="list" class="mt-2 space-y-1 pl-4 text-sm">
 							{#each license.datasets as ds (ds.slug)}

@@ -23,10 +23,25 @@
 --                  truthful-ish stamp at migration time; future upserts
 --                  refresh it on every successful crawl.
 
+-- `source_url` and `license_url` are nullable and have no default
+-- — single-statement ADD COLUMN is safe (no rewrite even on a large
+-- table per PG 11+'s metadata-only optimisation).
 ALTER TABLE datasets
     ADD COLUMN source_url  TEXT,
-    ADD COLUMN license_url TEXT,
-    ADD COLUMN fetched_at  TIMESTAMPTZ NOT NULL DEFAULT now();
+    ADD COLUMN license_url TEXT;
+
+-- `fetched_at` is staged to keep `ADD COLUMN` rewrite-free even on
+-- versions of Postgres where `DEFAULT now()` would have triggered a
+-- per-row evaluation. Order: add nullable → install default for
+-- future inserts → backfill existing rows → enforce NOT NULL.
+-- This is overkill for the pre-alpha `datasets` table (which has
+-- few enough rows that a single-statement form would be fine) but
+-- the pattern is what we'd want once the table grows, and it costs
+-- nothing to write down now.
+ALTER TABLE datasets ADD COLUMN fetched_at TIMESTAMPTZ;
+ALTER TABLE datasets ALTER COLUMN fetched_at SET DEFAULT now();
+UPDATE datasets SET fetched_at = now() WHERE fetched_at IS NULL;
+ALTER TABLE datasets ALTER COLUMN fetched_at SET NOT NULL;
 
 -- Both URLs (when present) must be syntactically reasonable. The
 -- connectors fully validate before insertion, but a CHECK keeps a
