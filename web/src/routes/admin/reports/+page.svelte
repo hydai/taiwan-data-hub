@@ -102,7 +102,7 @@
 								>{report.target_id}</code
 							>
 						</span>
-						<time>{formatDate(report.created_at)}</time>
+						<time datetime={report.created_at}>{formatDate(report.created_at)}</time>
 					</header>
 					{#if report.body}
 						<p class="mt-2 text-sm whitespace-pre-wrap text-neutral-700">{report.body}</p>
