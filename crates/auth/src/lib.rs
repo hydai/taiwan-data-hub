@@ -18,6 +18,7 @@
 mod api_key;
 mod error;
 mod mailer;
+mod moderation;
 mod oauth;
 mod password;
 mod rate_limit;
@@ -33,6 +34,7 @@ pub use api_key::{
 };
 pub use error::AuthError;
 pub use mailer::{LogMailer, MailFrom, MailKind, Mailer, MemoryMailer, SentMessage, SmtpMailer};
+pub use moderation::{Decision, ModerationDenialReason, ModerationService};
 pub use oauth::{
     GitHubProvider, GoogleProvider, JwksCache, OAuthProvider, OAuthService, PkcePair,
     ProviderProfile, StartLogin, StateToken, TokenCipher, TokenCipherError, account_aad,

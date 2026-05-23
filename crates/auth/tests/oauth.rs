@@ -41,6 +41,7 @@ impl UserRepo for InMemoryUserRepo {
             email: email.to_owned(),
             password_hash: password_hash.to_owned(),
             email_verified_at: None,
+            role: storage::UserRole::User,
             created_at: now,
             updated_at: now,
         };

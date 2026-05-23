@@ -219,6 +219,50 @@ pub trait SubmissionRepo: Send + Sync {
         user_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<Option<SubmissionRow>, StorageError>;
+
+    /// Moderator-side list (#5a.2). Returns every `pending`
+    /// submission newest-first, optionally filtered to a
+    /// single kind. The `submissions_pending_idx` partial
+    /// index serves the unfiltered case; the
+    /// `submissions_kind_status_idx` composite serves the
+    /// kind-filtered case without an extra sort.
+    async fn list_pending(
+        &self,
+        kind_filter: Option<SubmissionKind>,
+    ) -> Result<Vec<SubmissionRow>, StorageError>;
+
+    /// Moderator-side fetch by id (no user scoping). Returns
+    /// the row regardless of status so the dashboard can also
+    /// open an already-approved / rejected row for audit.
+    async fn get_for_moderation(&self, id: Uuid) -> Result<Option<SubmissionRow>, StorageError>;
+
+    /// Moderator-side approve. Atomically flips
+    /// `pending → approved`, sets the decision triple, and
+    /// returns the new row state. Returns `Ok(None)` when the
+    /// id doesn't exist OR the row isn't pending anymore — the
+    /// gateway maps both into a 409/404 response so a moderator
+    /// race ("two curators clicked approve simultaneously")
+    /// doesn't double-process the row.
+    async fn approve(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SubmissionRow>, StorageError>;
+
+    /// Moderator-side reject. Same atomicity as
+    /// [`Self::approve`]. A non-empty reason is enforced by
+    /// the service layer (the moderation UI requires it);
+    /// the column stays nullable so an `approved` row without
+    /// a note is representable.
+    async fn reject(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SubmissionRow>, StorageError>;
 }
 
 #[async_trait]
@@ -305,6 +349,118 @@ impl SubmissionRepo for Storage {
         .bind(id)
         .bind(user_id)
         .bind(now)
+        .fetch_optional(self.pool())
+        .await?;
+        maybe.as_ref().map(SubmissionRow::from_row).transpose()
+    }
+
+    async fn list_pending(
+        &self,
+        kind_filter: Option<SubmissionKind>,
+    ) -> Result<Vec<SubmissionRow>, StorageError> {
+        // Two queries rather than a `WHERE submission_kind = $1
+        // OR $1 IS NULL` so the planner can pick the most-
+        // specific partial index for the unfiltered case
+        // (`submissions_pending_idx`) and the composite for
+        // the filtered case. Hand-merging the kind filter
+        // keeps both planner paths sharp.
+        let rows = if let Some(kind) = kind_filter {
+            sqlx::query(
+                "SELECT id, user_id, submission_kind, status, title, payload,
+                        created_at, updated_at,
+                        reviewed_at, reviewed_by, review_reason
+                   FROM submissions
+                  WHERE status = 'pending' AND submission_kind = $1
+                  ORDER BY created_at ASC",
+            )
+            .bind(kind.as_str())
+            .fetch_all(self.pool())
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, user_id, submission_kind, status, title, payload,
+                        created_at, updated_at,
+                        reviewed_at, reviewed_by, review_reason
+                   FROM submissions
+                  WHERE status = 'pending'
+                  ORDER BY created_at ASC",
+            )
+            .fetch_all(self.pool())
+            .await?
+        };
+        rows.iter().map(SubmissionRow::from_row).collect()
+    }
+
+    async fn get_for_moderation(&self, id: Uuid) -> Result<Option<SubmissionRow>, StorageError> {
+        let maybe = sqlx::query(
+            "SELECT id, user_id, submission_kind, status, title, payload,
+                    created_at, updated_at,
+                    reviewed_at, reviewed_by, review_reason
+               FROM submissions
+              WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?;
+        maybe.as_ref().map(SubmissionRow::from_row).transpose()
+    }
+
+    async fn approve(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SubmissionRow>, StorageError> {
+        // Filter on `status = 'pending'` so a second click
+        // from a racing moderator returns `Ok(None)` instead
+        // of overwriting the prior decision.
+        let maybe = sqlx::query(
+            "UPDATE submissions
+                SET status = 'approved',
+                    reviewed_at = $3,
+                    reviewed_by = $2,
+                    review_reason = $4,
+                    updated_at = GREATEST(updated_at, $3)
+              WHERE id = $1
+                AND status = 'pending'
+             RETURNING id, user_id, submission_kind, status, title, payload,
+                       created_at, updated_at,
+                       reviewed_at, reviewed_by, review_reason",
+        )
+        .bind(id)
+        .bind(moderator_id)
+        .bind(now)
+        .bind(reason)
+        .fetch_optional(self.pool())
+        .await?;
+        maybe.as_ref().map(SubmissionRow::from_row).transpose()
+    }
+
+    async fn reject(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<SubmissionRow>, StorageError> {
+        let maybe = sqlx::query(
+            "UPDATE submissions
+                SET status = 'rejected',
+                    reviewed_at = $3,
+                    reviewed_by = $2,
+                    review_reason = $4,
+                    updated_at = GREATEST(updated_at, $3)
+              WHERE id = $1
+                AND status = 'pending'
+             RETURNING id, user_id, submission_kind, status, title, payload,
+                       created_at, updated_at,
+                       reviewed_at, reviewed_by, review_reason",
+        )
+        .bind(id)
+        .bind(moderator_id)
+        .bind(now)
+        .bind(reason)
         .fetch_optional(self.pool())
         .await?;
         maybe.as_ref().map(SubmissionRow::from_row).transpose()
