@@ -18,6 +18,7 @@ mod auth_repo;
 mod bookmark_repo;
 mod comment_repo;
 mod dataset_repo;
+mod etl_dlq_repo;
 mod oauth_repo;
 mod rate_limit_repo;
 mod rating_repo;
@@ -40,6 +41,7 @@ pub use dataset_repo::{
     DatasetVersionRow, DatasetWriter, MaterializeView, NewUsageRecord, SearchHit, SearchPage,
     SearchParams, SourceHttpState, Storage, StorageError, UsageRecorder, VersionWithFiles,
 };
+pub use etl_dlq_repo::{DlqErrorKind, DlqRow, EtlDlqRepo, NewDlqEntry};
 pub use oauth_repo::{NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo};
 pub use rate_limit_repo::{CounterTick, RateLimitRepo};
 pub use rating_repo::{RatingAggregateRow, RatingRepo, RatingRow, RatingTargetKind, RatingView};
