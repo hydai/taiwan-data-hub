@@ -51,10 +51,20 @@ impl From<RatingView> for RatingViewResponse {
                 viewer_score: view.viewer_score,
                 last_refreshed_at: Some(agg.last_refreshed_at),
             },
+            // Zero-count / missing aggregate: drop
+            // `viewer_score` too, even if storage returns
+            // one. A viewer's own rating implies the
+            // aggregate must include at least that row, so
+            // the only way to land here with a non-null
+            // viewer_score is data drift — and the client
+            // parser would reject the inconsistent payload
+            // as "unexpected response". Coercing to null
+            // here keeps the wire shape internally
+            // consistent.
             _ => Self {
                 avg_score: None,
                 count: 0,
-                viewer_score: view.viewer_score,
+                viewer_score: None,
                 last_refreshed_at: None,
             },
         }
