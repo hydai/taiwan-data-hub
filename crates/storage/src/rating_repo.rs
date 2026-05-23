@@ -210,9 +210,11 @@ impl RatingRepo for Storage {
         // Single round trip: LEFT JOIN the cached aggregate
         // and the viewer's own rating onto a one-row anchor
         // (so the row is always returned even when the
-        // aggregate is missing). The `r.user_id IS NULL`
-        // guard makes the JOIN drop the row when the caller
-        // is anonymous, leaving `viewer_score` NULL.
+        // aggregate is missing). The `$3::UUID IS NOT NULL`
+        // guard on the ratings join short-circuits the
+        // entire predicate to false for anonymous callers,
+        // so the LEFT JOIN finds no match and viewer_score
+        // comes back NULL.
         let row = sqlx::query(
             "SELECT a.target_kind     AS agg_target_kind,
                     a.target_id       AS agg_target_id,

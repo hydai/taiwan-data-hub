@@ -9,11 +9,14 @@
 --      account deletion takes the rating with it.
 --   2. `rating_aggregates` — cached `avg_score` + `rating_count`
 --      keyed on `(target_kind, target_id)`. Refreshed on every
---      write inside the same statement so dataset-page renders
---      can read a single row instead of running an aggregation
---      per page-load. A nightly cron-driven full recompute
---      lands in M5b along with the connector framework — until
---      then the on-write refresh is the only source.
+--      write inside the same transaction (per-target advisory
+--      lock + INSERT ... ON CONFLICT DO UPDATE — see
+--      `refresh_aggregate` in storage::rating_repo) so dataset-
+--      page renders can read a single row instead of running an
+--      aggregation per page-load. A nightly cron-driven full
+--      recompute lands in M5b along with the connector
+--      framework — until then the on-write refresh is the only
+--      source.
 
 CREATE TABLE ratings (
     id              UUID         PRIMARY KEY DEFAULT uuidv7(),
