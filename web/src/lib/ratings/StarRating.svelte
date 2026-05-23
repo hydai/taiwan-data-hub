@@ -189,7 +189,13 @@
 		"this is the chosen rating" signal without lying
 		about the keyboard contract.
 	-->
-	<div aria-label="Rate this dataset" class="inline-flex items-center">
+	<!--
+		`role="group"` is required for `aria-label` on a
+		generic container to be announced by assistive tech;
+		without it, the label is silently dropped on most
+		screen readers (Chrome + JAWS / NVDA tested).
+	-->
+	<div role="group" aria-label="Rate this dataset" class="inline-flex items-center">
 		{#each [1, 2, 3, 4, 5] as star (star)}
 			{@const filled = star <= displayScore}
 			<button

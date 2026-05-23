@@ -24,32 +24,63 @@ use uuid::Uuid;
 #[derive(Default)]
 struct RatingStore {
     rows: Mutex<HashMap<Uuid, RatingRow>>,
+    // Aggregate rows persist across writes — mirroring the
+    // production `rating_aggregates` table where a withdrawal
+    // that takes the count to 0 leaves the row behind with
+    // `rating_count = 0, avg_score = 0` (the gateway treats
+    // that identically to a missing row).
+    aggregates: Mutex<HashMap<(RatingTargetKind, Uuid), RatingAggregateRow>>,
 }
 
-fn aggregate_for(
+/// Recompute the aggregate from the score rows. Returns
+/// `Some(rating_count = 0)` when the target has had ratings
+/// before but they've all been withdrawn — mirroring the
+/// production `INSERT ... ON CONFLICT DO UPDATE` shape.
+fn aggregate_from_scores(
     rows: &HashMap<Uuid, RatingRow>,
     target_kind: RatingTargetKind,
     target_id: Uuid,
     now: DateTime<Utc>,
-) -> Option<RatingAggregateRow> {
+) -> RatingAggregateRow {
     let scores: Vec<i16> = rows
         .values()
         .filter(|r| r.target_kind == target_kind && r.target_id == target_id)
         .map(|r| r.score)
         .collect();
-    if scores.is_empty() {
-        return None;
-    }
     let count = i32::try_from(scores.len()).unwrap_or(i32::MAX);
-    let sum: f64 = scores.iter().copied().map(f64::from).sum();
-    let avg = sum / f64::from(count);
-    Some(RatingAggregateRow {
+    let avg = if scores.is_empty() {
+        0.0
+    } else {
+        let sum: f64 = scores.iter().copied().map(f64::from).sum();
+        sum / f64::from(count)
+    };
+    RatingAggregateRow {
         target_kind,
         target_id,
         avg_score: avg,
         rating_count: count,
         last_refreshed_at: now,
-    })
+    }
+}
+
+impl RatingStore {
+    /// Refresh the persisted aggregate from the current score
+    /// rows. Always upserts (writes a `count == 0` row when
+    /// nothing remains) — same shape as production's
+    /// `INSERT ... ON CONFLICT DO UPDATE`.
+    fn refresh_aggregate(
+        &self,
+        rows: &HashMap<Uuid, RatingRow>,
+        target_kind: RatingTargetKind,
+        target_id: Uuid,
+        now: DateTime<Utc>,
+    ) {
+        let fresh = aggregate_from_scores(rows, target_kind, target_id, now);
+        self.aggregates
+            .lock()
+            .unwrap()
+            .insert((target_kind, target_id), fresh);
+    }
 }
 
 #[async_trait]
@@ -62,39 +93,43 @@ impl RatingRepo for RatingStore {
         score: i16,
         now: DateTime<Utc>,
     ) -> Result<RatingRow, StorageError> {
-        let mut inner = self.rows.lock().unwrap();
-        let existing = inner
-            .iter()
-            .find(|(_, r)| {
-                r.user_id == user_id && r.target_kind == target_kind && r.target_id == target_id
-            })
-            .map(|(id, r)| (*id, r.created_at));
-        let row = if let Some((id, created_at)) = existing {
-            let updated = RatingRow {
-                id,
-                user_id,
-                target_kind,
-                target_id,
-                score,
-                created_at,
-                updated_at: now,
-            };
-            inner.insert(id, updated.clone());
-            updated
-        } else {
-            let id = Uuid::now_v7();
-            let fresh = RatingRow {
-                id,
-                user_id,
-                target_kind,
-                target_id,
-                score,
-                created_at: now,
-                updated_at: now,
-            };
-            inner.insert(id, fresh.clone());
-            fresh
+        let row = {
+            let mut inner = self.rows.lock().unwrap();
+            let existing = inner
+                .iter()
+                .find(|(_, r)| {
+                    r.user_id == user_id && r.target_kind == target_kind && r.target_id == target_id
+                })
+                .map(|(id, r)| (*id, r.created_at));
+            if let Some((id, created_at)) = existing {
+                let updated = RatingRow {
+                    id,
+                    user_id,
+                    target_kind,
+                    target_id,
+                    score,
+                    created_at,
+                    updated_at: now,
+                };
+                inner.insert(id, updated.clone());
+                updated
+            } else {
+                let id = Uuid::now_v7();
+                let fresh = RatingRow {
+                    id,
+                    user_id,
+                    target_kind,
+                    target_id,
+                    score,
+                    created_at: now,
+                    updated_at: now,
+                };
+                inner.insert(id, fresh.clone());
+                fresh
+            }
         };
+        let snapshot = self.rows.lock().unwrap().clone();
+        self.refresh_aggregate(&snapshot, target_kind, target_id, now);
         Ok(row)
     }
 
@@ -103,20 +138,21 @@ impl RatingRepo for RatingStore {
         user_id: Uuid,
         target_kind: RatingTargetKind,
         target_id: Uuid,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
-        let mut inner = self.rows.lock().unwrap();
-        let target = inner
-            .iter()
-            .find(|(_, r)| {
-                r.user_id == user_id && r.target_kind == target_kind && r.target_id == target_id
-            })
-            .map(|(id, _)| *id);
-        if let Some(id) = target {
-            inner.remove(&id);
-            return Ok(true);
-        }
-        Ok(false)
+        let removed = {
+            let mut inner = self.rows.lock().unwrap();
+            let target = inner
+                .iter()
+                .find(|(_, r)| {
+                    r.user_id == user_id && r.target_kind == target_kind && r.target_id == target_id
+                })
+                .map(|(id, _)| *id);
+            target.is_some_and(|id| inner.remove(&id).is_some())
+        };
+        let snapshot = self.rows.lock().unwrap().clone();
+        self.refresh_aggregate(&snapshot, target_kind, target_id, now);
+        Ok(removed)
     }
 
     async fn view(
@@ -125,8 +161,13 @@ impl RatingRepo for RatingStore {
         target_id: Uuid,
         viewer_id: Option<Uuid>,
     ) -> Result<RatingView, StorageError> {
+        let aggregate = self
+            .aggregates
+            .lock()
+            .unwrap()
+            .get(&(target_kind, target_id))
+            .cloned();
         let inner = self.rows.lock().unwrap();
-        let aggregate = aggregate_for(&inner, target_kind, target_id, Utc::now());
         let viewer_score = viewer_id.and_then(|uid| {
             inner
                 .values()
@@ -145,11 +186,13 @@ impl RatingRepo for RatingStore {
         &self,
         targets: &[(RatingTargetKind, Uuid)],
     ) -> Result<Vec<RatingAggregateRow>, StorageError> {
-        let inner = self.rows.lock().unwrap();
+        let inner = self.aggregates.lock().unwrap();
         let mut out = Vec::new();
         for (kind, id) in targets {
-            if let Some(agg) = aggregate_for(&inner, *kind, *id, Utc::now()) {
-                out.push(agg);
+            if let Some(agg) = inner.get(&(*kind, *id))
+                && agg.rating_count > 0
+            {
+                out.push(agg.clone());
             }
         }
         Ok(out)
@@ -348,7 +391,15 @@ async fn withdraw_drops_row_and_aggregate() {
         .view(RatingTargetKind::Dataset, target, Some(user))
         .await
         .unwrap();
-    assert!(view.aggregate.is_none());
+    // Production keeps the `rating_aggregates` row around
+    // with `rating_count = 0` after the last withdrawal —
+    // the on-write refresh upserts unconditionally. Gateway
+    // treats `count == 0` identically to "no row".
+    let agg = view
+        .aggregate
+        .expect("aggregate should persist with count=0");
+    assert_eq!(agg.rating_count, 0);
+    assert!((agg.avg_score - 0.0).abs() < f64::EPSILON);
     assert_eq!(view.viewer_score, None);
     // Idempotent second withdraw.
     assert!(

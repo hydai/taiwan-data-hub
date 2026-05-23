@@ -32,14 +32,32 @@ export interface UpsertRatingResponse {
  * Runtime narrower for the GET view response. Returns
  * `null` on shape mismatch so callers can surface an
  * "unexpected response" state instead of rendering
- * undefined.
+ * undefined. Also rejects `NaN`/`Infinity`/out-of-range
+ * values that pass `typeof === 'number'` but would render
+ * as garbage (`NaN.toFixed(2)` → `"NaN"`).
  */
 export function parseRatingView(value: unknown): RatingView | null {
 	if (value === null || typeof value !== 'object') return null;
 	const v = value as Record<string, unknown>;
-	if (v.avg_score !== null && typeof v.avg_score !== 'number') return null;
-	if (typeof v.count !== 'number') return null;
-	if (v.viewer_score !== null && typeof v.viewer_score !== 'number') return null;
+	// avg_score: null or a finite number in [0, SCORE_MAX].
+	// Server clamps `count == 0` to null, so a number here
+	// implies count > 0.
+	if (v.avg_score !== null) {
+		if (typeof v.avg_score !== 'number' || !Number.isFinite(v.avg_score)) return null;
+		if (v.avg_score < 0 || v.avg_score > SCORE_MAX) return null;
+	}
+	// count: non-negative integer.
+	if (typeof v.count !== 'number' || !Number.isInteger(v.count) || v.count < 0) return null;
+	// viewer_score: null or an integer in [SCORE_MIN, SCORE_MAX].
+	if (v.viewer_score !== null) {
+		if (
+			typeof v.viewer_score !== 'number' ||
+			!Number.isInteger(v.viewer_score) ||
+			v.viewer_score < SCORE_MIN ||
+			v.viewer_score > SCORE_MAX
+		)
+			return null;
+	}
 	if (v.last_refreshed_at !== undefined && typeof v.last_refreshed_at !== 'string') return null;
 	return {
 		avg_score: typeof v.avg_score === 'number' ? v.avg_score : null,
