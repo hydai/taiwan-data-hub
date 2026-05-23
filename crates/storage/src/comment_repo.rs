@@ -286,10 +286,12 @@ pub trait CommentRepo: Send + Sync {
     /// confirmed the parent row's depth is 0.
     async fn insert(&self, new: NewComment) -> Result<Uuid, StorageError>;
 
-    /// Fetch a single comment by id (regardless of deletion
-    /// state, so the gateway can return a stable 404 vs 410
-    /// shape). Soft-deleted rows are returned with
-    /// `body_md = None`.
+    /// Fetch a single comment by id regardless of deletion
+    /// state. Soft-deleted rows come back with
+    /// `body_md = None` so the rendering layer can emit a
+    /// tombstone — production never 404s on a soft-deleted
+    /// comment because the row's id stays a valid handle for
+    /// thread continuity.
     async fn get(&self, id: Uuid) -> Result<Option<CommentRow>, StorageError>;
 
     /// List every comment attached to `(target_kind, target_id)`
@@ -310,7 +312,9 @@ pub trait CommentRepo: Send + Sync {
     /// edit-window check is enforced at the SQL layer so a
     /// race between the service's pre-read and the UPDATE
     /// can't slip past the cutoff. Returns `Ok(None)` for any
-    /// failed predicate — caller maps to 403 / 410 / 409.
+    /// failed predicate — `auth::CommentService::edit` re-reads
+    /// the row to distinguish the closed-window case (409) from
+    /// the gone / not-yours case (404).
     async fn edit(
         &self,
         id: Uuid,

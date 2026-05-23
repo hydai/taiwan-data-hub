@@ -244,10 +244,10 @@ async fn edit_within_window_updates_body() {
 
 #[tokio::test]
 async fn edit_past_window_returns_closed_denial() {
-    // The edit-window check uses whole-second comparison, so
-    // a sub-second window collapses to "0 seconds" and never
-    // closes. Use 1 second + sleep ~1.2s to exercise the
-    // boundary deterministically.
+    // The service compares in milliseconds (so a 1-second
+    // window cuts exactly at 1000 ms) and the in-memory
+    // fake mirrors that. Use 1 s + sleep ~1.2 s to land
+    // safely past the cutoff regardless of CI jitter.
     let svc = build_service().with_edit_window(Duration::from_secs(1));
     let alice = Uuid::now_v7();
     let (kind, target) = dataset_target();
