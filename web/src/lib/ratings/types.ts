@@ -72,6 +72,13 @@ export function parseRatingView(value: unknown): RatingView | null {
 			v.viewer_score > SCORE_MAX
 		)
 			return null;
+		// A viewer's own rating implies their row is part
+		// of the aggregate, so `count` must be >= 1 and
+		// `avg_score` must be a number. Reject the
+		// inconsistent shape — otherwise the UI could
+		// render "5 ★ (your rating)" next to "No ratings
+		// yet" on a gateway drift.
+		if (v.count === 0 || v.avg_score === null) return null;
 	}
 	if (v.last_refreshed_at !== undefined && typeof v.last_refreshed_at !== 'string') return null;
 	return {
