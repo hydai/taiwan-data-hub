@@ -1,9 +1,16 @@
 //! Integration tests for [`auth::CommentService`] (#5a.3).
 //!
 //! Uses an in-memory [`storage::CommentRepo`] fake that
-//! mirrors production semantics: depth ≤ 1, soft-delete
-//! drops `body_md` to NULL, edit-window guard in the UPDATE
-//! predicate.
+//! mirrors the production SQL semantics the service actually
+//! depends on: ownership-scoped reads, soft-delete drops
+//! `body_md` to `None`, edit-window guard in the UPDATE
+//! predicate (milliseconds, matching the SQL precision).
+//!
+//! The fake does NOT re-enforce the depth-≤-1 / no-reply-to-
+//! tombstone invariants — those are service-layer checks
+//! (`CommentService::create`), and re-implementing them in
+//! the fake would let a bug in the service slip past the
+//! tests. Each invariant has its own dedicated test below.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
