@@ -267,12 +267,36 @@ impl RatingRepo for Storage {
 /// the same transaction as the originating insert/update/
 /// delete so an external observer never sees the row and
 /// its aggregate disagree.
+///
+/// **Concurrency**: under PostgreSQL's default READ
+/// COMMITTED, two concurrent writers to the same target
+/// can each compute the aggregate from a snapshot taken
+/// *before* the other's `ratings` row is visible. Without a
+/// barrier, the second-to-write transaction's aggregate
+/// row overwrites the first's using stale data, leaving
+/// the cache off by one row. We take a per-target advisory
+/// lock at transaction scope (released on COMMIT/ROLLBACK)
+/// so the AVG/COUNT recompute runs serially per target.
+/// Different targets stay in parallel — the lock key
+/// derives from `(target_kind, target_id)`.
 async fn refresh_aggregate(
     conn: &mut sqlx::PgConnection,
     target_kind: RatingTargetKind,
     target_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), StorageError> {
+    // `pg_advisory_xact_lock(key1::int8, key2::int8)` takes
+    // two int8 keys. We fold the kind into the upper int8
+    // and the target_id's low 64 bits into the lower one so
+    // the lock is unique per `(kind, id)` pair without
+    // colliding across kinds.
+    let target_kind_hash = i64::from(hash_kind(target_kind));
+    let target_id_low = target_id_low_i64(target_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(target_kind_hash)
+        .bind(target_id_low)
+        .execute(&mut *conn)
+        .await?;
     sqlx::query(
         "INSERT INTO rating_aggregates
              (target_kind, target_id, avg_score, rating_count, last_refreshed_at)
@@ -293,4 +317,29 @@ async fn refresh_aggregate(
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Stable per-kind discriminator for the advisory lock. The
+/// four kinds map to four distinct int4 values so concurrent
+/// writers to different kinds don't serialize on the same
+/// key.
+fn hash_kind(kind: RatingTargetKind) -> i32 {
+    match kind {
+        RatingTargetKind::Dataset => 1,
+        RatingTargetKind::Tool => 2,
+        RatingTargetKind::Connector => 3,
+        RatingTargetKind::Playground => 4,
+    }
+}
+
+/// Fold a UUID's 128-bit value into the i64 the second
+/// `pg_advisory_xact_lock` arg accepts. XORing the two
+/// halves preserves enough entropy that collisions across
+/// targets stay astronomically rare, and pg_advisory_lock
+/// keys don't need to be cryptographically unique — only
+/// "distinct enough that unrelated writers don't queue on
+/// each other".
+fn target_id_low_i64(id: Uuid) -> i64 {
+    let (hi, lo) = id.as_u64_pair();
+    (hi ^ lo) as i64
 }

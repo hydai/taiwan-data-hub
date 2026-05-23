@@ -1,12 +1,22 @@
 <!--
 	5-star rating component (#5a.5).
 
-	Three states:
-	- Anonymous viewer: stars are read-only, average shown.
-	- Signed-in + eligible: hover-to-preview, click-to-set,
-	  re-click selected star to withdraw.
-	- Signed-in + too-young account: stars read-only with a
-	  "wait until your account is 24h old" hint.
+	UI states:
+	- Anonymous viewer: stars are read-only, aggregate is
+	  rendered. Click is a no-op (covered by `interactive`).
+	- Signed-in viewer: stars are interactive — hover-to-
+	  preview, click-to-set, re-click the selected star to
+	  withdraw.
+
+	The 24h account-age anti-spam gate is enforced server-
+	side, not in the UI. A fresh account that tries to rate
+	gets a 403 with `error: "account_too_new"` and the
+	component surfaces "Ratings are unlocked 24h after
+	sign-up." via the sr-only live region. The optimistic
+	flip is reverted on the same path. A proactive disabled
+	state would need the server to plumb an eligibility hint
+	through `RatingView`; deferred until that turns into a
+	UX complaint.
 
 	Mirrors the HeartButton patterns from #5a.4 — re-seeds
 	on (kind, id) change so SvelteKit's same-instance reuse
@@ -15,7 +25,7 @@
 	flight.
 -->
 <script lang="ts">
-	import { SCORE_MAX, SCORE_MIN, type RatingTargetKind } from '$lib/ratings/types';
+	import { SCORE_MAX, SCORE_MIN, parseRatingView, type RatingTargetKind } from '$lib/ratings/types';
 	import { ratingByTargetUrl, ratingsUrl } from '$lib/ratings/gateway';
 	import type { RatingView, UpsertRatingResponse } from '$lib/ratings/types';
 
@@ -152,7 +162,11 @@
 			});
 			if (`${targetKind}|${targetId}` !== startKey) return;
 			if (!res.ok) return;
-			const body = (await res.json().catch(() => null)) as RatingView | null;
+			// Route the response through the same runtime
+			// narrower the SSR load uses so a gateway shape
+			// drift can't push `undefined` into component
+			// state and break the template render.
+			const body = parseRatingView(await res.json().catch(() => null));
 			if (body === null) return;
 			avgScore = body.avg_score;
 			count = body.count;

@@ -107,24 +107,31 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 	// — the gateway endpoint is anonymous-readable. A probe
 	// failure degrades to "no ratings yet" rather than
 	// 500-ing the page.
+	//
+	// Gated on multi-user mode because the gateway doesn't
+	// mount `/api/v1/ratings` in personal mode (same gate as
+	// HeartButton + CommentThread) — without this we'd
+	// 404-spam the gateway on every dataset render.
 	let ratingView: RatingView = EMPTY_RATING_VIEW;
-	try {
-		const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-		const res = await fetch(`${base}/api/v1/ratings/dataset/${commentTargetId}`, {
-			method: 'GET',
-			headers: withCookieHeader(
-				new Headers({ accept: 'application/json' }),
-				request.headers.get('cookie')
-			)
-		});
-		if (res.ok) {
-			const parsed = parseRatingView(await res.json().catch(() => null));
-			if (parsed !== null) {
-				ratingView = parsed;
+	if (parentData.mode === 'multi-user') {
+		try {
+			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
+			const res = await fetch(`${base}/api/v1/ratings/dataset/${commentTargetId}`, {
+				method: 'GET',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+			if (res.ok) {
+				const parsed = parseRatingView(await res.json().catch(() => null));
+				if (parsed !== null) {
+					ratingView = parsed;
+				}
 			}
+		} catch (e) {
+			console.error('[/datasets/:id] rating probe failed:', e);
 		}
-	} catch (e) {
-		console.error('[/datasets/:id] rating probe failed:', e);
 	}
 
 	return {
