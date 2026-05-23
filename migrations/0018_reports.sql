@@ -73,9 +73,14 @@ CREATE TABLE reports (
 );
 
 -- Moderator queue lookup — "show me open reports oldest
--- first" so triage stays first-in-first-out.
-CREATE INDEX reports_open_created_idx
-    ON reports (created_at)
+-- first" so triage stays first-in-first-out. The query
+-- paginates by UUIDv7 id (`WHERE id > $1 ORDER BY id
+-- ASC`); UUIDv7 is time-ordered so id-ascending IS
+-- oldest-first. The partial predicate on `resolved_at
+-- IS NULL` keeps the scan bounded as resolved reports
+-- accumulate over the table's lifetime.
+CREATE INDEX reports_open_id_idx
+    ON reports (id)
     WHERE resolved_at IS NULL;
 
 -- Per-reporter listing for the account-page "Reports I

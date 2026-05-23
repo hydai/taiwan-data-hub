@@ -354,7 +354,7 @@
 								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 								{@html group.root.body_html}
 							</div>
-							<p class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
+							<div class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
 								<span>{formatDate(group.root.created_at)}</span>
 								{#if group.root.edited_at}
 									<span aria-label="edited" title="Edited">(edited)</span>
@@ -402,7 +402,7 @@
 										}}
 									/>
 								{/if}
-							</p>
+							</div>
 						{/if}
 
 						{#if group.replies.length > 0}
@@ -446,7 +446,7 @@
 												<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 												{@html reply.body_html}
 											</div>
-											<p class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
+											<div class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
 												<span>{formatDate(reply.created_at)}</span>
 												{#if reply.edited_at}
 													<span aria-label="edited" title="Edited">(edited)</span>
@@ -481,7 +481,7 @@
 														}}
 													/>
 												{/if}
-											</p>
+											</div>
 										{/if}
 									</li>
 								{/each}
