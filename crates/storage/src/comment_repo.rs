@@ -252,6 +252,12 @@ pub struct CommentRow {
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
     pub deleted_at: Option<DateTime<Utc>>,
+    /// Set when a moderator (or the auto-hide threshold)
+    /// hides the comment. Distinct from `deleted_at` so
+    /// audits can tell author-deletion apart from
+    /// community-hide. The render layer substitutes a
+    /// placeholder when this is non-NULL.
+    pub hidden_at: Option<DateTime<Utc>>,
 }
 
 impl CommentRow {
@@ -273,6 +279,7 @@ impl CommentRow {
             created_at: row.try_get("created_at").map_err(StorageError::from)?,
             edited_at: row.try_get("edited_at").map_err(StorageError::from)?,
             deleted_at: row.try_get("deleted_at").map_err(StorageError::from)?,
+            hidden_at: row.try_get("hidden_at").map_err(StorageError::from)?,
         })
     }
 }
@@ -360,7 +367,7 @@ impl CommentRepo for Storage {
     async fn get(&self, id: Uuid) -> Result<Option<CommentRow>, StorageError> {
         let maybe = sqlx::query(
             "SELECT id, target_kind, target_id, parent_id, user_id, body_md, depth,
-                    created_at, edited_at, deleted_at
+                    created_at, edited_at, deleted_at, hidden_at
                FROM comments WHERE id = $1",
         )
         .bind(id)
@@ -376,7 +383,7 @@ impl CommentRepo for Storage {
     ) -> Result<Vec<CommentRow>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, target_kind, target_id, parent_id, user_id, body_md, depth,
-                    created_at, edited_at, deleted_at
+                    created_at, edited_at, deleted_at, hidden_at
                FROM comments
               WHERE target_kind = $1 AND target_id = $2
               ORDER BY created_at ASC",
@@ -409,9 +416,10 @@ impl CommentRepo for Storage {
               WHERE id = $1
                 AND user_id = $2
                 AND deleted_at IS NULL
+                AND hidden_at IS NULL
                 AND $5 - created_at <= $4::bigint * INTERVAL '1 second'
              RETURNING id, target_kind, target_id, parent_id, user_id, body_md, depth,
-                       created_at, edited_at, deleted_at",
+                       created_at, edited_at, deleted_at, hidden_at",
         )
         .bind(id)
         .bind(author_id)
@@ -436,8 +444,9 @@ impl CommentRepo for Storage {
               WHERE id = $1
                 AND user_id = $2
                 AND deleted_at IS NULL
+                AND hidden_at IS NULL
              RETURNING id, target_kind, target_id, parent_id, user_id, body_md, depth,
-                       created_at, edited_at, deleted_at",
+                       created_at, edited_at, deleted_at, hidden_at",
         )
         .bind(id)
         .bind(author_id)

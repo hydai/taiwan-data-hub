@@ -58,6 +58,13 @@ pub struct RenderedComment {
     /// `[deleted]` tombstone content, so no separate
     /// styling decision is required.
     pub is_deleted: bool,
+    /// `true` iff the row is hidden by community reports
+    /// or a moderator. The web layer branches on this to
+    /// render a placeholder; `body_html` carries the
+    /// hidden-by-community substitution text. Distinct
+    /// from `is_deleted` so the moderation surface can
+    /// also tell apart the two cases.
+    pub is_hidden: bool,
 }
 
 /// Why a comment write rejected. Distinct variants so the
@@ -86,6 +93,13 @@ pub enum CommentDenialReason {
     ParentNotFound,
     /// Body validation failed — empty (post-trim) or too long.
     InvalidBody(BodyError),
+    /// Comment is hidden by community reports or a
+    /// moderator. The DB-level edit/delete predicates
+    /// also reject the write, so this denial surfaces
+    /// the reason cleanly to the API (gateway → 409
+    /// conflict) instead of falling back to a
+    /// misleading "edit window closed".
+    Hidden,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +204,16 @@ impl CommentService {
             if parent_row.deleted_at.is_some() {
                 return Ok(Err(CommentDenialReason::ParentNotFound));
             }
+            // Refuse replies on a hidden parent. UI suppresses
+            // the affordance, but a direct API caller could
+            // otherwise continue a thread under content that
+            // moderators or the community explicitly hid. Same
+            // fold-to-`ParentNotFound` shape — the API doesn't
+            // need to distinguish "hidden" from "deleted" for
+            // this denial since both mean "can't post here".
+            if parent_row.hidden_at.is_some() {
+                return Ok(Err(CommentDenialReason::ParentNotFound));
+            }
             if parent_row.depth >= 1 {
                 return Ok(Err(CommentDenialReason::DepthCapExceeded));
             }
@@ -226,6 +250,7 @@ impl CommentService {
             created_at: now,
             edited_at: None,
             deleted_at: None,
+            hidden_at: None,
         })))
     }
 
@@ -298,16 +323,20 @@ impl CommentService {
             //      session and the row's `user_id` mismatched.
             //
             // Distinguish (1) from (2/3) by re-reading the row.
-            // A still-present, still-owned, still-non-deleted
-            // row → window closed. Anything else → 404. This
-            // mirrors the spec the pre-read above started.
+            // A still-present, still-owned, still-non-deleted,
+            // still-non-hidden row → window closed.
+            // Owned-but-hidden → moderator/community hide.
+            // Anything else → 404.
             let recheck = self.comments.get(comment_id).await?;
-            let still_eligible =
-                recheck.is_some_and(|r| r.user_id == Some(author_id) && r.deleted_at.is_none());
-            return Ok(Err(if still_eligible {
-                CommentDenialReason::EditWindowClosed
-            } else {
-                CommentDenialReason::NotFoundOrNotYours
+            return Ok(Err(match recheck {
+                Some(r) if r.user_id == Some(author_id) && r.deleted_at.is_none() => {
+                    if r.hidden_at.is_some() {
+                        CommentDenialReason::Hidden
+                    } else {
+                        CommentDenialReason::EditWindowClosed
+                    }
+                }
+                _ => CommentDenialReason::NotFoundOrNotYours,
             }));
         };
         Ok(Ok(render_row(row)))
@@ -323,7 +352,23 @@ impl CommentService {
     ) -> Result<Result<RenderedComment, CommentDenialReason>, AuthError> {
         let now = Utc::now();
         let Some(row) = self.comments.delete(comment_id, author_id, now).await? else {
-            return Ok(Err(CommentDenialReason::NotFoundOrNotYours));
+            // The UPDATE rejected the soft-delete. Recheck
+            // so a hidden-by-moderator row surfaces as
+            // `Hidden` rather than a misleading "not
+            // found" — the author still owns it, the
+            // gateway just shouldn't let them drop the
+            // body and erase the audit trail.
+            let recheck = self.comments.get(comment_id).await?;
+            return Ok(Err(match recheck {
+                Some(r) if r.user_id == Some(author_id) && r.deleted_at.is_none() => {
+                    if r.hidden_at.is_some() {
+                        CommentDenialReason::Hidden
+                    } else {
+                        CommentDenialReason::NotFoundOrNotYours
+                    }
+                }
+                _ => CommentDenialReason::NotFoundOrNotYours,
+            }));
         };
         Ok(Ok(render_row(row)))
     }
@@ -341,15 +386,23 @@ fn validate_body(trimmed: &str) -> Result<(), BodyError> {
 
 fn render_row(row: CommentRow) -> RenderedComment {
     let is_deleted = row.deleted_at.is_some();
-    // Soft-deleted rows render a plain `[deleted]` paragraph;
-    // the web layer keys styling off the `is_deleted` flag
-    // rather than a backend-injected class name (Tailwind
-    // can't see server-generated selectors).
+    let is_hidden = row.hidden_at.is_some();
+    // Deleted takes precedence over hidden — once the
+    // author drops the body, the substitution text is the
+    // same regardless of whether moderators also hid it,
+    // and "[deleted]" is the more accurate signal.
     let body_html = if is_deleted {
         "<p>[deleted]</p>".to_owned()
+    } else if is_hidden {
+        "<p>[hidden by community reports]</p>".to_owned()
     } else {
         render_markdown(row.body_md.as_deref().unwrap_or(""))
     };
+    // Drop the source markdown on hide too so a client
+    // that ignores `is_hidden` can't render the original
+    // body anyway. (`is_deleted` already cleared `body_md`
+    // at write time via the soft-delete SQL.)
+    let body_md = if is_hidden { None } else { row.body_md };
     RenderedComment {
         id: row.id,
         target_kind: row.target_kind,
@@ -357,12 +410,13 @@ fn render_row(row: CommentRow) -> RenderedComment {
         parent_id: row.parent_id,
         user_id: row.user_id,
         depth: row.depth,
-        body_md: row.body_md,
+        body_md,
         body_html,
         created_at: row.created_at,
         edited_at: row.edited_at,
         deleted_at: row.deleted_at,
         is_deleted,
+        is_hidden,
     }
 }
 

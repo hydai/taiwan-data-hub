@@ -53,6 +53,7 @@ fn snapshot(row: &Row) -> CommentRow {
         created_at: row.created_at,
         edited_at: row.edited_at,
         deleted_at: row.deleted_at,
+        hidden_at: None,
     }
 }
 

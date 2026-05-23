@@ -26,6 +26,7 @@ mod password;
 mod rate_limit;
 mod ratings;
 mod redact;
+mod reports;
 mod service;
 mod session;
 mod submission;
@@ -58,6 +59,10 @@ pub use rate_limit::{
 };
 pub use ratings::{
     MIN_ACCOUNT_AGE_FOR_RATING, RatingDenialReason, RatingService, SCORE_MAX, SCORE_MIN,
+};
+pub use reports::{
+    REPORT_AUTO_HIDE_THRESHOLD, REPORT_BODY_MAX_LEN, ReportDenialReason, ReportService,
+    ResolveDenialReason,
 };
 pub use service::{
     AuthService, AuthenticatedUser, DEFAULT_MAX_INFLIGHT_SENDS, DEFAULT_RESET_TTL,

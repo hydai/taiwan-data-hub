@@ -30,7 +30,8 @@
 		parseRenderedComment,
 		parseRenderedCommentArray
 	} from '$lib/comments/gateway';
-	import { MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
+	import { HIDDEN_COMMENT_HTML, MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
+	import ReportButton from '$lib/reports/ReportButton.svelte';
 
 	let {
 		targetKind,
@@ -80,7 +81,7 @@
 		// accept the request.
 		!c.is_deleted && Date.parse(c.created_at) >= Date.now() - fiveMinutes;
 	const canMutate = (c: RenderedComment): boolean =>
-		currentUserId !== null && c.user_id === currentUserId && !c.is_deleted;
+		currentUserId !== null && c.user_id === currentUserId && !c.is_deleted && !c.is_hidden;
 
 	async function loadThread(): Promise<void> {
 		thread = { state: 'loading' };
@@ -353,7 +354,7 @@
 								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 								{@html group.root.body_html}
 							</div>
-							<p class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
+							<div class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
 								<span>{formatDate(group.root.created_at)}</span>
 								{#if group.root.edited_at}
 									<span aria-label="edited" title="Edited">(edited)</span>
@@ -374,7 +375,7 @@
 										class="underline underline-offset-2 hover:text-neutral-700">Delete</button
 									>
 								{/if}
-								{#if currentUserId !== null && !group.root.is_deleted}
+								{#if currentUserId !== null && !group.root.is_deleted && !group.root.is_hidden}
 									<button
 										type="button"
 										onclick={() => {
@@ -385,7 +386,23 @@
 										class="underline underline-offset-2 hover:text-neutral-700">Reply</button
 									>
 								{/if}
-							</p>
+								{#if currentUserId !== null && currentUserId !== group.root.user_id && !group.root.is_deleted && !group.root.is_hidden}
+									<ReportButton
+										targetKind="comment"
+										targetId={group.root.id}
+										onReported={(r) => {
+											if (r.freshly_hidden) {
+												group.root.is_hidden = true;
+												group.root.body_html = HIDDEN_COMMENT_HTML;
+												// Match the server's "drop markdown on hide"
+												// behaviour so a future UI tweak can't surface
+												// the original body from the cached prop.
+												group.root.body_md = undefined;
+											}
+										}}
+									/>
+								{/if}
+							</div>
 						{/if}
 
 						{#if group.replies.length > 0}
@@ -429,7 +446,7 @@
 												<!-- eslint-disable-next-line svelte/no-at-html-tags -->
 												{@html reply.body_html}
 											</div>
-											<p class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
+											<div class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
 												<span>{formatDate(reply.created_at)}</span>
 												{#if reply.edited_at}
 													<span aria-label="edited" title="Edited">(edited)</span>
@@ -451,7 +468,20 @@
 														>Delete</button
 													>
 												{/if}
-											</p>
+												{#if currentUserId !== null && currentUserId !== reply.user_id && !reply.is_deleted && !reply.is_hidden}
+													<ReportButton
+														targetKind="comment"
+														targetId={reply.id}
+														onReported={(r) => {
+															if (r.freshly_hidden) {
+																reply.is_hidden = true;
+																reply.body_html = HIDDEN_COMMENT_HTML;
+																reply.body_md = undefined;
+															}
+														}}
+													/>
+												{/if}
+											</div>
 										{/if}
 									</li>
 								{/each}
