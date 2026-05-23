@@ -286,8 +286,7 @@ impl UserRepo for Storage {
             Some((role_str,)) => UserRole::from_wire(&role_str)
                 .ok_or_else(|| {
                     StorageError::Database(sqlx::Error::Decode(
-                        format!("unknown users.role {role_str:?} (CHECK constraint drift?)")
-                            .into(),
+                        format!("unknown users.role {role_str:?} (CHECK constraint drift?)").into(),
                     ))
                 })
                 .map(Some),

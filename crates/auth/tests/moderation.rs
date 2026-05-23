@@ -214,7 +214,9 @@ impl SubmissionRepo for SubmissionStore {
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         let snap = {
             let mut inner = self.rows.lock().unwrap();
-            let Some(row) = inner.get_mut(&id) else { return Ok(None) };
+            let Some(row) = inner.get_mut(&id) else {
+                return Ok(None);
+            };
             if row.status != SubmissionStatus::Pending {
                 return Ok(None);
             }
@@ -253,7 +255,9 @@ impl SubmissionRepo for SubmissionStore {
     ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
         let snap = {
             let mut inner = self.rows.lock().unwrap();
-            let Some(row) = inner.get_mut(&id) else { return Ok(None) };
+            let Some(row) = inner.get_mut(&id) else {
+                return Ok(None);
+            };
             if row.status != SubmissionStatus::Pending {
                 return Ok(None);
             }
