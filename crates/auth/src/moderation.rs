@@ -81,8 +81,9 @@ impl ModerationService {
     /// signals an end-user permission issue.
     ///
     /// Uses [`UserRepo::find_user_role`] (selects only the
-    /// role column, served by the `users_role_idx` partial
-    /// index) so the hot-path admin request stays cheap.
+    /// role column, served by the `users` PRIMARY KEY index)
+    /// so the hot-path admin request stays cheap — single
+    /// btree probe, no `password_hash` materialisation.
     pub async fn require_moderator(
         &self,
         user_id: Uuid,

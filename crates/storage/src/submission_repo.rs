@@ -433,8 +433,8 @@ impl SubmissionRepo for Storage {
                 reason,
                 audit_metadata,
                 now,
-                next_status: "approved",
-                audit_action: "submission.approve",
+                next_status: SubmissionStatus::Approved,
+                audit_action: crate::AuditAction::SubmissionApprove,
             },
         )
         .await
@@ -456,8 +456,8 @@ impl SubmissionRepo for Storage {
                 reason: Some(reason),
                 audit_metadata,
                 now,
-                next_status: "rejected",
-                audit_action: "submission.reject",
+                next_status: SubmissionStatus::Rejected,
+                audit_action: crate::AuditAction::SubmissionReject,
             },
         )
         .await
@@ -468,20 +468,20 @@ impl SubmissionRepo for Storage {
 /// half-dozen call-site parameters into a struct sidesteps
 /// clippy's `too_many_arguments` lint and makes the call
 /// sites more readable (every field is named at the use site).
+///
+/// `next_status` and `audit_action` are the typed enums (not
+/// raw strings) so the mapping from "this is an approve"
+/// vs "reject" stays compile-time checked. `.as_str()` runs
+/// at bind time inside [`decide_with_audit`] to convert to
+/// the wire form the DB CHECK constraints expect.
 struct DecideInputs<'a> {
     id: Uuid,
     moderator_id: Uuid,
     reason: Option<&'a str>,
     audit_metadata: &'a serde_json::Value,
     now: DateTime<Utc>,
-    /// Either `"approved"` or `"rejected"` — pinned by the
-    /// trait methods above. The `submissions_status_known`
-    /// CHECK constraint rejects any typo at the DB.
-    next_status: &'static str,
-    /// Either `"submission.approve"` or `"submission.reject"`
-    /// — pinned likewise. The `audit_logs_action_known`
-    /// CHECK constraint guards the wire.
-    audit_action: &'static str,
+    next_status: SubmissionStatus,
+    audit_action: crate::AuditAction,
 }
 
 /// Shared implementation for `approve_with_audit` +
@@ -512,7 +512,7 @@ async fn decide_with_audit(
     .bind(inputs.moderator_id)
     .bind(inputs.now)
     .bind(inputs.reason)
-    .bind(inputs.next_status)
+    .bind(inputs.next_status.as_str())
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = maybe else {
@@ -529,7 +529,7 @@ async fn decide_with_audit(
          RETURNING id",
     )
     .bind(inputs.moderator_id)
-    .bind(inputs.audit_action)
+    .bind(inputs.audit_action.as_str())
     .bind(inputs.id)
     .bind(inputs.audit_metadata)
     .bind(inputs.now)

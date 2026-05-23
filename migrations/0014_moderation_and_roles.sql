@@ -23,15 +23,14 @@ ALTER TABLE users
     ADD COLUMN role TEXT NOT NULL DEFAULT 'user'
         CHECK (role IN ('user', 'moderator', 'curator', 'admin'));
 
--- Hot path: every authenticated request that touches an
--- admin endpoint reads `users.role` to authorize. The default
--- row distribution is hugely skewed toward `role='user'`, so
--- a partial index on the elevated roles keeps the index small
--- (a moderator queue rarely has >tens of accounts) while
--- still satisfying `WHERE id = $1 AND role <> 'user'` lookups.
-CREATE INDEX users_role_idx
-    ON users (id)
-    WHERE role <> 'user';
+-- The role lookup on the moderation gate is `SELECT role
+-- FROM users WHERE id = $1` — that query is already covered
+-- by the `users` table's PRIMARY KEY index, which is a
+-- single btree probe per request. No extra index needed
+-- here; a partial index on `role <> 'user'` would only help
+-- if the lookup included the predicate, and the gate's call
+-- shape doesn't (it needs the actual role value back so the
+-- service can decide the deny reason).
 
 COMMENT ON COLUMN users.role IS
     'Authorization tier: user (default) < moderator < curator < admin. Moderator+ can act on /api/v1/admin/* endpoints.';

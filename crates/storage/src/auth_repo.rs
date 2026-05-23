@@ -144,14 +144,13 @@ pub trait UserRepo: Send + Sync {
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError>;
 
     /// Lightweight role lookup for the moderation gate (#5a.2).
-    /// Selects only `users.role`, skipping the expensive
+    /// Selects only `users.role`, skipping the
     /// `password_hash` materialisation that the full
     /// [`Self::find_user_by_id`] would do. The moderator gate
-    /// fires on every `/api/v1/admin/*` request so the read
-    /// stays a single btree probe via the `users_role_idx`
-    /// partial index. Returns `Ok(None)` for an unknown id —
-    /// the caller maps that into 403 alongside the
-    /// insufficient-role case.
+    /// fires on every `/api/v1/admin/*` request so this stays
+    /// a single PRIMARY KEY btree probe on `users.id`.
+    /// Returns `Ok(None)` for an unknown id — the caller maps
+    /// that into 403 alongside the insufficient-role case.
     async fn find_user_role(&self, id: Uuid) -> Result<Option<UserRole>, StorageError>;
 
     /// Set `email_verified_at = now()`. Idempotent: a second call
