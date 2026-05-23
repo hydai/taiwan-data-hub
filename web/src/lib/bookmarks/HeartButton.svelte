@@ -139,30 +139,44 @@
 	);
 </script>
 
-<button
-	type="button"
-	onclick={toggle}
-	disabled={currentUserId === null || inFlight}
-	aria-pressed={bookmarked}
-	aria-label={labelText}
-	title={error ?? labelText}
-	class={`inline-flex items-center justify-center rounded-md p-1 transition focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
-		bookmarked ? 'text-rose-500 hover:text-rose-600' : 'text-neutral-400 hover:text-rose-500'
-	}`}
->
-	<svg
-		class={sizeClasses}
-		viewBox="0 0 24 24"
-		fill={bookmarked ? 'currentColor' : 'none'}
-		stroke="currentColor"
-		stroke-width="2"
-		stroke-linecap="round"
-		stroke-linejoin="round"
-		aria-hidden="true"
+<span class="inline-flex items-center">
+	<button
+		type="button"
+		onclick={toggle}
+		disabled={currentUserId === null || inFlight}
+		aria-pressed={bookmarked}
+		aria-label={labelText}
+		title={error ?? labelText}
+		class={`inline-flex items-center justify-center rounded-md p-1 transition focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
+			bookmarked ? 'text-rose-500 hover:text-rose-600' : 'text-neutral-400 hover:text-rose-500'
+		}`}
 	>
-		<!-- Heart path; fill toggles between hollow / filled. -->
-		<path
-			d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
-		/>
-	</svg>
-</button>
+		<svg
+			class={sizeClasses}
+			viewBox="0 0 24 24"
+			fill={bookmarked ? 'currentColor' : 'none'}
+			stroke="currentColor"
+			stroke-width="2"
+			stroke-linecap="round"
+			stroke-linejoin="round"
+			aria-hidden="true"
+		>
+			<!-- Heart path; fill toggles between hollow / filled. -->
+			<path
+				d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"
+			/>
+		</svg>
+	</button>
+	<!--
+		Screen-reader announcement on toggle failure. The
+		`title` attribute above isn't reliably announced by
+		assistive tech and is invisible on touch (no hover),
+		so duplicate the error here as a visually-hidden
+		live region. `role="alert"` + `aria-live="assertive"`
+		ensures the message lands without the user having to
+		hunt for it; falls silent on success.
+	-->
+	<span class="sr-only" role="alert" aria-live="assertive">
+		{#if error}{error}{/if}
+	</span>
+</span>

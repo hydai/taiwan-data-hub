@@ -336,9 +336,21 @@ pub trait CollectionRepo: Send + Sync {
     ) -> Result<Option<Vec<CollectionItemRow>>, StorageError>;
 
     /// Add an item to a collection. Idempotent (the composite
-    /// PK absorbs the conflict). Ownership-scoped — a
-    /// non-owning add returns `Ok(false)` so the gateway
-    /// 404s.
+    /// PK absorbs the conflict). Ownership-scoped.
+    ///
+    /// Returns `Ok(true)` when a fresh row landed.
+    /// Returns `Ok(false)` when no row was inserted — which
+    /// folds together two cases:
+    ///
+    ///   1. The collection isn't owned by the caller (or
+    ///      doesn't exist). Caller should 404.
+    ///   2. The `(target_kind, target_id)` pair is already
+    ///      in the collection. Caller should 204 / treat
+    ///      as a successful idempotent add.
+    ///
+    /// To distinguish them, the gateway re-reads the
+    /// collection via `get_for_user`; an owner-confirmed
+    /// `Ok(false)` is case 2, an `Ok(None)` is case 1.
     async fn add_item(
         &self,
         collection_id: Uuid,
