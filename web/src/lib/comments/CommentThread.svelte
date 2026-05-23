@@ -67,6 +67,7 @@
 	let editingId = $state<string | null>(null);
 	let editDraft = $state('');
 	let editError = $state<string | null>(null);
+	let editSaving = $state(false);
 
 	const fiveMinutes = 5 * 60 * 1000;
 	const isWithinEditWindow = (c: RenderedComment): boolean =>
@@ -176,7 +177,11 @@
 	}
 
 	async function submitEdit(): Promise<void> {
-		if (editingId === null) return;
+		if (editingId === null || editSaving) return;
+		// Reset the error each attempt so a successful retry
+		// after a transient failure replaces the prior banner
+		// (and so the in-flight state is honest).
+		editError = null;
 		const trimmed = editDraft.trim();
 		if (trimmed.length === 0) {
 			editError = 'Comment cannot be empty.';
@@ -189,6 +194,7 @@
 			editError = `Comment exceeds the ${MAX_COMMENT_BODY_LEN}-character limit.`;
 			return;
 		}
+		editSaving = true;
 		try {
 			const res = await fetch(commentByIdUrl(editingId), {
 				method: 'PATCH',
@@ -214,6 +220,8 @@
 		} catch (e) {
 			console.error('[comments] edit failed:', e);
 			editError = 'Network error — please try again.';
+		} finally {
+			editSaving = false;
 		}
 	}
 
@@ -318,8 +326,9 @@
 								<div class="flex items-center gap-2">
 									<button
 										type="submit"
-										class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
-										>Save</button
+										disabled={editSaving}
+										class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+										>{editSaving ? 'Saving…' : 'Save'}</button
 									>
 									<button
 										type="button"
