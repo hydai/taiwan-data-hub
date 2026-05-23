@@ -44,6 +44,12 @@
 	type ThreadState =
 		| { state: 'loading' }
 		| { state: 'ok'; comments: RenderedComment[] }
+		// Gateway returns 404: the comments subrouter is not
+		// mounted (personal-mode deployment). The component
+		// hides the section rather than surfacing it as an
+		// error — the deployment intentionally has no
+		// comments.
+		| { state: 'disabled' }
 		| { state: 'error'; message: string };
 
 	let thread = $state<ThreadState>({ state: 'loading' });
@@ -81,6 +87,14 @@
 				headers: { accept: 'application/json' },
 				credentials: 'include'
 			});
+			if (res.status === 404) {
+				// Personal-mode / mis-configured deploy: the
+				// gateway didn't mount the comments
+				// subrouter. Hide the section instead of
+				// showing a misleading "failed to load" error.
+				thread = { state: 'disabled' };
+				return;
+			}
 			if (!res.ok) {
 				thread = {
 					state: 'error',
@@ -268,200 +282,205 @@
 	}
 </script>
 
-<section class="mt-8 border-t border-neutral-200 pt-6" data-testid="comments-thread">
-	<h2 class="mb-4 text-lg font-semibold tracking-tight">Comments</h2>
+<!-- Hide the whole section in personal-mode deploys
+     where the comments subrouter isn't mounted. -->
+{#if thread.state !== 'disabled'}
+	<section class="mt-8 border-t border-neutral-200 pt-6" data-testid="comments-thread">
+		<h2 class="mb-4 text-lg font-semibold tracking-tight">Comments</h2>
 
-	{#if thread.state === 'loading'}
-		<p class="text-sm text-neutral-500">Loading comments…</p>
-	{:else if thread.state === 'error'}
-		<p class="text-danger-600 text-sm" role="alert">{thread.message}</p>
-	{:else if groups.length === 0}
-		<p class="text-sm text-neutral-500">No comments yet — be the first to share something.</p>
-	{:else}
-		<ol class="space-y-4">
-			{#each groups as group (group.root.id)}
-				<li class="rounded-md border border-neutral-200 bg-white p-4">
-					{#if editingId === group.root.id}
-						<form
-							class="space-y-2"
-							onsubmit={(e) => {
-								e.preventDefault();
-								submitEdit();
-							}}
-						>
-							<textarea
-								bind:value={editDraft}
-								rows="3"
-								aria-label="Edit comment"
-								class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
-							></textarea>
-							{#if editError}
-								<p class="text-danger-600 text-xs">{editError}</p>
-							{/if}
-							<div class="flex items-center gap-2">
-								<button
-									type="submit"
-									class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
-									>Save</button
-								>
-								<button
-									type="button"
-									onclick={cancelEditing}
-									class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs hover:bg-neutral-50"
-									>Cancel</button
-								>
-							</div>
-						</form>
-					{:else}
-						<div class="prose prose-sm max-w-none">
-							<!-- The HTML is server-rendered via comrak +
+		{#if thread.state === 'loading'}
+			<p class="text-sm text-neutral-500">Loading comments…</p>
+		{:else if thread.state === 'error'}
+			<p class="text-danger-600 text-sm" role="alert">{thread.message}</p>
+		{:else if groups.length === 0}
+			<p class="text-sm text-neutral-500">No comments yet — be the first to share something.</p>
+		{:else}
+			<ol class="space-y-4">
+				{#each groups as group (group.root.id)}
+					<li class="rounded-md border border-neutral-200 bg-white p-4">
+						{#if editingId === group.root.id}
+							<form
+								class="space-y-2"
+								onsubmit={(e) => {
+									e.preventDefault();
+									submitEdit();
+								}}
+							>
+								<textarea
+									bind:value={editDraft}
+									rows="3"
+									aria-label="Edit comment"
+									class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+								></textarea>
+								{#if editError}
+									<p class="text-danger-600 text-xs">{editError}</p>
+								{/if}
+								<div class="flex items-center gap-2">
+									<button
+										type="submit"
+										class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
+										>Save</button
+									>
+									<button
+										type="button"
+										onclick={cancelEditing}
+										class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs hover:bg-neutral-50"
+										>Cancel</button
+									>
+								</div>
+							</form>
+						{:else}
+							<div class="prose prose-sm max-w-none">
+								<!-- The HTML is server-rendered via comrak +
 							     ammonia; the sanitizer is the load-bearing
 							     XSS guard.  -->
-							<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-							{@html group.root.body_html}
-						</div>
-						<p class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
-							<span>{formatDate(group.root.created_at)}</span>
-							{#if group.root.edited_at}
-								<span aria-label="edited" title="Edited">(edited)</span>
-							{/if}
-							{#if canMutate(group.root) && isWithinEditWindow(group.root)}
-								<button
-									type="button"
-									onclick={() => startEditing(group.root)}
-									class="underline underline-offset-2 hover:text-neutral-700">Edit</button
-								>
-							{/if}
-							{#if canMutate(group.root)}
-								<button
-									type="button"
-									onclick={() => deleteComment(group.root)}
-									class="underline underline-offset-2 hover:text-neutral-700">Delete</button
-								>
-							{/if}
-							{#if currentUserId !== null && !group.root.is_deleted}
-								<button
-									type="button"
-									onclick={() => {
-										replyParent = group.root.id;
-										newBody = '';
-										submitError = null;
-									}}
-									class="underline underline-offset-2 hover:text-neutral-700">Reply</button
-								>
-							{/if}
-						</p>
-					{/if}
+								<!-- eslint-disable-next-line svelte/no-at-html-tags -->
+								{@html group.root.body_html}
+							</div>
+							<p class="mt-2 flex items-center gap-2 text-xs text-neutral-500">
+								<span>{formatDate(group.root.created_at)}</span>
+								{#if group.root.edited_at}
+									<span aria-label="edited" title="Edited">(edited)</span>
+								{/if}
+								{#if canMutate(group.root) && isWithinEditWindow(group.root)}
+									<button
+										type="button"
+										onclick={() => startEditing(group.root)}
+										class="underline underline-offset-2 hover:text-neutral-700">Edit</button
+									>
+								{/if}
+								{#if canMutate(group.root)}
+									<button
+										type="button"
+										onclick={() => deleteComment(group.root)}
+										class="underline underline-offset-2 hover:text-neutral-700">Delete</button
+									>
+								{/if}
+								{#if currentUserId !== null && !group.root.is_deleted}
+									<button
+										type="button"
+										onclick={() => {
+											replyParent = group.root.id;
+											newBody = '';
+											submitError = null;
+										}}
+										class="underline underline-offset-2 hover:text-neutral-700">Reply</button
+									>
+								{/if}
+							</p>
+						{/if}
 
-					{#if group.replies.length > 0}
-						<ol class="mt-3 space-y-3 border-l border-neutral-200 pl-4">
-							{#each group.replies as reply (reply.id)}
-								<li>
-									{#if editingId === reply.id}
-										<form
-											class="space-y-2"
-											onsubmit={(e) => {
-												e.preventDefault();
-												submitEdit();
-											}}
-										>
-											<textarea
-												bind:value={editDraft}
-												rows="2"
-												aria-label="Edit reply"
-												class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
-											></textarea>
-											{#if editError}
-												<p class="text-danger-600 text-xs">{editError}</p>
-											{/if}
-											<div class="flex items-center gap-2">
-												<button
-													type="submit"
-													class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
-													>Save</button
-												>
-												<button
-													type="button"
-													onclick={cancelEditing}
-													class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs hover:bg-neutral-50"
-													>Cancel</button
-												>
+						{#if group.replies.length > 0}
+							<ol class="mt-3 space-y-3 border-l border-neutral-200 pl-4">
+								{#each group.replies as reply (reply.id)}
+									<li>
+										{#if editingId === reply.id}
+											<form
+												class="space-y-2"
+												onsubmit={(e) => {
+													e.preventDefault();
+													submitEdit();
+												}}
+											>
+												<textarea
+													bind:value={editDraft}
+													rows="2"
+													aria-label="Edit reply"
+													class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
+												></textarea>
+												{#if editError}
+													<p class="text-danger-600 text-xs">{editError}</p>
+												{/if}
+												<div class="flex items-center gap-2">
+													<button
+														type="submit"
+														class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
+														>Save</button
+													>
+													<button
+														type="button"
+														onclick={cancelEditing}
+														class="rounded-md border border-neutral-300 px-3 py-1.5 text-xs hover:bg-neutral-50"
+														>Cancel</button
+													>
+												</div>
+											</form>
+										{:else}
+											<div class="prose prose-sm max-w-none">
+												<!-- eslint-disable-next-line svelte/no-at-html-tags -->
+												{@html reply.body_html}
 											</div>
-										</form>
-									{:else}
-										<div class="prose prose-sm max-w-none">
-											<!-- eslint-disable-next-line svelte/no-at-html-tags -->
-											{@html reply.body_html}
-										</div>
-										<p class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
-											<span>{formatDate(reply.created_at)}</span>
-											{#if reply.edited_at}
-												<span aria-label="edited" title="Edited">(edited)</span>
-											{/if}
-											{#if canMutate(reply) && isWithinEditWindow(reply)}
-												<button
-													type="button"
-													onclick={() => startEditing(reply)}
-													class="underline underline-offset-2 hover:text-neutral-700">Edit</button
-												>
-											{/if}
-											{#if canMutate(reply)}
-												<button
-													type="button"
-													onclick={() => deleteComment(reply)}
-													class="underline underline-offset-2 hover:text-neutral-700">Delete</button
-												>
-											{/if}
-										</p>
-									{/if}
-								</li>
-							{/each}
-						</ol>
-					{/if}
-				</li>
-			{/each}
-		</ol>
-	{/if}
+											<p class="mt-1 flex items-center gap-2 text-xs text-neutral-500">
+												<span>{formatDate(reply.created_at)}</span>
+												{#if reply.edited_at}
+													<span aria-label="edited" title="Edited">(edited)</span>
+												{/if}
+												{#if canMutate(reply) && isWithinEditWindow(reply)}
+													<button
+														type="button"
+														onclick={() => startEditing(reply)}
+														class="underline underline-offset-2 hover:text-neutral-700">Edit</button
+													>
+												{/if}
+												{#if canMutate(reply)}
+													<button
+														type="button"
+														onclick={() => deleteComment(reply)}
+														class="underline underline-offset-2 hover:text-neutral-700"
+														>Delete</button
+													>
+												{/if}
+											</p>
+										{/if}
+									</li>
+								{/each}
+							</ol>
+						{/if}
+					</li>
+				{/each}
+			</ol>
+		{/if}
 
-	<form
-		class="mt-6 space-y-2"
-		onsubmit={(e) => {
-			e.preventDefault();
-			submitNew();
-		}}
-	>
-		{#if replyParent !== null}
-			<p class="text-xs text-neutral-500">
-				Replying to a comment.
-				<button
-					type="button"
-					onclick={() => {
-						replyParent = null;
-					}}
-					class="underline underline-offset-2 hover:text-neutral-700">Cancel</button
-				>
-			</p>
-		{/if}
-		<label class="block">
-			<span class="sr-only">New comment</span>
-			<textarea
-				bind:value={newBody}
-				rows="3"
-				placeholder={currentUserId === null
-					? 'Sign in to comment'
-					: 'Write a comment (Markdown supported)…'}
-				disabled={currentUserId === null}
-				class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none disabled:bg-neutral-100"
-			></textarea>
-		</label>
-		{#if submitError}
-			<p class="text-danger-600 text-xs" role="alert">{submitError}</p>
-		{/if}
-		<button
-			type="submit"
-			disabled={currentUserId === null || submitting}
-			class="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
-			>{submitting ? 'Posting…' : replyParent === null ? 'Post comment' : 'Post reply'}</button
+		<form
+			class="mt-6 space-y-2"
+			onsubmit={(e) => {
+				e.preventDefault();
+				submitNew();
+			}}
 		>
-	</form>
-</section>
+			{#if replyParent !== null}
+				<p class="text-xs text-neutral-500">
+					Replying to a comment.
+					<button
+						type="button"
+						onclick={() => {
+							replyParent = null;
+						}}
+						class="underline underline-offset-2 hover:text-neutral-700">Cancel</button
+					>
+				</p>
+			{/if}
+			<label class="block">
+				<span class="sr-only">New comment</span>
+				<textarea
+					bind:value={newBody}
+					rows="3"
+					placeholder={currentUserId === null
+						? 'Sign in to comment'
+						: 'Write a comment (Markdown supported)…'}
+					disabled={currentUserId === null}
+					class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none disabled:bg-neutral-100"
+				></textarea>
+			</label>
+			{#if submitError}
+				<p class="text-danger-600 text-xs" role="alert">{submitError}</p>
+			{/if}
+			<button
+				type="submit"
+				disabled={currentUserId === null || submitting}
+				class="rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+				>{submitting ? 'Posting…' : replyParent === null ? 'Post comment' : 'Post reply'}</button
+			>
+		</form>
+	</section>
+{/if}

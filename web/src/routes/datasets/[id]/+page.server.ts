@@ -1,9 +1,6 @@
-import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
-import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
-import { parseMeResponse } from '$lib/gateway/config';
 import type { PageServerLoad } from './$types';
 
 /**
@@ -19,103 +16,43 @@ import type { PageServerLoad } from './$types';
  *     comments table can key on a stable UUID until the
  *     dataset table itself becomes the gateway DB's source of
  *     truth (the helper drops out at that point).
- *   * `currentUserId` — read from `/api/v1/me`; `null` for
- *     anonymous traffic. The CommentThread component renders
- *     a "sign in to comment" prompt instead of the form.
+ *   * `currentUserId` — reused from the layout's `/api/v1/me`
+ *     fetch (via `await parent()`) so the layout + this page
+ *     share one round trip per render. `null` for anonymous
+ *     traffic.
  *
  * The browser-side `CommentThread` component does its own
  * fetching against same-origin `/api/v1/comments…` paths —
  * the reverse proxy (Caddy in prod, vite proxy in dev) routes
  * those to the gateway. The page does NOT leak the internal
  * `GATEWAY_HTTP_URL` to the client.
+ *
+ * Cache-Control varies per session: when the layout populated
+ * a `user`, the response is per-viewer and must NOT enter a
+ * shared cache. Anonymous renders keep the wide 5-min public
+ * cache; `Vary: Cookie` is set only in the per-user branch so
+ * unrelated cookies don't shred CDN hit rates.
  */
-/**
- * Strict cookie-presence check that survives values containing
- * the cookie's name as a substring (e.g.
- * `wat_tdh_session=hi`). Splits on `;`, trims each pair,
- * matches the exact name before `=`, AND requires a non-empty
- * value — `tdh_session=` with no value would NOT authenticate
- * the `/me` probe (the `withCookieHeader` helper drops empty
- * values), so reporting it as "present" would put the page
- * on the per-user cache branch without any per-user data to
- * justify it.
- */
-function cookieHeaderHas(cookieHeader: string | null, name: string): boolean {
-	if (cookieHeader === null) return false;
-	for (const pair of cookieHeader.split(';')) {
-		const trimmed = pair.trim();
-		const eq = trimmed.indexOf('=');
-		if (eq <= 0) continue;
-		if (trimmed.substring(0, eq) === name) {
-			return trimmed.substring(eq + 1).trim().length > 0;
-		}
-	}
-	return false;
-}
-
-export const load: PageServerLoad = async ({ fetch, params, request, setHeaders }) => {
+export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
 	const dataset = findDatasetBySlug(params.id);
 	if (!dataset) {
 		throw error(404, `Dataset "${params.id}" not found`);
 	}
-	// Cache policy depends on whether the response carries a
-	// per-user payload. A session cookie means the `/me` probe
-	// below populates `currentUserId`, which a shared cache
-	// MUST NOT serve to other users. Without a cookie, the
-	// page is identical for every viewer and is safe to share.
-	// `Vary: Cookie` only fires in the per-user branch so the
-	// anonymous response keeps a wide hit rate (CDNs that key
-	// on every `Vary` header don't shred on unrelated cookies).
-	const hasSessionCookie = cookieHeaderHas(request.headers.get('cookie'), 'tdh_session');
-	if (hasSessionCookie) {
-		// Per-user response: must not be shared across viewers,
-		// and the CDN must key on the cookie if any layer
-		// ignores `private`.
+	const parentData = await parent();
+	const currentUserId = parentData.user?.user_id ?? null;
+	if (currentUserId !== null) {
 		setHeaders({
 			'cache-control': 'private, no-store',
 			vary: 'Cookie'
 		});
 	} else {
-		// Identical for every anonymous viewer — keep the wide
-		// public cache and skip `Vary: Cookie` so unrelated
-		// cookies (analytics / A/B) don't shred hit rates on
-		// CDNs that key by every Vary header.
 		setHeaders({
 			'cache-control': 'public, max-age=300, stale-while-revalidate=300'
 		});
 	}
-
-	const gatewayBase = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-	const commentTargetId = datasetSlugToUuid(dataset.slug);
-
-	// Skip the `/me` round trip entirely for anonymous traffic
-	// — without `tdh_session`, the gateway is guaranteed to
-	// answer `{ user: null }` and the response would be
-	// thrown away.
-	let currentUserId: string | null = null;
-	if (hasSessionCookie) {
-		try {
-			const res = await fetch(`${gatewayBase}/api/v1/me`, {
-				method: 'GET',
-				headers: withCookieHeader(
-					new Headers({ accept: 'application/json' }),
-					request.headers.get('cookie')
-				)
-			});
-			if (res.ok) {
-				const parsed = parseMeResponse(await res.json().catch(() => null));
-				if (parsed !== null && parsed.user !== null) {
-					currentUserId = parsed.user.user_id;
-				}
-			}
-		} catch (e) {
-			console.error('[/datasets/:id] /me probe failed:', e);
-		}
-	}
-
 	return {
 		dataset,
-		commentTargetId,
+		commentTargetId: datasetSlugToUuid(dataset.slug),
 		currentUserId
 	};
 };
