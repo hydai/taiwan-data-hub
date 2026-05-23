@@ -126,6 +126,13 @@ aes-gcm = { version = "0.10", default-features = false, features = ["aes", "allo
 # helper we don't need; we feed RSA component bytes from Google's
 # JWKS into `DecodingKey::from_rsa_components` directly.
 jsonwebtoken = { version = "9.3", default-features = false }
+# #5a.3 comments: `comrak` renders the author-supplied Markdown to
+# HTML, then `ammonia` whitelists the safe HTML subset. comrak's
+# CommonMark output is deliberately conservative (no raw HTML
+# pass-through with the right options); ammonia is the load-
+# bearing XSS guard. Both crates are pure Rust + audited.
+comrak = { version = "0.43", default-features = false }
+ammonia = "4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

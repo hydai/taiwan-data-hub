@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import CommentThread from '$lib/comments/CommentThread.svelte';
 	import MetaTags from '$lib/seo/MetaTags.svelte';
 	import { cn } from '$lib/utils';
 	import McpConfigButton from './_McpConfigButton.svelte';
@@ -160,4 +161,12 @@
 			{/each}
 		</ul>
 	</section>
+
+	{#if data.commentsEnabled}
+		<CommentThread
+			targetKind="dataset"
+			targetId={data.commentTargetId}
+			currentUserId={data.currentUserId}
+		/>
+	{/if}
 </div>

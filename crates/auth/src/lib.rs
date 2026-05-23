@@ -16,6 +16,7 @@
 //! and translate its return values into cookies + JSON responses.
 
 mod api_key;
+mod comments;
 mod error;
 mod mailer;
 mod moderation;
@@ -31,6 +32,10 @@ mod token;
 pub use api_key::{
     ALLOWED_TIERS, API_KEY_HUMAN_PREFIX, ApiKeyService, DEFAULT_RATE_LIMIT_TIER, IssuedApiKey,
     VerifiedApiKey,
+};
+pub use comments::{
+    BodyError, CommentDenialReason, CommentService, DEFAULT_EDIT_WINDOW, MAX_COMMENT_BODY_LEN,
+    RenderedComment,
 };
 pub use error::AuthError;
 pub use mailer::{LogMailer, MailFrom, MailKind, Mailer, MemoryMailer, SentMessage, SmtpMailer};
