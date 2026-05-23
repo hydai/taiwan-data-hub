@@ -781,11 +781,90 @@ mod tests {
     }
 
     #[test]
+    fn robots_parser_ignores_other_agents() {
+        let body = "User-agent: GoogleBot\nDisallow: /google\nUser-agent: *\nDisallow: /star\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/star".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_handles_comments_and_leading_blank_lines() {
+        // Leading blank lines (and inline `#` comments) are
+        // ignored. Both Disallow lines stay in the same
+        // `*` group because no blank line separates them.
+        let body = "\
+# leading comment\n\
+\n\
+User-agent: *\n\
+Disallow: /x  # inline comment\n\
+Disallow: /y\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/x".to_string(), "/y".to_string()]);
+    }
+
+    #[test]
     fn robots_parser_blank_line_terminates_group() {
         // RFC 9309 §2.2 — empty `*` group + blank line must
         // NOT leak `*` into the next group's membership.
         let body = "User-agent: *\n\nUser-agent: GoogleBot\nDisallow: /private\n";
         assert!(parse_user_agent_star_disallow(body).is_empty());
+    }
+
+    #[test]
+    fn robots_parser_blank_line_after_rules_terminates_group() {
+        // Same termination semantics when the `*` group
+        // has rules: the blank line ends the group so
+        // subsequent GoogleBot rules are not collected.
+        let body = "\
+User-agent: *\n\
+Disallow: /first\n\
+\n\
+User-agent: GoogleBot\n\
+Disallow: /second\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/first".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_handles_multi_user_agent_group() {
+        // RFC 9309 §2.2.1: a single group may list multiple
+        // `User-agent:` lines before its rules. `* + AdsBot`
+        // means the star group catches the rule.
+        let body = "User-agent: *\nUser-agent: AdsBot\nDisallow: /shared\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/shared".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_starts_new_group_after_rules() {
+        // Once we've seen a Disallow, a subsequent
+        // User-agent starts a NEW group — so the AdsBot
+        // group below shouldn't inherit the * group's
+        // membership.
+        let body = "\
+User-agent: *\n\
+Disallow: /star-only\n\
+User-agent: AdsBot\n\
+Disallow: /adsbot-only\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/star-only".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_is_case_insensitive_on_directive_names() {
+        let body = "USER-AGENT: *\nDISALLOW: /upper\nDisAllow: /mixed\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/upper".to_string(), "/mixed".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_skips_empty_disallow_directive() {
+        // RFC 9309 §2.2.2: an empty Disallow means "no
+        // restrictions" for this agent. We model that by
+        // simply not emitting a prefix.
+        let body = "User-agent: *\nDisallow:\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert!(out.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
