@@ -116,19 +116,35 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 	if (parentData.mode === 'multi-user') {
 		try {
 			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
-			// Cache-correctness: only forward the session
-			// cookie when the layout has resolved a current
-			// user. If `/api/v1/me` failed to parse the
-			// session but the cookie is still valid, this
-			// page sets `cache-control: public, ...` because
-			// `currentUserId === null` — forwarding the
-			// cookie here could pull a personalized
-			// `viewer_score` from the gateway and bake it
-			// into a publicly cacheable HTML response.
-			const cookieHeader = currentUserId !== null ? request.headers.get('cookie') : null;
+			// Cache-correctness: when the layout has NOT
+			// resolved a current user, this response is
+			// served with `cache-control: public, ...`, so
+			// the probe must be cookie-free — otherwise the
+			// gateway could return a personalized
+			// `viewer_score` (if a valid session cookie is
+			// present but `/api/v1/me` failed to parse it)
+			// and that score would land in a shared cache.
+			//
+			// Just passing `null` to `withCookieHeader` isn't
+			// enough: when `GATEWAY_HTTP_URL` is empty
+			// (same-origin via reverse proxy), SvelteKit's
+			// `event.fetch` auto-forwards the inbound cookie
+			// jar. To truly drop the session here we need to
+			// (a) explicitly set `cookie: ''` so the
+			// auto-forward has nothing to merge, AND (b)
+			// `credentials: 'omit'` so the cross-origin path
+			// stays clean too.
+			const ratingHeaders =
+				currentUserId !== null
+					? withCookieHeader(
+							new Headers({ accept: 'application/json' }),
+							request.headers.get('cookie')
+						)
+					: new Headers({ accept: 'application/json', cookie: '' });
 			const res = await fetch(`${base}/api/v1/ratings/dataset/${commentTargetId}`, {
 				method: 'GET',
-				headers: withCookieHeader(new Headers({ accept: 'application/json' }), cookieHeader)
+				credentials: currentUserId !== null ? 'include' : 'omit',
+				headers: ratingHeaders
 			});
 			if (res.ok) {
 				const parsed = parseRatingView(await res.json().catch(() => null));
