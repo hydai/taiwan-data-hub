@@ -605,6 +605,17 @@ fn origin_key(url: &Url) -> String {
 /// applies to ALL of them, so `* + AdsBot` counts as a star
 /// group and we collect its rules. Directive names are
 /// matched case-insensitively per §2.2.
+///
+/// Group termination follows §2.2: groups are separated by
+/// blank lines. A blank line resets the current-agent set
+/// AND the collecting-rules flag so a subsequent
+/// `User-agent:` starts fresh — without this, an empty
+/// `User-agent: *` group followed by a blank line + another
+/// group would leak `*` into the second group's membership
+/// (caught by Copilot in #5b.3 review). The TWSE
+/// connector's identical-shaped parser still has the same
+/// bug; fix lands separately so this PR's scope stays on
+/// the MOEA connector itself.
 fn parse_user_agent_star_disallow(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut current_agents: Vec<String> = Vec::new();
@@ -621,6 +632,11 @@ fn parse_user_agent_star_disallow(body: &str) -> Vec<String> {
         // produces `/x`.
         let line = raw_line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
+            // RFC 9309 §2.2: groups are separated by blank
+            // lines. End the current group so the next
+            // `User-agent:` (if any) starts fresh.
+            current_agents.clear();
+            collecting_rules = false;
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
@@ -969,16 +985,52 @@ mod tests {
     }
 
     #[test]
-    fn robots_parser_handles_comments_and_blank_lines() {
+    fn robots_parser_handles_comments_and_leading_blank_lines() {
+        // Leading blank lines (and inline `#` comments) are
+        // ignored. Both Disallow lines stay in the same
+        // `*` group because no blank line separates them.
         let body = "\
 # leading comment\n\
 \n\
 User-agent: *\n\
 Disallow: /x  # inline comment\n\
-\n\
 Disallow: /y\n";
         let out = parse_user_agent_star_disallow(body);
         assert_eq!(out, vec!["/x".to_string(), "/y".to_string()]);
+    }
+
+    #[test]
+    fn robots_parser_blank_line_terminates_group() {
+        // RFC 9309 §2.2: groups are separated by blank
+        // lines. The first `User-agent: *` has no rules,
+        // the blank line ends that empty group, and the
+        // subsequent `User-agent: GoogleBot` must start
+        // fresh — `*` MUST NOT leak into the GoogleBot
+        // group's membership, so `/private` is NOT a
+        // star-group rule and must not be collected.
+        let body = "\
+User-agent: *\n\
+\n\
+User-agent: GoogleBot\n\
+Disallow: /private\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert!(out.is_empty(), "got {out:?}");
+    }
+
+    #[test]
+    fn robots_parser_blank_line_after_rules_terminates_group() {
+        // Same group-termination semantics when the `*`
+        // group has rules: the blank line ends the group
+        // so a subsequent GoogleBot group's rules are not
+        // collected.
+        let body = "\
+User-agent: *\n\
+Disallow: /first\n\
+\n\
+User-agent: GoogleBot\n\
+Disallow: /second\n";
+        let out = parse_user_agent_star_disallow(body);
+        assert_eq!(out, vec!["/first".to_string()]);
     }
 
     #[test]
