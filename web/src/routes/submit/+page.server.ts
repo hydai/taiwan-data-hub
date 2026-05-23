@@ -33,6 +33,7 @@ import {
 	parseGatewayErrorBody,
 	withCookieHeader
 } from '$lib/account/gateway';
+import { parseMeResponse } from '$lib/gateway/config';
 import { parseCreateSubmissionResponse, submissionsUrl } from '$lib/submissions/gateway';
 import {
 	SUBMISSION_FIELD_LIMITS,
@@ -101,24 +102,18 @@ export const load: PageServerLoad = async ({
 		console.error('[/submit] unexpected /me status:', response.status);
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
-	const body = await response.json().catch(() => null);
-	if (body === null || typeof body !== 'object') {
-		console.error('[/submit] /me returned non-object body');
+	// Reuse `$lib/gateway/config::parseMeResponse` so the loader
+	// shares its shape contract with the layout's loader. The
+	// helper returns `null` on shape drift (logged + mapped to
+	// `unexpected`), `{ user: null }` for anonymous traffic, or
+	// `{ user: <object> }` for an authenticated session.
+	const me = parseMeResponse(await response.json().catch(() => null));
+	if (me === null) {
+		console.error('[/submit] /me returned unexpected shape');
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
-	const user = (body as { user?: unknown }).user;
-	// Authenticated traffic carries `user: <object>`; anonymous
-	// traffic carries `user: null`. Anything else is a contract
-	// drift between the gateway and this loader (the runtime
-	// narrowing in `$lib/account/gateway.ts::parseMeResponse`
-	// defines the legit shapes). Fail closed so a misbehaving
-	// gateway can't render the form to an unverified caller.
-	if (user === null) {
+	if (me.user === null) {
 		return { state: 'unauthenticated' };
-	}
-	if (typeof user !== 'object') {
-		console.error('[/submit] /me returned unexpected `user` shape');
-		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
 	return { state: 'ok' };
 };
@@ -289,17 +284,61 @@ export const actions: Actions = {
 };
 
 /**
+ * Allowlist of field names the four submission kinds use.
+ * `snapshot` only echoes these — extra fields a malicious
+ * client could attach to inflate the response are dropped.
+ */
+const SNAPSHOT_ALLOWED_FIELDS = [
+	'kind',
+	'title',
+	'name',
+	'description',
+	'source_url',
+	'demo_url',
+	'repo_url',
+	'license',
+	'language',
+	'domain_slug'
+] as const;
+
+/**
  * Capture the form values so we can re-render the in-progress
  * form on a validation failure without forcing the user to
- * retype everything. Only string-typed fields survive — file
- * uploads aren't part of the current schema.
+ * retype everything.
+ *
+ * Two guards live here as defence against a malicious client:
+ *
+ *   1. **Allowlist of field names** — only keys the form
+ *      template actually renders survive. A POST that sneaks
+ *      in arbitrary extra fields cannot bounce them back via
+ *      the action response.
+ *   2. **Per-field length clamp** — each value is truncated to
+ *      slightly above the gateway's authoritative cap. The
+ *      preflight rejects over-cap values BEFORE this function
+ *      is called, but the 401/5xx branches snapshot a form
+ *      that hasn't gone through the preflight; without the
+ *      clamp an attacker could POST megabytes per field and
+ *      have them reflected.
  */
 function snapshot(form: FormData): Record<string, string> {
 	const out: Record<string, string> = {};
-	for (const [k, v] of form.entries()) {
-		if (typeof v === 'string') {
-			out[k] = v;
-		}
+	for (const name of SNAPSHOT_ALLOWED_FIELDS) {
+		const raw = form.get(name);
+		if (typeof raw !== 'string') continue;
+		// `description` is the only field with a 2 KiB cap;
+		// everything else is bounded by `SUBMISSION_FIELD_LIMITS
+		// .name` (120 chars) or `.url` (2048). Give a small
+		// headroom (×1.1) so a borderline-over value is still
+		// echoed for the user to fix rather than truncated to
+		// confusion.
+		const limit = Math.ceil(
+			(name === 'description'
+				? SUBMISSION_FIELD_LIMITS.description
+				: name === 'source_url' || name === 'demo_url' || name === 'repo_url'
+					? SUBMISSION_FIELD_LIMITS.url
+					: SUBMISSION_FIELD_LIMITS.name) * 1.1
+		);
+		out[name] = raw.length > limit ? raw.slice(0, limit) : raw;
 	}
 	return out;
 }
