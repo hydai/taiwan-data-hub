@@ -249,10 +249,28 @@ impl CommentService {
             .edit(comment_id, author_id, &trimmed, edit_secs, now)
             .await?
         else {
-            // Edit-window guard collapsed at the DB layer
-            // (the race-safe backstop). Surface the same
-            // reason the pre-read would have.
-            return Ok(Err(CommentDenialReason::EditWindowClosed));
+            // The UPDATE returned no rows. Possible causes:
+            //
+            //   1. Edit window crossed the cutoff between the
+            //      pre-read above and the UPDATE.
+            //   2. Another moderator soft-deleted the comment
+            //      in the same window.
+            //   3. The author hard-revoked / abandoned the
+            //      session and the row's `user_id` mismatched.
+            //
+            // Distinguish (1) from (2/3) by re-reading the row.
+            // A still-present, still-owned, still-non-deleted
+            // row → window closed. Anything else → 404. This
+            // mirrors the spec the pre-read above started.
+            let recheck = self.comments.get(comment_id).await?;
+            let still_eligible = recheck.is_some_and(|r| {
+                r.user_id == Some(author_id) && r.deleted_at.is_none()
+            });
+            return Ok(Err(if still_eligible {
+                CommentDenialReason::EditWindowClosed
+            } else {
+                CommentDenialReason::NotFoundOrNotYours
+            }));
         };
         Ok(Ok(render_row(row)))
     }

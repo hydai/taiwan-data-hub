@@ -39,35 +39,50 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	// `Vary: Cookie` is the safety net for the no-cookie case
 	// in deploys behind a CDN that ignores `private`.
 	const hasSessionCookie = (request.headers.get('cookie') ?? '').includes('tdh_session=');
-	setHeaders({
-		'cache-control': hasSessionCookie
-			? 'private, no-store'
-			: 'public, max-age=300, stale-while-revalidate=300',
-		vary: 'Cookie'
-	});
+	if (hasSessionCookie) {
+		// Per-user response: must not be shared across viewers,
+		// and the CDN must key on the cookie if any layer
+		// ignores `private`.
+		setHeaders({
+			'cache-control': 'private, no-store',
+			vary: 'Cookie'
+		});
+	} else {
+		// Identical for every anonymous viewer — keep the wide
+		// public cache and skip `Vary: Cookie` so unrelated
+		// cookies (analytics / A/B) don't shred hit rates on
+		// CDNs that key by every Vary header.
+		setHeaders({
+			'cache-control': 'public, max-age=300, stale-while-revalidate=300'
+		});
+	}
 
 	const gatewayBase = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
 	const commentTargetId = datasetSlugToUuid(dataset.slug);
 
-	// Soft-fail on the `/me` probe: a dropped gateway shouldn't
-	// 500 the dataset page. Anonymous fallback hides the form.
+	// Skip the `/me` round trip entirely for anonymous traffic
+	// — without `tdh_session`, the gateway is guaranteed to
+	// answer `{ user: null }` and the response would be
+	// thrown away.
 	let currentUserId: string | null = null;
-	try {
-		const res = await fetch(`${gatewayBase}/api/v1/me`, {
-			method: 'GET',
-			headers: withCookieHeader(
-				new Headers({ accept: 'application/json' }),
-				request.headers.get('cookie')
-			)
-		});
-		if (res.ok) {
-			const parsed = parseMeResponse(await res.json().catch(() => null));
-			if (parsed !== null && parsed.user !== null) {
-				currentUserId = parsed.user.user_id;
+	if (hasSessionCookie) {
+		try {
+			const res = await fetch(`${gatewayBase}/api/v1/me`, {
+				method: 'GET',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+			if (res.ok) {
+				const parsed = parseMeResponse(await res.json().catch(() => null));
+				if (parsed !== null && parsed.user !== null) {
+					currentUserId = parsed.user.user_id;
+				}
 			}
+		} catch (e) {
+			console.error('[/datasets/:id] /me probe failed:', e);
 		}
-	} catch (e) {
-		console.error('[/datasets/:id] /me probe failed:', e);
 	}
 
 	return {
