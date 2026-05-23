@@ -14,8 +14,9 @@
 --     round trip. The four MVP kinds are pinned in the CHECK so
 --     a typo in INSERT is rejected at write time.
 --   * `status` likewise; the four states the moderation queue
---     reads are pinned, and new states ("needs_revision",
---     "withdrawn") extend the CHECK without a column rewrite.
+--     reads are pinned (`pending` / `approved` / `rejected` /
+--     `withdrawn`). Genuinely future states ("needs_revision",
+--     "deferred") extend the CHECK without a column rewrite.
 --   * `payload` is JSONB. The Rust submission service validates
 --     the per-kind shape BEFORE writing — the column itself is
 --     opaque to Postgres, so a backend schema bump never needs a

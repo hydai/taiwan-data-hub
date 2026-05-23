@@ -84,8 +84,23 @@ export const load: PageServerLoad = async ({
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
 	const body = await response.json().catch(() => null);
-	if (body === null || typeof body !== 'object' || (body as { user: unknown }).user === null) {
+	if (body === null || typeof body !== 'object') {
+		console.error('[/submit] /me returned non-object body');
+		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
+	}
+	const user = (body as { user?: unknown }).user;
+	// Authenticated traffic carries `user: <object>`; anonymous
+	// traffic carries `user: null`. Anything else is a contract
+	// drift between the gateway and this loader (the runtime
+	// narrowing in `$lib/account/gateway.ts::parseMeResponse`
+	// defines the legit shapes). Fail closed so a misbehaving
+	// gateway can't render the form to an unverified caller.
+	if (user === null) {
 		return { state: 'unauthenticated' };
+	}
+	if (typeof user !== 'object') {
+		console.error('[/submit] /me returned unexpected `user` shape');
+		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
 	return { state: 'ok' };
 };
@@ -226,7 +241,17 @@ export const actions: Actions = {
 			return fail(503, { message: GATEWAY_UNREACHABLE_MESSAGE, kind, values: snapshot(form) });
 		}
 		if (response.status === 401) {
-			return fail(401, { message: 'Your session has expired. Please sign in again.' });
+			// Echo `kind` + `values` so a no-JS submit still
+			// re-renders the in-progress step 2 form with the
+			// user's input intact. Without these, the page
+			// resets to step 1 and the error message displays
+			// detached from the form fields the user was just
+			// looking at.
+			return fail(401, {
+				message: 'Your session has expired. Please sign in again.',
+				kind,
+				values: snapshot(form)
+			});
 		}
 		if (!response.ok) {
 			const errBody = parseGatewayErrorBody(await response.json().catch(() => null));
