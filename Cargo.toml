@@ -27,7 +27,7 @@ publish = false
 # Centralized dependency versions — crates opt in via `dep.workspace = true`.
 # Versions chosen against the 2026-05-18 audit in docs/DESIGN.md §5.
 [workspace.dependencies]
-axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tokio = { version = "1.52", default-features = false, features = ["macros", "rt-multi-thread", "signal", "net", "time", "sync"] }
 tower = { version = "0.5", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }

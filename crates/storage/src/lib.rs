@@ -13,6 +13,7 @@
 //! `dataset_files`, search) layer on top of this in later PRs.
 
 mod api_key_repo;
+mod audit_repo;
 mod auth_repo;
 mod dataset_repo;
 mod oauth_repo;
@@ -22,7 +23,8 @@ mod sqlx_errors;
 mod submission_repo;
 
 pub use api_key_repo::{ApiKeyRepo, ApiKeyRow, NewApiKey};
-pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo};
+pub use audit_repo::{AuditAction, AuditLogRepo, AuditTargetKind, NewAuditLog};
+pub use auth_repo::{AuthTokenKind, AuthTokenRepo, User, UserRepo, UserRole};
 pub use dataset_repo::{
     CacheCandidate, CacheHitRatio, CacheRef, CacheState, DatasetCacheLookup, DatasetFileRow,
     DatasetFull, DatasetKey, DatasetLatestFiles, DatasetReader, DatasetRow, DatasetSearcher,

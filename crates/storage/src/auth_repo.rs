@@ -42,6 +42,55 @@ impl AuthTokenKind {
     }
 }
 
+/// Authorization tier on the `users` table. Mirrors the
+/// `users.role` CHECK constraint added in migration 0014.
+/// Plain string on the wire so adding a future role is a
+/// one-line ALTER + enum variant on this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserRole {
+    User,
+    Moderator,
+    Curator,
+    Admin,
+}
+
+impl UserRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Moderator => "moderator",
+            Self::Curator => "curator",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parse the wire string. Named `from_wire` (not `from_str`)
+    /// to dodge clippy's `should_implement_trait` lint — the
+    /// `Err = ()` of a `FromStr` impl would add no value, since
+    /// callers already model unknown roles as `Option`.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "moderator" => Some(Self::Moderator),
+            "curator" => Some(Self::Curator),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    /// Authorization predicate for moderation endpoints.
+    /// Moderator / curator / admin all pass; the regular `user`
+    /// role is rejected. Curator + admin are reserved for
+    /// future role-specific actions but inherit moderator
+    /// capabilities today.
+    #[must_use]
+    pub const fn can_moderate(self) -> bool {
+        !matches!(self, Self::User)
+    }
+}
+
 /// A row of the `users` table.
 #[derive(Debug, Clone)]
 pub struct User {
@@ -49,17 +98,28 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     pub email_verified_at: Option<DateTime<Utc>>,
+    pub role: UserRole,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 impl User {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        let role_str: String = row.try_get("role")?;
+        let role = UserRole::from_wire(&role_str).ok_or_else(|| {
+            // Surface CHECK-constraint drift as a typed sqlx
+            // decode error so the auth crate's `?` propagates
+            // it as `StorageError::Database` (mapped to 500).
+            sqlx::Error::Decode(
+                format!("unknown users.role {role_str:?} (CHECK constraint drift?)").into(),
+            )
+        })?;
         Ok(Self {
             id: row.try_get("id")?,
             email: row.try_get("email")?,
             password_hash: row.try_get("password_hash")?,
             email_verified_at: row.try_get("email_verified_at")?,
+            role,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
         })
@@ -82,6 +142,16 @@ pub trait UserRepo: Send + Sync {
     /// Look up by primary key. Used by the token-redemption path
     /// after `consume_auth_token` returns the owning `user_id`.
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError>;
+
+    /// Lightweight role lookup for the moderation gate (#5a.2).
+    /// Selects only `users.role`, skipping the
+    /// `password_hash` materialisation that the full
+    /// [`Self::find_user_by_id`] would do. The moderator gate
+    /// fires on every `/api/v1/admin/*` request so this stays
+    /// a single PRIMARY KEY btree probe on `users.id`.
+    /// Returns `Ok(None)` for an unknown id — the caller maps
+    /// that into 403 alongside the insufficient-role case.
+    async fn find_user_role(&self, id: Uuid) -> Result<Option<UserRole>, StorageError>;
 
     /// Set `email_verified_at = now()`. Idempotent: a second call
     /// after a successful verify returns `Ok(false)` and leaves
@@ -171,7 +241,7 @@ impl UserRepo for Storage {
         let row = sqlx::query(
             "INSERT INTO users (email, password_hash)
              VALUES ($1, $2)
-             RETURNING id, email, password_hash, email_verified_at, created_at, updated_at",
+             RETURNING id, email, password_hash, email_verified_at, role, created_at, updated_at",
         )
         .bind(email)
         .bind(password_hash)
@@ -184,7 +254,7 @@ impl UserRepo for Storage {
 
     async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, email_verified_at, created_at, updated_at
+            "SELECT id, email, password_hash, email_verified_at, role, created_at, updated_at
              FROM users WHERE email = $1",
         )
         .bind(email)
@@ -196,7 +266,7 @@ impl UserRepo for Storage {
 
     async fn find_user_by_id(&self, id: Uuid) -> Result<Option<User>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, email, password_hash, email_verified_at, created_at, updated_at
+            "SELECT id, email, password_hash, email_verified_at, role, created_at, updated_at
              FROM users WHERE id = $1",
         )
         .bind(id)
@@ -204,6 +274,23 @@ impl UserRepo for Storage {
         .await?;
         row.map(|r| User::from_row(&r).map_err(StorageError::from))
             .transpose()
+    }
+
+    async fn find_user_role(&self, id: Uuid) -> Result<Option<UserRole>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT role FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await?;
+        match row {
+            None => Ok(None),
+            Some((role_str,)) => UserRole::from_wire(&role_str)
+                .ok_or_else(|| {
+                    StorageError::Database(sqlx::Error::Decode(
+                        format!("unknown users.role {role_str:?} (CHECK constraint drift?)").into(),
+                    ))
+                })
+                .map(Some),
+        }
     }
 
     async fn mark_email_verified(&self, id: Uuid) -> Result<bool, StorageError> {

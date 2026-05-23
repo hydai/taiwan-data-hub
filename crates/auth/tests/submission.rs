@@ -103,6 +103,39 @@ impl SubmissionRepo for InMemorySubmissionRepo {
         row.updated_at = row.updated_at.max(now);
         Ok(Some(snapshot(row)))
     }
+
+    // Moderator-side methods (#5a.2). The author-side tests
+    // in this file don't exercise them; #5a.2 has its own
+    // dedicated moderation test module. We implement them as
+    // unreachable to keep the trait satisfied without diluting
+    // the focused author-side coverage.
+    async fn list_pending(
+        &self,
+        _kind_filter: Option<SubmissionKind>,
+    ) -> Result<Vec<SubmissionRow>, StorageError> {
+        unreachable!("author-side submission tests do not exercise the moderation surface")
+    }
+    async fn get_for_moderation(&self, _id: Uuid) -> Result<Option<SubmissionRow>, StorageError> {
+        unreachable!("author-side submission tests do not exercise the moderation surface")
+    }
+    async fn approve_with_audit(
+        &self,
+        _id: Uuid,
+        _mod_id: Uuid,
+        _reason: Option<&str>,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
+        unreachable!("author-side submission tests do not exercise the moderation surface")
+    }
+    async fn reject_with_audit(
+        &self,
+        _id: Uuid,
+        _mod_id: Uuid,
+        _reason: &str,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
+        unreachable!("author-side submission tests do not exercise the moderation surface")
+    }
 }
 
 fn snapshot(row: &Row) -> SubmissionRow {

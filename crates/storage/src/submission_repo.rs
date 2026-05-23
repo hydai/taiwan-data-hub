@@ -219,6 +219,62 @@ pub trait SubmissionRepo: Send + Sync {
         user_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<Option<SubmissionRow>, StorageError>;
+
+    /// Moderator-side list (#5a.2). Returns every `pending`
+    /// submission oldest-first (FIFO — the row that has been
+    /// waiting longest surfaces at the top of the queue),
+    /// optionally filtered to a single kind. The
+    /// `submissions_pending_idx` partial index serves the
+    /// unfiltered case; the `submissions_kind_status_idx`
+    /// composite serves the kind-filtered case without an
+    /// extra sort.
+    async fn list_pending(
+        &self,
+        kind_filter: Option<SubmissionKind>,
+    ) -> Result<Vec<SubmissionRow>, StorageError>;
+
+    /// Moderator-side fetch by id (no user scoping). Returns
+    /// the row regardless of status so the dashboard can also
+    /// open an already-approved / rejected row for audit.
+    async fn get_for_moderation(&self, id: Uuid) -> Result<Option<SubmissionRow>, StorageError>;
+
+    /// Moderator-side approve, written together with the
+    /// audit-log row in a single transaction so a partial
+    /// commit can't leave an approved submission with no
+    /// audit trail (or vice versa).
+    ///
+    /// The audit row's `metadata` JSONB is built INSIDE the
+    /// transaction from the post-UPDATE row's kind + the
+    /// trimmed reason. This avoids an extra pre-read round
+    /// trip the service would otherwise need just to learn
+    /// the submission kind.
+    ///
+    /// Returns `Ok(None)` when the id doesn't exist OR the
+    /// row isn't pending anymore — the gateway folds both
+    /// into a 409 response so a moderator race ("two curators
+    /// clicked approve simultaneously") doesn't double-
+    /// process the row. The audit log is NOT written in that
+    /// case: nothing happened to audit.
+    async fn approve_with_audit(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError>;
+
+    /// Moderator-side reject + audit log in one transaction.
+    /// Same semantics as [`Self::approve_with_audit`]. The
+    /// service layer enforces a non-empty reason on reject;
+    /// the column stays nullable so an `approved` row without
+    /// a note is representable.
+    async fn reject_with_audit(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError>;
 }
 
 #[async_trait]
@@ -309,4 +365,181 @@ impl SubmissionRepo for Storage {
         .await?;
         maybe.as_ref().map(SubmissionRow::from_row).transpose()
     }
+
+    async fn list_pending(
+        &self,
+        kind_filter: Option<SubmissionKind>,
+    ) -> Result<Vec<SubmissionRow>, StorageError> {
+        // Two queries rather than a `WHERE submission_kind = $1
+        // OR $1 IS NULL` so the planner can pick the most-
+        // specific partial index for the unfiltered case
+        // (`submissions_pending_idx`) and the composite for
+        // the filtered case. Hand-merging the kind filter
+        // keeps both planner paths sharp.
+        let rows = if let Some(kind) = kind_filter {
+            sqlx::query(
+                "SELECT id, user_id, submission_kind, status, title, payload,
+                        created_at, updated_at,
+                        reviewed_at, reviewed_by, review_reason
+                   FROM submissions
+                  WHERE status = 'pending' AND submission_kind = $1
+                  ORDER BY created_at ASC",
+            )
+            .bind(kind.as_str())
+            .fetch_all(self.pool())
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT id, user_id, submission_kind, status, title, payload,
+                        created_at, updated_at,
+                        reviewed_at, reviewed_by, review_reason
+                   FROM submissions
+                  WHERE status = 'pending'
+                  ORDER BY created_at ASC",
+            )
+            .fetch_all(self.pool())
+            .await?
+        };
+        rows.iter().map(SubmissionRow::from_row).collect()
+    }
+
+    async fn get_for_moderation(&self, id: Uuid) -> Result<Option<SubmissionRow>, StorageError> {
+        let maybe = sqlx::query(
+            "SELECT id, user_id, submission_kind, status, title, payload,
+                    created_at, updated_at,
+                    reviewed_at, reviewed_by, review_reason
+               FROM submissions
+              WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(self.pool())
+        .await?;
+        maybe.as_ref().map(SubmissionRow::from_row).transpose()
+    }
+
+    async fn approve_with_audit(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
+        decide_with_audit(
+            self,
+            DecideInputs {
+                id,
+                moderator_id,
+                reason,
+                now,
+                next_status: SubmissionStatus::Approved,
+                audit_action: crate::AuditAction::SubmissionApprove,
+            },
+        )
+        .await
+    }
+
+    async fn reject_with_audit(
+        &self,
+        id: Uuid,
+        moderator_id: Uuid,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
+        decide_with_audit(
+            self,
+            DecideInputs {
+                id,
+                moderator_id,
+                reason: Some(reason),
+                now,
+                next_status: SubmissionStatus::Rejected,
+                audit_action: crate::AuditAction::SubmissionReject,
+            },
+        )
+        .await
+    }
+}
+
+/// Bundled inputs to [`decide_with_audit`]. Grouping the
+/// half-dozen call-site parameters into a struct sidesteps
+/// clippy's `too_many_arguments` lint and makes the call
+/// sites more readable (every field is named at the use site).
+///
+/// `next_status` and `audit_action` are the typed enums (not
+/// raw strings) so the mapping from "this is an approve"
+/// vs "reject" stays compile-time checked. `.as_str()` runs
+/// at bind time inside [`decide_with_audit`] to convert to
+/// the wire form the DB CHECK constraints expect. The audit
+/// `metadata` JSON is composed inside the transaction from
+/// the returned row's kind + the trimmed `reason` — no need
+/// for the caller to pre-fetch the row.
+struct DecideInputs<'a> {
+    id: Uuid,
+    moderator_id: Uuid,
+    reason: Option<&'a str>,
+    now: DateTime<Utc>,
+    next_status: SubmissionStatus,
+    audit_action: crate::AuditAction,
+}
+
+/// Shared implementation for `approve_with_audit` +
+/// `reject_with_audit`. Begins a sqlx transaction, runs the
+/// guarded `UPDATE` against `submissions`, and — only if a row
+/// flipped — inserts the matching `audit_logs` row. If either
+/// step fails, the transaction rolls back so the database
+/// stays consistent.
+async fn decide_with_audit(
+    storage: &Storage,
+    inputs: DecideInputs<'_>,
+) -> Result<Option<(SubmissionRow, Uuid)>, StorageError> {
+    let mut tx = storage.pool().begin().await?;
+    let maybe = sqlx::query(
+        "UPDATE submissions
+            SET status = $5,
+                reviewed_at = $3,
+                reviewed_by = $2,
+                review_reason = $4,
+                updated_at = GREATEST(updated_at, $3)
+          WHERE id = $1
+            AND status = 'pending'
+         RETURNING id, user_id, submission_kind, status, title, payload,
+                   created_at, updated_at,
+                   reviewed_at, reviewed_by, review_reason",
+    )
+    .bind(inputs.id)
+    .bind(inputs.moderator_id)
+    .bind(inputs.now)
+    .bind(inputs.reason)
+    .bind(inputs.next_status.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = maybe else {
+        // No row flipped — nothing happened, nothing to audit.
+        // The transaction has no writes so rollback is a no-op.
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let submission_row = SubmissionRow::from_row(&row)?;
+    // Derive the audit metadata from the row we just touched —
+    // saves the service layer an extra round trip to learn
+    // `submission_kind` and keeps the metadata in lockstep with
+    // the version the row actually has post-update.
+    let metadata = serde_json::json!({
+        "submission_kind": submission_row.kind.as_str(),
+        "reason": inputs.reason,
+    });
+    let audit_id = crate::audit_repo::insert_audit_log_inner(
+        &mut tx,
+        &crate::NewAuditLog {
+            actor_id: Some(inputs.moderator_id),
+            action: inputs.audit_action,
+            target_kind: crate::AuditTargetKind::Submission,
+            target_id: Some(inputs.id),
+            metadata,
+            created_at: inputs.now,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Some((submission_row, audit_id)))
 }
