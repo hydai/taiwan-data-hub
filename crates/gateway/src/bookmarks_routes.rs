@@ -446,3 +446,81 @@ impl IntoResponse for ApiError {
             .into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kind_known_strings() {
+        assert!(parse_kind("dataset").is_ok());
+        assert!(parse_kind("tool").is_ok());
+        assert!(parse_kind("connector").is_ok());
+        assert!(parse_kind("playground").is_ok());
+    }
+
+    #[test]
+    fn parse_kind_rejects_unknown() {
+        let err = parse_kind("notebook").unwrap_err();
+        assert!(matches!(err, ApiError::Validation(_)));
+    }
+
+    #[test]
+    fn parse_uuid_rejects_garbage() {
+        let err = parse_uuid("collection id", "not-a-uuid").unwrap_err();
+        assert!(matches!(err, ApiError::Validation(_)));
+    }
+
+    #[test]
+    fn parse_uuid_accepts_valid() {
+        let u = Uuid::now_v7().to_string();
+        assert!(parse_uuid("collection id", &u).is_ok());
+    }
+
+    #[tokio::test]
+    async fn denial_mapping_picks_distinct_codes() {
+        // Each denial reason routes to a specific HTTP status
+        // — pin the mapping here so a future enum tweak that
+        // forgets to update the match arm is caught at CI.
+        let cases = [
+            (
+                ApiError::from_collection_denial(CollectionDenialReason::NotFoundOrNotYours),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                ApiError::from_collection_denial(CollectionDenialReason::NameTaken),
+                StatusCode::CONFLICT,
+            ),
+            (
+                ApiError::from_collection_denial(CollectionDenialReason::InvalidInput(
+                    CollectionInputError::NameEmpty,
+                )),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ApiError::from_collection_denial(CollectionDenialReason::InvalidInput(
+                    CollectionInputError::NameTooLong,
+                )),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                ApiError::from_collection_denial(CollectionDenialReason::InvalidInput(
+                    CollectionInputError::DescriptionTooLong,
+                )),
+                StatusCode::BAD_REQUEST,
+            ),
+            (ApiError::Unauthenticated, StatusCode::UNAUTHORIZED),
+            (ApiError::NotFound, StatusCode::NOT_FOUND),
+            (ApiError::Conflict("x".into()), StatusCode::CONFLICT),
+            (ApiError::Validation("x".into()), StatusCode::BAD_REQUEST),
+            (
+                ApiError::Internal("x".into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (err, expected) in cases {
+            let response = err.into_response();
+            assert_eq!(response.status(), expected, "for {expected:?}");
+        }
+    }
+}

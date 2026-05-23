@@ -15,7 +15,11 @@ import {
 } from '$lib/account/gateway';
 import { bookmarksUrl, collectionByIdUrl, collectionsUrl } from '$lib/bookmarks/gateway';
 import type { Bookmark, BookmarkTargetKind, Collection } from '$lib/bookmarks/types';
-import { BOOKMARK_TARGET_KINDS } from '$lib/bookmarks/types';
+import {
+	BOOKMARK_TARGET_KINDS,
+	parseBookmarkArray,
+	parseCollectionArray
+} from '$lib/bookmarks/types';
 
 const GATEWAY_UNREACHABLE_MESSAGE =
 	'Gateway temporarily unreachable. Please try again in a moment.';
@@ -86,9 +90,10 @@ export const load: PageServerLoad = async ({
 		return { state: 'unexpected', message: 'Unexpected response from the gateway.' };
 	}
 
-	const bookmarks = (await bookmarksRes.json().catch(() => null)) as Bookmark[] | null;
-	const collections = (await collectionsRes.json().catch(() => null)) as Collection[] | null;
-	if (!Array.isArray(bookmarks) || !Array.isArray(collections)) {
+	const bookmarks = parseBookmarkArray(await bookmarksRes.json().catch(() => null));
+	const collections = parseCollectionArray(await collectionsRes.json().catch(() => null));
+	if (bookmarks === null || collections === null) {
+		console.error('[/account/bookmarks] gateway response failed parse');
 		return { state: 'unexpected', message: 'Unexpected response shape from the gateway.' };
 	}
 	return { state: 'ok', bookmarks, collections, kindFilter };
