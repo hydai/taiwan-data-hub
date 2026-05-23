@@ -29,8 +29,27 @@
 	// only path that re-populates step 2 inputs is the action
 	// failure branch, which echoes `failure.values` from the
 	// server snapshot.
-	let step = $state<1 | 2 | 3>(1);
-	let kind = $state<SubmissionKind | null>(null);
+	//
+	// Seed the initial values from `created` / `failure?.kind`
+	// at script body evaluation so SSR-only requests (no JS,
+	// non-enhanced form POST) render the correct step on first
+	// paint. The $effect below keeps the state in sync after
+	// later prop changes (client-side `enhance`d submits).
+	const initial = ((): { step: 1 | 2 | 3; kind: SubmissionKind | null } => {
+		// Re-derive without depending on the `failure` /
+		// `created` derived values to dodge Svelte 5's
+		// `state_referenced_locally` lint — the derived
+		// definitions above capture the same prop access, but
+		// this IIFE is the SSR-correctness path so it runs once
+		// per render, not just once at mount.
+		if (form === null || form === undefined) return { step: 1, kind: null };
+		if ('created' in form) return { step: 3, kind: null };
+		const f = form as { message: string; kind?: SubmissionKind };
+		if (f.kind !== undefined) return { step: 2, kind: f.kind };
+		return { step: 1, kind: null };
+	})();
+	let step = $state<1 | 2 | 3>(initial.step);
+	let kind = $state<SubmissionKind | null>(initial.kind);
 
 	// Replay the snapshot only when the failure corresponds to
 	// the currently-selected kind. Without the kind-match guard
@@ -185,7 +204,6 @@
 					<input
 						name="title"
 						required
-						maxlength="120"
 						value={values.title ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -196,7 +214,6 @@
 						name="source_url"
 						type="url"
 						required
-						maxlength="2048"
 						value={values.source_url ?? ''}
 						placeholder="https://data.gov.tw/dataset/…"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
@@ -207,7 +224,6 @@
 					<input
 						name="license"
 						required
-						maxlength="120"
 						value={values.license ?? ''}
 						placeholder="CC-BY-4.0 / 政府資料開放授權條款 / …"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
@@ -218,7 +234,6 @@
 					<input
 						name="domain_slug"
 						required
-						maxlength="120"
 						pattern="[A-Za-z0-9_\-]+"
 						value={values.domain_slug ?? ''}
 						placeholder="weather-climate"
@@ -234,7 +249,6 @@
 					<textarea
 						name="description"
 						required
-						maxlength="2048"
 						rows="4"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 						>{values.description ?? ''}</textarea
@@ -246,7 +260,6 @@
 					<input
 						name="name"
 						required
-						maxlength="120"
 						value={values.name ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -257,7 +270,6 @@
 						name="repo_url"
 						type="url"
 						required
-						maxlength="2048"
 						value={values.repo_url ?? ''}
 						placeholder="https://github.com/you/your-tool"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
@@ -268,7 +280,6 @@
 					<input
 						name="language"
 						required
-						maxlength="120"
 						value={values.language ?? ''}
 						placeholder="rust"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
@@ -279,7 +290,6 @@
 					<textarea
 						name="description"
 						required
-						maxlength="2048"
 						rows="4"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 						>{values.description ?? ''}</textarea
@@ -291,7 +301,6 @@
 					<input
 						name="name"
 						required
-						maxlength="120"
 						value={values.name ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -302,7 +311,6 @@
 						name="repo_url"
 						type="url"
 						required
-						maxlength="2048"
 						value={values.repo_url ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -312,7 +320,6 @@
 					<input
 						name="license"
 						required
-						maxlength="120"
 						value={values.license ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -322,7 +329,6 @@
 					<textarea
 						name="description"
 						required
-						maxlength="2048"
 						rows="4"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 						>{values.description ?? ''}</textarea
@@ -334,7 +340,6 @@
 					<input
 						name="name"
 						required
-						maxlength="120"
 						value={values.name ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -345,7 +350,6 @@
 						name="demo_url"
 						type="url"
 						required
-						maxlength="2048"
 						value={values.demo_url ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -355,7 +359,6 @@
 					<input
 						name="repo_url"
 						type="url"
-						maxlength="2048"
 						value={values.repo_url ?? ''}
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 					/>
@@ -365,7 +368,6 @@
 					<textarea
 						name="description"
 						required
-						maxlength="2048"
 						rows="4"
 						class="border-border focus-visible:ring-ring mt-1 block w-full rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
 						>{values.description ?? ''}</textarea
