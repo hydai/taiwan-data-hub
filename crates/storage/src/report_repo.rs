@@ -283,22 +283,33 @@ impl ReportRepo for Storage {
         auto_hide_threshold: i64,
     ) -> Result<InsertOutcome, StorageError> {
         let mut tx = self.pool().begin().await?;
-        // Verify the target row exists and hold a row-
-        // level lock on it until COMMIT. The polymorphic
-        // `(target_kind, target_id)` shape rules out a
-        // hard FK, so without the lock a concurrent
-        // delete (e.g. submissions cascade-delete on
-        // user delete) could land between this probe and
-        // the auto-hide UPDATE, leaving an orphan report
-        // row and a phantom `freshly_hidden = false`.
-        // `FOR KEY SHARE` blocks DELETE on the target
-        // without blocking other concurrent reads —
-        // weakest lock that prevents the race.
+        // Verify the target row exists AND serialise
+        // concurrent report inserts on the same target.
+        // The polymorphic `(target_kind, target_id)`
+        // shape rules out a hard FK, so without the
+        // lock a concurrent target delete could land
+        // between this probe and the auto-hide UPDATE,
+        // leaving an orphan report row.
+        //
+        // `FOR UPDATE` (rather than the weaker
+        // `FOR KEY SHARE`) is the *serialisation* the
+        // auto-hide decision needs: two simultaneous
+        // reports against the same target would
+        // otherwise each compute their own
+        // unresolved-count snapshot under READ COMMITTED
+        // and miss the threshold transition. With
+        // `FOR UPDATE` the second insert blocks until
+        // the first commits, then sees the up-to-date
+        // count + flips `hidden_at` if it crossed
+        // threshold. Other reads of the target row
+        // (rendering the comment, listing it) are
+        // unaffected — only competing write-locks
+        // queue.
         let target_table = match new.target_kind {
             ReportTargetKind::Comment => "comments",
             ReportTargetKind::Submission => "submissions",
         };
-        let probe_sql = format!("SELECT 1 FROM {target_table} WHERE id = $1 FOR KEY SHARE");
+        let probe_sql = format!("SELECT 1 FROM {target_table} WHERE id = $1 FOR UPDATE");
         let exists = sqlx::query(&probe_sql)
             .bind(new.target_id)
             .fetch_optional(&mut *tx)
