@@ -116,9 +116,16 @@ CREATE INDEX submissions_pending_idx
     ON submissions (created_at)
     WHERE status = 'pending';
 
--- Per-kind triage filter (moderator might want "show me only
--- the dataset submissions"). Composite so the query planner
--- can use it for `WHERE submission_kind=$1 ORDER BY created_at`.
+-- Per-kind + per-status triage filter (moderator might want
+-- "show me pending dataset submissions"). Composite, ordered
+-- to satisfy `WHERE submission_kind=$1 AND status=$2 ORDER BY
+-- created_at DESC` without an extra sort step — the
+-- moderation-queue list page (#5a.2) is expected to filter on
+-- both kind + status together. A query that fixes only
+-- `submission_kind` (no status predicate) would still scan
+-- this index but pay a sort cost; the `submissions_user_idx`
+-- + the `submissions_pending_idx` cover the other two hot
+-- paths today.
 CREATE INDEX submissions_kind_status_idx
     ON submissions (submission_kind, status, created_at DESC);
 
