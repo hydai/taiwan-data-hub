@@ -1,4 +1,7 @@
+import { env } from '$env/dynamic/private';
 import { error } from '@sveltejs/kit';
+import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
+import { parseBookmarkArray } from '$lib/bookmarks/types';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
 import type { PageServerLoad } from './$types';
@@ -33,13 +36,14 @@ import type { PageServerLoad } from './$types';
  * cache; `Vary: Cookie` is set only in the per-user branch so
  * unrelated cookies don't shred CDN hit rates.
  */
-export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
+export const load: PageServerLoad = async ({ fetch, params, parent, request, setHeaders }) => {
 	const dataset = findDatasetBySlug(params.id);
 	if (!dataset) {
 		throw error(404, `Dataset "${params.id}" not found`);
 	}
 	const parentData = await parent();
 	const currentUserId = parentData.user?.user_id ?? null;
+	const commentTargetId = datasetSlugToUuid(dataset.slug);
 	if (currentUserId !== null) {
 		setHeaders({
 			'cache-control': 'private, no-store',
@@ -50,15 +54,59 @@ export const load: PageServerLoad = async ({ params, parent, setHeaders }) => {
 			'cache-control': 'public, max-age=300, stale-while-revalidate=300'
 		});
 	}
+
+	// Probe the bookmark state for the currently-signed-in
+	// user so the heart renders pre-filled on first paint.
+	// Anonymous traffic skips the round trip; a failing probe
+	// degrades to "not bookmarked" without 500-ing the page.
+	let bookmarked = false;
+	if (currentUserId !== null) {
+		try {
+			const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
+			// Filter to `kind=dataset` so the probe stays cheap
+			// for users with many bookmarks across kinds.
+			const res = await fetch(`${base}/api/v1/bookmarks?kind=dataset`, {
+				method: 'GET',
+				headers: withCookieHeader(
+					new Headers({ accept: 'application/json' }),
+					request.headers.get('cookie')
+				)
+			});
+			if (res.ok) {
+				// Run the response through the same runtime
+				// narrower that the account page uses so a
+				// shape drift here can't throw an unchecked
+				// TypeError from `.some(...)` and bubble up
+				// to the outer catch as a noisy 500 trace.
+				// A `null` parse degrades to "not bookmarked"
+				// — same outcome as a network failure, no
+				// extra branch needed.
+				const rows = parseBookmarkArray(await res.json().catch(() => null));
+				if (rows !== null) {
+					bookmarked = rows.some(
+						(r) => r.target_kind === 'dataset' && r.target_id === commentTargetId
+					);
+				}
+			}
+		} catch (e) {
+			console.error('[/datasets/:id] bookmark probe failed:', e);
+		}
+	}
+
 	return {
 		dataset,
-		commentTargetId: datasetSlugToUuid(dataset.slug),
+		commentTargetId,
 		currentUserId,
-		// Mirror the layout's mode so the comment thread is
-		// SSR-skipped in personal-mode deploys (otherwise the
-		// section would render with "Loading comments…" until
-		// the client-side 404 detect hides it, and stay
-		// visible forever for no-JS readers).
-		commentsEnabled: parentData.mode === 'multi-user'
+		// Mirror the layout's mode so community-facing
+		// surfaces (comments thread + HeartButton) are
+		// SSR-skipped in personal-mode deploys — the gateway
+		// doesn't mount their subrouters there, so a probe
+		// would 404 and the components would render as
+		// "Loading…" stubs that the client only hides at
+		// hydration. One flag covers both because the auth
+		// subrouter is the shared gate; if either feature
+		// ships separately in the future, split the flag.
+		communityEnabled: parentData.mode === 'multi-user',
+		bookmarked
 	};
 };

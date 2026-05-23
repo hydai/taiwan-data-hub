@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import HeartButton from '$lib/bookmarks/HeartButton.svelte';
 	import CommentThread from '$lib/comments/CommentThread.svelte';
 	import MetaTags from '$lib/seo/MetaTags.svelte';
 	import { cn } from '$lib/utils';
@@ -81,9 +82,20 @@
 			</span>
 		</div>
 
-		<h1 class="text-3xl font-bold tracking-tight text-neutral-900">
-			{dataset.name['zh-TW']}
-		</h1>
+		<div class="flex items-start gap-3">
+			<h1 class="flex-1 text-3xl font-bold tracking-tight text-neutral-900">
+				{dataset.name['zh-TW']}
+			</h1>
+			{#if data.communityEnabled}
+				<HeartButton
+					targetKind="dataset"
+					targetId={data.commentTargetId}
+					currentUserId={data.currentUserId}
+					bookmarked={data.bookmarked}
+					size="md"
+				/>
+			{/if}
+		</div>
 		{#if dataset.name.en}
 			<p class="mt-1 text-base text-neutral-500">{dataset.name.en}</p>
 		{/if}
@@ -162,7 +174,7 @@
 		</ul>
 	</section>
 
-	{#if data.commentsEnabled}
+	{#if data.communityEnabled}
 		<CommentThread
 			targetKind="dataset"
 			targetId={data.commentTargetId}
