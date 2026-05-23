@@ -205,6 +205,25 @@ async fn reply_at_depth_1_is_allowed_but_depth_2_is_not() {
 }
 
 #[tokio::test]
+async fn reply_to_soft_deleted_parent_rejected() {
+    let svc = build_service();
+    let alice = Uuid::now_v7();
+    let (kind, target) = dataset_target();
+    let root = svc
+        .create(alice, kind, target, None, "root".into())
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = svc.delete(alice, root.id).await.unwrap().unwrap();
+    let err = svc
+        .create(alice, kind, target, Some(root.id), "child of tombstone".into())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(err, CommentDenialReason::ParentNotFound);
+}
+
+#[tokio::test]
 async fn reply_with_mismatched_target_rejected() {
     let svc = build_service();
     let alice = Uuid::now_v7();

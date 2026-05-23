@@ -177,6 +177,16 @@ impl CommentService {
             if parent_row.target_kind != target_kind || parent_row.target_id != target_id {
                 return Ok(Err(CommentDenialReason::ParentNotFound));
             }
+            // Refuse replies on a soft-deleted parent. The
+            // frontend already hides the Reply affordance on
+            // tombstoned rows, but the server is the
+            // authoritative gate — collapse to `ParentNotFound`
+            // so the wire shape stays the same as "id doesn't
+            // exist" (a tombstoned parent is, from the
+            // commenter's perspective, the same outcome).
+            if parent_row.deleted_at.is_some() {
+                return Ok(Err(CommentDenialReason::ParentNotFound));
+            }
             if parent_row.depth >= 1 {
                 return Ok(Err(CommentDenialReason::DepthCapExceeded));
             }
