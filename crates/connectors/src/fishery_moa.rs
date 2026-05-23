@@ -272,6 +272,8 @@ fn transactions_metadata() -> DatasetMetadata {
         publisher: Some("農業部漁業署".into()),
         update_frequency: Some("daily".into()),
         original_url: Some("https://data.moa.gov.tw/open_data_detail.aspx?id=42".into()),
+        source_url: Some("https://data.moa.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         // The domain mapper's substring match: "漁業"
         // contains "漁", which is also in the
@@ -303,6 +305,8 @@ fn port_traffic_metadata() -> DatasetMetadata {
         publisher: Some("農業部漁業署".into()),
         update_frequency: Some("daily".into()),
         original_url: Some("https://data.moa.gov.tw/open_data_detail.aspx?id=82".into()),
+        source_url: Some("https://data.moa.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["漁業".into()],
     }

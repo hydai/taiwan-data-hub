@@ -472,7 +472,7 @@ impl DatasetKey {
 /// callers (tool layer) decide which locale to render. JSONB columns
 /// are returned as `serde_json::Value` so tests can assert against
 /// shapes without re-binding the schema in Rust types.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Default, FromRow)]
 pub struct DatasetRow {
     pub id: Uuid,
     pub source: String,
@@ -486,10 +486,26 @@ pub struct DatasetRow {
     pub publisher: Option<String>,
     pub update_frequency: Option<String>,
     pub original_url: Option<String>,
+    /// URL of the upstream open-data hub itself (e.g.
+    /// `https://opendata.cwa.gov.tw`). Added in #5b.6 alongside
+    /// `datasets.source_url`. Nullable on rows imported before
+    /// the migration; the next ETL upsert backfills.
+    pub source_url: Option<String>,
+    /// URL of the license document for [`Self::license`].
+    /// Nullable when the upstream doesn't publish one OR for
+    /// pre-migration rows.
+    pub license_url: Option<String>,
     pub schema_json: Option<Value>,
     pub row_count_estimate: Option<i64>,
     pub last_modified_at: DateTime<Utc>,
     pub first_seen_at: DateTime<Utc>,
+    /// When this row's metadata was last reconciled with the
+    /// upstream catalog. Distinct from `last_modified_at`
+    /// (upstream's timestamp) and from
+    /// `dataset_versions.fetched_at` (per-file). NOT NULL
+    /// with a `now()` default; refreshed by every successful
+    /// upsert. Added in #5b.6.
+    pub fetched_at: DateTime<Utc>,
 }
 
 /// One row from `dataset_versions`.
@@ -600,6 +616,14 @@ impl Storage {
             // omits the timestamp. The SQL COALESCE chain then picks
             // the right fallback for each path (insert vs. update).
             .bind(metadata.last_modified_at)
+            // #5b.6 provenance fields. Both URLs are
+            // bound as NULL when the connector doesn't
+            // publish one; `fetched_at` is set by SQL via
+            // `now()` on every upsert so the column stays
+            // truthful without the caller having to plumb a
+            // clock.
+            .bind(metadata.source_url.as_ref())
+            .bind(metadata.license_url.as_ref())
             .fetch_one(&self.pool)
             .await?;
         Ok(row.0)
@@ -1287,8 +1311,9 @@ const DATASET_BY_ID_SQL: &str = "
     SELECT
         id, source, source_id, slug, domain_id,
         title_i18n, description_i18n, tier, license, publisher,
-        update_frequency, original_url, schema_json, row_count_estimate,
-        last_modified_at, first_seen_at
+        update_frequency, original_url, source_url, license_url,
+        schema_json, row_count_estimate,
+        last_modified_at, first_seen_at, fetched_at
     FROM datasets
     WHERE id = $1
 ";
@@ -1297,8 +1322,9 @@ const DATASET_BY_SLUG_SQL: &str = "
     SELECT
         id, source, source_id, slug, domain_id,
         title_i18n, description_i18n, tier, license, publisher,
-        update_frequency, original_url, schema_json, row_count_estimate,
-        last_modified_at, first_seen_at
+        update_frequency, original_url, source_url, license_url,
+        schema_json, row_count_estimate,
+        last_modified_at, first_seen_at, fetched_at
     FROM datasets
     WHERE slug = $1
 ";
@@ -1337,12 +1363,14 @@ const UPSERT_SQL: &str = "
         source, source_id, slug, domain_id,
         title_i18n, description_i18n,
         license, publisher, update_frequency, original_url,
-        last_modified_at
+        last_modified_at,
+        source_url, license_url, fetched_at
     ) VALUES (
         $1, $2, $3, $4,
         $5, $6,
         $7, $8, $9, $10,
-        COALESCE($11, now())
+        COALESCE($11, now()),
+        $12, $13, now()
     )
     ON CONFLICT (source, source_id) DO UPDATE SET
         slug              = EXCLUDED.slug,
@@ -1353,7 +1381,10 @@ const UPSERT_SQL: &str = "
         publisher         = EXCLUDED.publisher,
         update_frequency  = EXCLUDED.update_frequency,
         original_url      = EXCLUDED.original_url,
-        last_modified_at  = COALESCE($11, datasets.last_modified_at)
+        last_modified_at  = COALESCE($11, datasets.last_modified_at),
+        source_url        = EXCLUDED.source_url,
+        license_url       = EXCLUDED.license_url,
+        fetched_at        = now()
     RETURNING id;
 ";
 
@@ -1413,6 +1444,7 @@ mod tests {
                 .ok()
                 .map(|d| d.with_timezone(&Utc)),
             upstream_categories: vec!["不動產與土地".into()],
+            ..Default::default()
         }
     }
 
@@ -1890,6 +1922,7 @@ mod tests {
                 .ok()
                 .map(|d| d.with_timezone(&Utc)),
             upstream_categories: vec!["不動產與土地".into()],
+            ..Default::default()
         };
         storage
             .upsert_dataset(realestate, SourceId::DataGovTw, &m1)
@@ -1916,6 +1949,7 @@ mod tests {
                 .ok()
                 .map(|d| d.with_timezone(&Utc)),
             upstream_categories: vec!["環境".into()],
+            ..Default::default()
         };
         storage
             .upsert_dataset(env, SourceId::DataGovTw, &m2)
@@ -1942,6 +1976,7 @@ mod tests {
                 .ok()
                 .map(|d| d.with_timezone(&Utc)),
             upstream_categories: vec!["環境".into()],
+            ..Default::default()
         };
         storage
             .upsert_dataset(env, SourceId::DataGovTw, &m3)
@@ -2473,6 +2508,7 @@ mod tests {
                 original_url: None,
                 last_modified_at: None,
                 upstream_categories: vec![],
+                ..Default::default()
             };
             let id = storage
                 .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
@@ -2526,6 +2562,7 @@ mod tests {
             original_url: None,
             last_modified_at: None,
             upstream_categories: vec![],
+            ..Default::default()
         };
         let id = storage
             .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
@@ -2564,6 +2601,7 @@ mod tests {
                 original_url: None,
                 last_modified_at: None,
                 upstream_categories: vec![],
+                ..Default::default()
             };
             let id = storage
                 .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
@@ -2612,6 +2650,7 @@ mod tests {
             original_url: None,
             last_modified_at: None,
             upstream_categories: vec![],
+            ..Default::default()
         };
         let id = storage
             .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
@@ -2649,6 +2688,7 @@ mod tests {
                 original_url: None,
                 last_modified_at: None,
                 upstream_categories: vec![],
+                ..Default::default()
             };
             let id = storage
                 .upsert_dataset(domain_id, SourceId::DataGovTw, &m)

@@ -200,6 +200,17 @@ fn render_full(full: &DatasetFull, locale: &str) -> Value {
     if let Some(url) = &d.original_url {
         dataset.insert("original_url".into(), Value::String(url.clone()));
     }
+    // #5b.6 provenance fields. Each is optional today —
+    // rows imported before the migration won't carry the
+    // URL fields, and the schema doesn't promise them. The
+    // dataset detail page treats their absence as "the
+    // upstream didn't publish one".
+    if let Some(url) = &d.source_url {
+        dataset.insert("source_url".into(), Value::String(url.clone()));
+    }
+    if let Some(url) = &d.license_url {
+        dataset.insert("license_url".into(), Value::String(url.clone()));
+    }
     if let Some(schema) = &d.schema_json {
         dataset.insert("schema".into(), schema.clone());
     }
@@ -213,6 +224,12 @@ fn render_full(full: &DatasetFull, locale: &str) -> Value {
     dataset.insert(
         "first_seen_at".into(),
         Value::String(d.first_seen_at.to_rfc3339()),
+    );
+    // #5b.6: stamp of last ETL reconciliation with upstream.
+    // Distinct from `last_modified_at` (upstream's clock).
+    dataset.insert(
+        "fetched_at".into(),
+        Value::String(d.fetched_at.to_rfc3339()),
     );
 
     let versions: Vec<Value> = full
@@ -312,7 +329,7 @@ fn output_schema() -> Map<String, Value> {
             "locale": { "type": "string" },
             "dataset": {
                 "type": "object",
-                "required": ["id", "source", "source_id", "slug", "tier", "license", "name", "last_modified_at", "first_seen_at"],
+                "required": ["id", "source", "source_id", "slug", "tier", "license", "name", "last_modified_at", "first_seen_at", "fetched_at"],
                 "properties": {
                     "id":                 { "type": "string" },
                     "source":             { "type": "string" },
@@ -325,10 +342,13 @@ fn output_schema() -> Map<String, Value> {
                     "publisher":          { "type": "string" },
                     "update_frequency":   { "type": "string" },
                     "original_url":       { "type": "string" },
+                    "source_url":         { "type": "string", "format": "uri" },
+                    "license_url":        { "type": "string", "format": "uri" },
                     "schema":             { "type": "object" },
                     "row_count_estimate": { "type": "integer", "minimum": 0 },
                     "last_modified_at":   { "type": "string", "format": "date-time" },
-                    "first_seen_at":      { "type": "string", "format": "date-time" }
+                    "first_seen_at":      { "type": "string", "format": "date-time" },
+                    "fetched_at":         { "type": "string", "format": "date-time" }
                 },
                 "additionalProperties": false
             },
@@ -444,6 +464,7 @@ mod tests {
                 row_count_estimate: Some(10_000),
                 last_modified_at: fixed_time(),
                 first_seen_at: fixed_time(),
+                ..Default::default()
             },
             versions: vec![VersionWithFiles {
                 version: DatasetVersionRow {
