@@ -110,12 +110,19 @@ ALTER TABLE comments
 COMMENT ON COLUMN comments.hidden_at IS
     'When non-NULL, the comment is hidden by community reports or a moderator. Body is still kept for audit; the renderer substitutes a placeholder.';
 
--- Submissions get a `hidden_at` column too; the
--- submission detail view (frontend) substitutes a
--- placeholder. Re-hiding via the existing `status` field
--- (e.g. moving to a new `hidden` value) would require
--- updating the M5a.2 moderation queue logic to skip the
--- new value everywhere — a separate column keeps the
+-- Submissions get a `hidden_at` column too. The
+-- backend wires it through `reports.target_kind =
+-- 'submission'` (auto-hide threshold + moderator
+-- resolve actions), but the frontend hasn't yet
+-- grown a submission detail view — surfacing the
+-- placeholder there is a follow-up alongside the
+-- ReportButton mount on the submission UI. Storing
+-- the flag NOW keeps schema migrations off the
+-- critical path of that later work. Re-hiding via
+-- the existing `status` field (e.g. moving to a new
+-- `hidden` value) would require updating the M5a.2
+-- moderation queue logic to skip the new value
+-- everywhere — a separate column keeps the
 -- moderation lifecycle simple.
 ALTER TABLE submissions
     ADD COLUMN hidden_at TIMESTAMPTZ;

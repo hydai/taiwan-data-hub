@@ -204,6 +204,16 @@ impl CommentService {
             if parent_row.deleted_at.is_some() {
                 return Ok(Err(CommentDenialReason::ParentNotFound));
             }
+            // Refuse replies on a hidden parent. UI suppresses
+            // the affordance, but a direct API caller could
+            // otherwise continue a thread under content that
+            // moderators or the community explicitly hid. Same
+            // fold-to-`ParentNotFound` shape — the API doesn't
+            // need to distinguish "hidden" from "deleted" for
+            // this denial since both mean "can't post here".
+            if parent_row.hidden_at.is_some() {
+                return Ok(Err(CommentDenialReason::ParentNotFound));
+            }
             if parent_row.depth >= 1 {
                 return Ok(Err(CommentDenialReason::DepthCapExceeded));
             }
