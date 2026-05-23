@@ -45,38 +45,38 @@ impl ReportRepo for ReportStore {
                     && r.target_id == new.target_id
             })
             .map(|(id, _)| *id);
-        let report_id = match existing_id {
-            Some(id) => {
-                let row = inner.get_mut(&id).unwrap();
-                row.reason = new.reason;
-                row.body = new.body.clone();
-                id
-            }
-            None => {
-                let id = Uuid::now_v7();
-                inner.insert(
+        let report_id = if let Some(id) = existing_id {
+            let row = inner.get_mut(&id).unwrap();
+            row.reason = new.reason;
+            new.body.clone_into(&mut row.body);
+            id
+        } else {
+            let id = Uuid::now_v7();
+            inner.insert(
+                id,
+                ReportRow {
                     id,
-                    ReportRow {
-                        id,
-                        reporter_id: Some(new.reporter_id),
-                        target_kind: new.target_kind,
-                        target_id: new.target_id,
-                        reason: new.reason,
-                        body: new.body,
-                        created_at: new.created_at,
-                        resolved_at: None,
-                        resolved_by: None,
-                        action_taken: None,
-                        resolution_note: None,
-                    },
-                );
-                id
-            }
+                    reporter_id: Some(new.reporter_id),
+                    target_kind: new.target_kind,
+                    target_id: new.target_id,
+                    reason: new.reason,
+                    body: new.body,
+                    created_at: new.created_at,
+                    resolved_at: None,
+                    resolved_by: None,
+                    action_taken: None,
+                    resolution_note: None,
+                },
+            );
+            id
         };
-        let reporter_count = inner
-            .values()
-            .filter(|r| r.target_kind == new.target_kind && r.target_id == new.target_id)
-            .count() as i64;
+        let reporter_count = i64::try_from(
+            inner
+                .values()
+                .filter(|r| r.target_kind == new.target_kind && r.target_id == new.target_id)
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
         drop(inner);
         let mut hidden = self.hidden_targets.lock().unwrap();
         let key = (new.target_kind, new.target_id);
@@ -105,7 +105,7 @@ impl ReportRepo for ReportStore {
             .cloned()
             .collect();
         rows.sort_by_key(|r| r.created_at);
-        rows.truncate(limit as usize);
+        rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(rows)
     }
 
@@ -121,7 +121,7 @@ impl ReportRepo for ReportStore {
             .cloned()
             .collect();
         rows.sort_by_key(|r| std::cmp::Reverse(r.created_at));
-        rows.truncate(limit as usize);
+        rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(rows)
     }
 
