@@ -40,10 +40,10 @@ export function parseRatingView(value: unknown): RatingView | null {
 	if (value === null || typeof value !== 'object') return null;
 	const v = value as Record<string, unknown>;
 	// avg_score: null or a finite number. The server-side
-	// score CHECK clamps every rating to `[SCORE_MIN,
-	// SCORE_MAX]`, so the average is also bounded by the
-	// same range whenever there's at least one rating —
-	// we enforce that below in the count/avg invariant.
+	// CHECK constraint rejects any rating outside
+	// `[SCORE_MIN, SCORE_MAX]`, so the average inherits
+	// the same bounds whenever there's at least one
+	// rating — enforced below in the count/avg invariant.
 	if (v.avg_score !== null) {
 		if (typeof v.avg_score !== 'number' || !Number.isFinite(v.avg_score)) return null;
 	}

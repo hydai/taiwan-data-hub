@@ -240,13 +240,16 @@
 		{/if}
 	</span>
 	<!--
-		Screen-reader announcement on rating failure / state
-		change. Mirrors the HeartButton pattern: visually
-		hidden, `role="alert"` + `aria-live="polite"` so a
-		failure lands without interrupting a screen reader's
-		current speech.
+		Screen-reader announcement on rating failure /
+		state change. `role="status"` (implicit
+		`aria-live="polite"`) so a failure lands without
+		interrupting a screen reader's current speech.
+		Avoids `role="alert"`, which carries an implicit
+		assertive contract that some AT/UAs treat as
+		interruptive regardless of an explicit
+		`aria-live="polite"` override.
 	-->
-	<span class="sr-only" role="alert" aria-live="polite">
+	<span class="sr-only" role="status">
 		{#if error}{error}{/if}
 	</span>
 </div>
