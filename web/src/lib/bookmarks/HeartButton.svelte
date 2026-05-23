@@ -60,9 +60,13 @@
 		lastTargetKey = key;
 		bookmarked = initialBookmarked;
 		error = null;
-		// Any in-flight toggle is for the previous target;
-		// `inFlight` stays true until that response lands
-		// and the key-mismatch check drops it on the floor.
+		// Any in-flight toggle was for the previous target.
+		// Clear `inFlight` here so the new target's button
+		// is interactive immediately, and rely on the
+		// stale-target guard in the toggle's `finally` to
+		// keep the old response from clobbering the new
+		// state when it lands.
+		inFlight = false;
 	});
 
 	async function toggle(): Promise<void> {
@@ -117,7 +121,15 @@
 			console.error('[heart] toggle failed:', e);
 			error = 'Network error — please try again.';
 		} finally {
-			inFlight = false;
+			// Only clear `inFlight` if we're still on the
+			// target this toggle was started for. Without
+			// this guard, an old request's finally could
+			// clear `inFlight` mid-way through a new
+			// toggle on a different target, falsely
+			// re-enabling the button.
+			if (`${targetKind}|${targetId}` === startKey) {
+				inFlight = false;
+			}
 		}
 	}
 
