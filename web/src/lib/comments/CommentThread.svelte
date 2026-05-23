@@ -283,6 +283,7 @@
 							<textarea
 								bind:value={editDraft}
 								rows="3"
+								aria-label="Edit comment"
 								class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
 							></textarea>
 							{#if editError}
@@ -358,6 +359,7 @@
 											<textarea
 												bind:value={editDraft}
 												rows="2"
+												aria-label="Edit reply"
 												class="w-full rounded-md border border-neutral-300 p-2 text-sm focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
 											></textarea>
 											{#if editError}

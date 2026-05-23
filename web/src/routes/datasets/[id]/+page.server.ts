@@ -31,8 +31,19 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	if (!dataset) {
 		throw error(404, `Dataset "${params.id}" not found`);
 	}
+	// Cache policy depends on whether the response carries a
+	// per-user payload. A session cookie means the `/me` probe
+	// below populates `currentUserId`, which a shared cache
+	// MUST NOT serve to other users. Without a cookie, the
+	// page is identical for every viewer and is safe to share.
+	// `Vary: Cookie` is the safety net for the no-cookie case
+	// in deploys behind a CDN that ignores `private`.
+	const hasSessionCookie = (request.headers.get('cookie') ?? '').includes('tdh_session=');
 	setHeaders({
-		'cache-control': 'public, max-age=300, stale-while-revalidate=300'
+		'cache-control': hasSessionCookie
+			? 'private, no-store'
+			: 'public, max-age=300, stale-while-revalidate=300',
+		vary: 'Cookie'
 	});
 
 	const gatewayBase = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
