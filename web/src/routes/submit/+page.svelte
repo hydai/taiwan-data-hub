@@ -116,6 +116,23 @@
 			<p class="text-muted-foreground mt-2">{data.message}</p>
 		</div>
 	{:else if step === 1}
+		{#if failure?.message}
+			<p
+				class="border-destructive/40 bg-destructive/10 text-destructive mb-4 rounded-md border p-3 text-sm"
+				role="alert"
+			>
+				{failure.message}
+			</p>
+		{/if}
+		<noscript>
+			<p
+				class="border-border bg-muted/40 mb-4 rounded-md border p-3 text-sm"
+				data-testid="no-js-notice"
+			>
+				The submission wizard requires JavaScript to switch between the four kinds. Enable
+				JavaScript and refresh, or contact a maintainer to file the submission directly.
+			</p>
+		</noscript>
 		<ol class="grid gap-3" data-testid="submission-kinds">
 			{#each SUBMISSION_KINDS as k (k)}
 				<li>

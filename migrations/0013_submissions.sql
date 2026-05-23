@@ -87,8 +87,16 @@ CREATE TABLE submissions (
     -- future bug could drift the two. This CHECK refuses any
     -- INSERT or UPDATE that desyncs them, so the moderation
     -- queue can trust the column without re-parsing JSONB.
+    --
+    -- `payload ? 'kind'` is required because a CHECK on
+    -- `payload ->> 'kind' = submission_kind` alone evaluates
+    -- to NULL when the key is missing, and Postgres treats a
+    -- NULL CHECK result as PASS — exactly the manual-write bug
+    -- this constraint is meant to catch. Composing the
+    -- existence check first short-circuits both halves of the
+    -- failure mode (key missing OR key present-but-mismatched).
     CONSTRAINT submissions_payload_kind_matches CHECK (
-        payload ->> 'kind' = submission_kind
+        payload ? 'kind' AND payload ->> 'kind' = submission_kind
     ),
     -- A row that carries reviewer metadata MUST be in a
     -- terminal-with-review state. Conversely a pending /
