@@ -403,8 +403,9 @@
 												<div class="flex items-center gap-2">
 													<button
 														type="submit"
-														class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700"
-														>Save</button
+														disabled={editSaving}
+														class="rounded-md bg-primary-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-50"
+														>{editSaving ? 'Saving…' : 'Save'}</button
 													>
 													<button
 														type="button"
