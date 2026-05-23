@@ -7,10 +7,12 @@
 	and soft-delete via the gateway.
 
 	Authentication state comes via the `currentUserId` prop:
-	when `null`, the form is replaced with a "please sign in"
-	prompt and edit / delete affordances are hidden. The
-	component fetches the thread itself on mount and after each
-	mutation so a logged-out reader still sees the latest state.
+	when `null`, the comment-entry form is rendered disabled
+	with a "Sign in to comment" placeholder, and the per-row
+	edit / delete / reply affordances are hidden. The
+	component fetches the thread itself on mount and after
+	each mutation so a logged-out reader still sees the
+	latest state.
 
 	All gateway calls are same-origin (`/api/v1/comments…`) so
 	the host-only session cookie is sent automatically and the
@@ -165,6 +167,11 @@
 	}
 
 	function startEditing(c: RenderedComment): void {
+		// Refuse to open a second edit while a save is still
+		// in flight — otherwise the in-flight PATCH would
+		// resolve into `cancelEditing()` and wipe the user's
+		// new draft. The button itself is gated below.
+		if (editSaving) return;
 		editingId = c.id;
 		editDraft = c.body_md ?? '';
 		editError = null;
@@ -355,7 +362,9 @@
 									<button
 										type="button"
 										onclick={() => startEditing(group.root)}
-										class="underline underline-offset-2 hover:text-neutral-700">Edit</button
+										disabled={editSaving}
+										class="underline underline-offset-2 hover:text-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+										>Edit</button
 									>
 								{/if}
 								{#if canMutate(group.root)}
@@ -429,7 +438,9 @@
 													<button
 														type="button"
 														onclick={() => startEditing(reply)}
-														class="underline underline-offset-2 hover:text-neutral-700">Edit</button
+														disabled={editSaving}
+														class="underline underline-offset-2 hover:text-neutral-700 disabled:cursor-not-allowed disabled:opacity-50"
+														>Edit</button
 													>
 												{/if}
 												{#if canMutate(reply)}
