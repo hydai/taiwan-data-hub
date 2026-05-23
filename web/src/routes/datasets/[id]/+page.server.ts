@@ -4,7 +4,15 @@ import { normaliseGatewayBase, withCookieHeader } from '$lib/account/gateway';
 import { parseBookmarkArray } from '$lib/bookmarks/types';
 import { datasetSlugToUuid } from '$lib/comments/slug-uuid.server';
 import { findDatasetBySlug } from '$lib/datasets/load';
+import { parseRatingView, type RatingView } from '$lib/ratings/types';
 import type { PageServerLoad } from './$types';
+
+/** Default view when the gateway probe fails — degrades to "no ratings yet". */
+const EMPTY_RATING_VIEW: RatingView = {
+	avg_score: null,
+	count: 0,
+	viewer_score: null
+};
 
 /**
  * Resolves the dataset record for /datasets/[id]. 404s cleanly if the
@@ -93,20 +101,47 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 		}
 	}
 
+	// Pre-paint the rating view (aggregate + viewer's own
+	// score) so the stars render with the correct fill on
+	// first byte. Anonymous traffic still sees the aggregate
+	// — the gateway endpoint is anonymous-readable. A probe
+	// failure degrades to "no ratings yet" rather than
+	// 500-ing the page.
+	let ratingView: RatingView = EMPTY_RATING_VIEW;
+	try {
+		const base = normaliseGatewayBase(env.GATEWAY_HTTP_URL);
+		const res = await fetch(`${base}/api/v1/ratings/dataset/${commentTargetId}`, {
+			method: 'GET',
+			headers: withCookieHeader(
+				new Headers({ accept: 'application/json' }),
+				request.headers.get('cookie')
+			)
+		});
+		if (res.ok) {
+			const parsed = parseRatingView(await res.json().catch(() => null));
+			if (parsed !== null) {
+				ratingView = parsed;
+			}
+		}
+	} catch (e) {
+		console.error('[/datasets/:id] rating probe failed:', e);
+	}
+
 	return {
 		dataset,
 		commentTargetId,
 		currentUserId,
 		// Mirror the layout's mode so community-facing
-		// surfaces (comments thread + HeartButton) are
-		// SSR-skipped in personal-mode deploys — the gateway
-		// doesn't mount their subrouters there, so a probe
-		// would 404 and the components would render as
-		// "Loading…" stubs that the client only hides at
-		// hydration. One flag covers both because the auth
-		// subrouter is the shared gate; if either feature
-		// ships separately in the future, split the flag.
+		// surfaces (comments thread + HeartButton + stars)
+		// are SSR-skipped in personal-mode deploys — the
+		// gateway doesn't mount their subrouters there, so
+		// a probe would 404 and the components would render
+		// as "Loading…" stubs that the client only hides at
+		// hydration. One flag covers all because the auth
+		// subrouter is the shared gate; if features ship
+		// separately in the future, split the flag.
 		communityEnabled: parentData.mode === 'multi-user',
-		bookmarked
+		bookmarked,
+		ratingView
 	};
 };

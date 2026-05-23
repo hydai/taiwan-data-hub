@@ -14,6 +14,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import HeartButton from '$lib/bookmarks/HeartButton.svelte';
+	import StarRating from '$lib/ratings/StarRating.svelte';
 	import CommentThread from '$lib/comments/CommentThread.svelte';
 	import MetaTags from '$lib/seo/MetaTags.svelte';
 	import { cn } from '$lib/utils';
@@ -103,6 +104,16 @@
 		<p class="mt-4 max-w-3xl text-base leading-relaxed text-neutral-700">
 			{dataset.description['zh-TW']}
 		</p>
+		{#if data.communityEnabled}
+			<div class="mt-3">
+				<StarRating
+					targetKind="dataset"
+					targetId={data.commentTargetId}
+					currentUserId={data.currentUserId}
+					initialView={data.ratingView}
+				/>
+			</div>
+		{/if}
 		{#if dataset.description.en}
 			<p class="mt-2 max-w-3xl text-sm text-neutral-500 italic">
 				{dataset.description.en}
