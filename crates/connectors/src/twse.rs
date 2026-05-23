@@ -191,15 +191,46 @@ impl TwseConnector {
         base: &Url,
         path: &str,
     ) -> Result<reqwest::Response, crate::ConnectorError> {
-        let origin = origin_key(base);
-        if !self.path_allowed_for_origin(&origin, path) {
-            return Err(crate::ConnectorError::Config(format!(
-                "path {path:?} disallowed by robots.txt for {origin}",
-            )));
-        }
+        // Reject anything that isn't a same-origin
+        // relative path. `Url::join` would otherwise
+        // accept an absolute URL (e.g. `https://evil/x`)
+        // or a scheme-relative URL (`//evil/x`) and
+        // silently swap the origin, bypassing BOTH the
+        // intended TWSE / MOPS restriction and the
+        // robots-prefix check. This guard makes the
+        // caller's "polite_get_twse(path)" contract
+        // honest: the request never leaves the
+        // configured host.
+        validate_relative_path(path)?;
         let url = base
             .join(path)
             .map_err(|e| crate::ConnectorError::Config(format!("invalid path {path:?}: {e}")))?;
+        // Belt + suspenders: even if `validate_relative_path`
+        // someday admits a corner case, refuse the request
+        // when `Url::join` produced a different origin than
+        // the base. `Url::origin()` returns Opaque for
+        // unusual schemes (file://, data:...), in which
+        // case origin equality is `false` for distinct
+        // values — which is the safe direction here.
+        if url.origin() != base.origin() {
+            return Err(crate::ConnectorError::Config(format!(
+                "path {path:?} resolved to a different origin than {}",
+                origin_key(base),
+            )));
+        }
+        let origin = origin_key(base);
+        // Use the PARSED url's path for the robots check —
+        // an attacker-controlled `path` could carry tricks
+        // like `/foo/../private/` that `Url::join`
+        // normalises. Checking the normalised form
+        // matches what the upstream server will actually
+        // see.
+        if !self.path_allowed_for_origin(&origin, url.path()) {
+            return Err(crate::ConnectorError::Config(format!(
+                "path {:?} disallowed by robots.txt for {origin}",
+                url.path(),
+            )));
+        }
         self.throttle.tick().await;
         let resp = self.http.get(url).send().await?;
         let status = resp.status();
@@ -213,6 +244,41 @@ impl TwseConnector {
             })
         }
     }
+}
+
+/// Reject anything that isn't a same-origin relative path.
+/// The contract for `polite_get_twse(path)` /
+/// `polite_get_mops(path)` is "path on the configured
+/// host" — an absolute URL or scheme-relative URL would
+/// let a caller silently switch origins and bypass both
+/// the host restriction and the robots check.
+///
+/// Rules:
+/// - must start with `/` (rejects empty + relative-without-slash)
+/// - must not start with `//` (scheme-relative URL)
+/// - must not contain `://` (absolute URL with scheme)
+///
+/// These three checks together cover the documented
+/// `Url::join` behaviours that would swap origins. The
+/// caller's `Url::join` + post-join origin equality
+/// check (see `polite_get`) are belt-and-suspenders.
+fn validate_relative_path(path: &str) -> Result<(), crate::ConnectorError> {
+    if !path.starts_with('/') {
+        return Err(crate::ConnectorError::Config(format!(
+            "path {path:?} must start with '/' (got a non-relative path)",
+        )));
+    }
+    if path.starts_with("//") {
+        return Err(crate::ConnectorError::Config(format!(
+            "path {path:?} must not start with '//' (scheme-relative URLs are forbidden)",
+        )));
+    }
+    if path.contains("://") {
+        return Err(crate::ConnectorError::Config(format!(
+            "path {path:?} must not contain '://' (absolute URLs are forbidden)",
+        )));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -861,6 +927,80 @@ Disallow:
         let origin = origin_key(&Url::parse(&server.uri()).unwrap());
         assert!(connector.robots_disallowed_for_origin(&origin).is_empty());
         assert!(connector.path_allowed_for_origin(&origin, "/anything"));
+    }
+
+    #[test]
+    fn validate_relative_path_accepts_canonical_paths() {
+        assert!(validate_relative_path("/exchangeReport/STOCK_DAY").is_ok());
+        assert!(validate_relative_path("/").is_ok());
+        assert!(validate_relative_path("/a/b?x=1&y=2").is_ok());
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_absolute_url() {
+        // The original vulnerability: an absolute URL
+        // would silently swap origin via `Url::join`.
+        let err = validate_relative_path("https://evil.example/x").unwrap_err();
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("://")),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_scheme_relative_url() {
+        // The second vector: `//evil/x` is scheme-
+        // relative and `Url::join` would resolve it
+        // against the BASE's scheme but the evil host.
+        let err = validate_relative_path("//evil.example/x").unwrap_err();
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("//")),
+            "got {err:?}",
+        );
+    }
+
+    #[test]
+    fn validate_relative_path_rejects_relative_without_slash() {
+        // A path without a leading slash would be
+        // resolved against the base URL's path component
+        // and become surprising. Force callers to be
+        // explicit.
+        let err = validate_relative_path("exchangeReport/STOCK_DAY").unwrap_err();
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("start with '/'")),
+            "got {err:?}",
+        );
+        assert!(validate_relative_path("").is_err());
+    }
+
+    #[tokio::test]
+    async fn polite_get_rejects_absolute_url_path() {
+        // End-to-end check on the polite_get path: even
+        // if `Url::join` parses the absolute URL, the
+        // pre-join validator catches it. Uses a wiremock
+        // server that would respond 200 if the request
+        // somehow reached it; the test asserts we never
+        // get that far.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let connector = TwseConnector::builder()
+            .twse_base_url(server.uri())
+            .mops_base_url(server.uri())
+            .throttle_ms(10)
+            .build()
+            .await
+            .unwrap();
+        let err = connector
+            .polite_get_twse("https://evil.example/x")
+            .await
+            .expect_err("absolute URL must be rejected");
+        assert!(
+            matches!(&err, crate::ConnectorError::Config(msg) if msg.contains("://")),
+            "got {err:?}",
+        );
     }
 
     #[test]
