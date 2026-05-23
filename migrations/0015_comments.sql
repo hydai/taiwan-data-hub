@@ -52,10 +52,14 @@ CREATE TABLE comments (
     CONSTRAINT comments_target_kind_known CHECK (
         target_kind IN ('dataset', 'tool', 'connector', 'playground')
     ),
-    -- Cap reply nesting. The service refuses to insert a
-    -- `parent_id` whose row already has `depth = 1`, but the
-    -- DB CHECK is the load-bearing guard against a manual
-    -- INSERT bypass.
+    -- Cap reply nesting on this column. The DB only
+    -- enforces `depth IN (0, 1)`; the "no reply to a depth-1
+    -- row" rule is enforced at the service layer
+    -- (`auth::CommentService::create`), which refuses to
+    -- insert a `parent_id` whose row already has `depth = 1`.
+    -- A row trigger could mirror that into the DB, but the
+    -- service is the only writer in production so the CHECK
+    -- here is intentionally just the column-level guard.
     CONSTRAINT comments_depth_max_two CHECK (depth IN (0, 1)),
     -- Root comments have no parent; reply comments must.
     CONSTRAINT comments_root_has_no_parent CHECK (

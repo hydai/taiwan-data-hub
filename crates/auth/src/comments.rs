@@ -329,8 +329,12 @@ fn validate_body(trimmed: &str) -> Result<(), BodyError> {
 
 fn render_row(row: CommentRow) -> RenderedComment {
     let is_deleted = row.deleted_at.is_some();
+    // Soft-deleted rows render a plain `[deleted]` paragraph;
+    // the web layer keys styling off the `is_deleted` flag
+    // rather than a backend-injected class name (Tailwind
+    // can't see server-generated selectors).
     let body_html = if is_deleted {
-        "<p class=\"comment-tombstone\">[deleted]</p>".to_owned()
+        "<p>[deleted]</p>".to_owned()
     } else {
         render_markdown(row.body_md.as_deref().unwrap_or(""))
     };

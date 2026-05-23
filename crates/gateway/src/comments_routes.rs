@@ -98,18 +98,28 @@ pub struct ListQuery {
     pub target_id: Option<String>,
 }
 
+/// Wire shape for `POST /api/v1/comments`. Every field is
+/// `Option<…>` (not bare `String`) so a body that omits one
+/// flows through the handler's structured `ApiError::Validation`
+/// path. axum's default `JsonRejection` would short-circuit
+/// with a plain-text 422 that bypasses the `{error, message}`
+/// envelope every other route here returns.
 #[derive(Debug, Deserialize)]
 pub struct CreateRequest {
-    pub target_kind: String,
-    pub target_id: String,
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
     #[serde(default)]
     pub parent_id: Option<String>,
-    pub body_md: String,
+    #[serde(default)]
+    pub body_md: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EditRequest {
-    pub body_md: String,
+    #[serde(default)]
+    pub body_md: Option<String>,
 }
 
 pub fn router(service: Arc<CommentService>) -> axum::Router {
@@ -150,20 +160,25 @@ async fn create_comment(
     Json(body): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<CommentResponse>), ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
-    let target_kind = parse_kind(&body.target_kind)?;
-    let target_id = parse_uuid("target_id", &body.target_id)?;
+    let kind_str = body
+        .target_kind
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation("target_kind is required".to_owned()))?;
+    let id_str = body
+        .target_id
+        .as_deref()
+        .ok_or_else(|| ApiError::Validation("target_id is required".to_owned()))?;
+    let body_md = body
+        .body_md
+        .ok_or_else(|| ApiError::Validation("body_md is required".to_owned()))?;
+    let target_kind = parse_kind(kind_str)?;
+    let target_id = parse_uuid("target_id", id_str)?;
     let parent_id = match body.parent_id.as_deref() {
         None | Some("") => None,
         Some(s) => Some(parse_uuid("parent_id", s)?),
     };
     let outcome = svc
-        .create(
-            session.user_id,
-            target_kind,
-            target_id,
-            parent_id,
-            body.body_md,
-        )
+        .create(session.user_id, target_kind, target_id, parent_id, body_md)
         .await
         .map_err(ApiError::from)?;
     match outcome {
@@ -187,8 +202,11 @@ async fn edit_comment(
 ) -> Result<Json<CommentResponse>, ApiError> {
     let session = session.ok_or(ApiError::Unauthenticated)?.0;
     let id = parse_uuid("comment id", &id)?;
+    let body_md = body
+        .body_md
+        .ok_or_else(|| ApiError::Validation("body_md is required".to_owned()))?;
     let outcome = svc
-        .edit(session.user_id, id, body.body_md)
+        .edit(session.user_id, id, body_md)
         .await
         .map_err(ApiError::from)?;
     match outcome {
