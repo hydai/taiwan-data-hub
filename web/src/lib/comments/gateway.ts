@@ -45,6 +45,7 @@ export function parseRenderedComment(value: unknown): RenderedComment | null {
 	if (typeof v.body_html !== 'string') return null;
 	if (typeof v.created_at !== 'string') return null;
 	if (typeof v.is_deleted !== 'boolean') return null;
+	if (typeof v.is_hidden !== 'boolean') return null;
 	// Optional fields validated only when present.
 	if (v.parent_id !== undefined && typeof v.parent_id !== 'string') return null;
 	if (v.user_id !== undefined && typeof v.user_id !== 'string') return null;
@@ -63,7 +64,8 @@ export function parseRenderedComment(value: unknown): RenderedComment | null {
 		created_at: v.created_at,
 		edited_at: v.edited_at as string | undefined,
 		deleted_at: v.deleted_at as string | undefined,
-		is_deleted: v.is_deleted
+		is_deleted: v.is_deleted,
+		is_hidden: v.is_hidden
 	};
 }
 

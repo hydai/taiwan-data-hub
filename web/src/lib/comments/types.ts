@@ -24,6 +24,14 @@ export interface RenderedComment {
 	edited_at?: string;
 	deleted_at?: string;
 	is_deleted: boolean;
+	/**
+	 * `true` when the comment has been hidden by community
+	 * reports or a moderator. `body_html` already carries
+	 * the placeholder text; the UI also branches on this
+	 * to suppress Edit / Delete / Reply / Report
+	 * affordances on hidden rows.
+	 */
+	is_hidden: boolean;
 }
 
 /** Max characters (Unicode scalar values) the API accepts. */

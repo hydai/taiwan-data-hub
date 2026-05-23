@@ -31,6 +31,7 @@
 		parseRenderedCommentArray
 	} from '$lib/comments/gateway';
 	import { MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
+	import ReportButton from '$lib/reports/ReportButton.svelte';
 
 	let {
 		targetKind,
@@ -80,7 +81,7 @@
 		// accept the request.
 		!c.is_deleted && Date.parse(c.created_at) >= Date.now() - fiveMinutes;
 	const canMutate = (c: RenderedComment): boolean =>
-		currentUserId !== null && c.user_id === currentUserId && !c.is_deleted;
+		currentUserId !== null && c.user_id === currentUserId && !c.is_deleted && !c.is_hidden;
 
 	async function loadThread(): Promise<void> {
 		thread = { state: 'loading' };
@@ -374,7 +375,7 @@
 										class="underline underline-offset-2 hover:text-neutral-700">Delete</button
 									>
 								{/if}
-								{#if currentUserId !== null && !group.root.is_deleted}
+								{#if currentUserId !== null && !group.root.is_deleted && !group.root.is_hidden}
 									<button
 										type="button"
 										onclick={() => {
@@ -384,6 +385,18 @@
 										}}
 										class="underline underline-offset-2 hover:text-neutral-700">Reply</button
 									>
+								{/if}
+								{#if currentUserId !== null && currentUserId !== group.root.user_id && !group.root.is_deleted && !group.root.is_hidden}
+									<ReportButton
+										targetKind="comment"
+										targetId={group.root.id}
+										onReported={(r) => {
+											if (r.freshly_hidden) {
+												group.root.is_hidden = true;
+												group.root.body_html = '<p>[hidden by community reports]</p>';
+											}
+										}}
+									/>
 								{/if}
 							</p>
 						{/if}
@@ -450,6 +463,18 @@
 														class="underline underline-offset-2 hover:text-neutral-700"
 														>Delete</button
 													>
+												{/if}
+												{#if currentUserId !== null && currentUserId !== reply.user_id && !reply.is_deleted && !reply.is_hidden}
+													<ReportButton
+														targetKind="comment"
+														targetId={reply.id}
+														onReported={(r) => {
+															if (r.freshly_hidden) {
+																reply.is_hidden = true;
+																reply.body_html = '<p>[hidden by community reports]</p>';
+															}
+														}}
+													/>
 												{/if}
 											</p>
 										{/if}
