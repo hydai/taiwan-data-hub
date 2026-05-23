@@ -51,6 +51,11 @@ tokio-util = { version = "0.7", default-features = false }
 # Maintained fork of dtolnay/serde_yaml (archived 2024). API-compatible; we
 # only deserialize into typed structs, so the choice of fork is contained.
 serde_yml = "0.0.12"
+# `config/sources.toml` parsing for the ETL framework (#5b.1).
+# `toml` 0.9 is the current stable line; `parse` feature is the
+# default-on minimal surface used here (no datetime, no preserve-
+# order — neither needed for our schema).
+toml = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
 url = "2"

@@ -1,0 +1,73 @@
+# ETL source registry (#5b.1).
+#
+# One section per upstream source. The ETL worker boots,
+# reads this file, and schedules one cron job per
+# `enabled = true` source via tokio-cron-scheduler.
+#
+# Disabling a source is a one-line edit (`enabled = false`)
+# + a worker restart — no rebuild required.
+#
+# `cron_utc` is a 7-field cron expression in UTC. Taiwan
+# does not observe DST so the UTC offset is fixed; pin all
+# schedules to UTC and document the local-time intent in a
+# comment next to each entry.
+#
+# `retry_max_attempts` is the total number of tries the
+# retry envelope will make (including the first) before
+# writing to etl_dlq. `retry_initial_backoff_secs` is the
+# pause before attempt 2; subsequent pauses double, capped
+# at `retry_max_backoff_secs`.
+
+[sources.data_gov_tw]
+enabled = true
+# 02:00 Asia/Taipei = 18:00 UTC the previous calendar day.
+# This is the historical schedule from #1.4c that's been
+# running in production; promoted into config-driven form
+# in this PR.
+cron_utc = "0 0 18 * * * *"
+retry_max_attempts = 3
+retry_initial_backoff_secs = 30
+retry_max_backoff_secs = 1800
+
+[sources.twse]
+# Enable when the TWSE connector lands (#5b.2). Keeping
+# the row here documents the planned schedule so PR #5b.2
+# only has to flip `enabled = true` + add the impl.
+enabled = false
+# 06:00 Asia/Taipei = 22:00 UTC. TWSE publishes the
+# previous trading day's data overnight; 06:00 TPE gives
+# a comfortable buffer for late publishes.
+cron_utc = "0 0 22 * * * *"
+retry_max_attempts = 3
+retry_initial_backoff_secs = 30
+retry_max_backoff_secs = 1800
+
+[sources.moea]
+# Enable when the MOEA Business Registry connector lands (#5b.3).
+enabled = false
+# 03:00 Asia/Taipei = 19:00 UTC. Off-peak window.
+cron_utc = "0 0 19 * * * *"
+retry_max_attempts = 3
+retry_initial_backoff_secs = 30
+retry_max_backoff_secs = 1800
+
+[sources.cwa]
+# Enable when the CWA connector lands (#5b.4). CWA is a
+# weather observation source — short-cycle data that
+# benefits from a more frequent refresh than a nightly
+# pass. Every 6 hours matches the "frequently-queried"
+# sensitivity the cache pipeline uses.
+enabled = false
+cron_utc = "0 0 0,6,12,18 * * * *"
+retry_max_attempts = 3
+retry_initial_backoff_secs = 30
+retry_max_backoff_secs = 1800
+
+[sources.fishery_moa]
+# Enable when the Fishery (MOA) connector lands (#5b.5).
+enabled = false
+# 04:00 Asia/Taipei = 20:00 UTC.
+cron_utc = "0 0 20 * * * *"
+retry_max_attempts = 3
+retry_initial_backoff_secs = 30
+retry_max_backoff_secs = 1800

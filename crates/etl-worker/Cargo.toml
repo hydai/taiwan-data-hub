@@ -20,6 +20,9 @@ connectors = { path = "../connectors" }
 storage = { path = "../storage" }
 tools-data = { path = "../tools-data" }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
 # Needed for `chrono::Utc` passed to `Job::new_async_tz` so the cron
 # schedule's timezone is explicit at the call site (not implicit in
 # `new_async`'s default).
@@ -37,11 +40,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-# `sqlx` is already a normal dep so integration tests inherit it
-# automatically; no need to repeat it here. Listing it would also
-# invite future feature-set drift between runtime and test builds.
+# `sqlx`, `serde_json`, `uuid` are already normal deps so integration
+# tests inherit them automatically; no need to repeat them here.
 async-trait = { workspace = true }
-serde_json = { workspace = true }
 testcontainers-modules = { workspace = true }
-uuid = { workspace = true }
 wiremock = { workspace = true }
