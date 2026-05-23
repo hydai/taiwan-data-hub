@@ -91,13 +91,16 @@ export const load: PageServerLoad = async ({ fetch, params, parent, request, set
 		dataset,
 		commentTargetId,
 		currentUserId,
-		// Mirror the layout's mode so the comment thread is
-		// SSR-skipped in personal-mode deploys (otherwise the
-		// section would render with "Loading comments…" until
-		// the client-side 404 detect hides it, and stay
-		// visible forever for no-JS readers). The HeartButton
-		// rides the same flag — it'd 404 in personal mode too.
-		commentsEnabled: parentData.mode === 'multi-user',
+		// Mirror the layout's mode so community-facing
+		// surfaces (comments thread + HeartButton) are
+		// SSR-skipped in personal-mode deploys — the gateway
+		// doesn't mount their subrouters there, so a probe
+		// would 404 and the components would render as
+		// "Loading…" stubs that the client only hides at
+		// hydration. One flag covers both because the auth
+		// subrouter is the shared gate; if either feature
+		// ships separately in the future, split the flag.
+		communityEnabled: parentData.mode === 'multi-user',
 		bookmarked
 	};
 };

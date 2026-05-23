@@ -80,14 +80,16 @@
 						class="border-border rounded-full border px-2 py-1 {data.kindFilter === null
 							? 'bg-muted/50'
 							: ''}"
-						href={resolve('/account/bookmarks')}>All</a
+						href={resolve('/account/bookmarks')}
+						aria-current={data.kindFilter === null ? 'page' : undefined}>All</a
 					>
 					{#each BOOKMARK_TARGET_KINDS as k (k)}
 						<a
 							class="border-border rounded-full border px-2 py-1 {data.kindFilter === k
 								? 'bg-muted/50'
 								: ''}"
-							href={resolve(`/account/bookmarks?kind=${k}`)}>{kindLabel[k]}</a
+							href={resolve(`/account/bookmarks?kind=${k}`)}
+							aria-current={data.kindFilter === k ? 'page' : undefined}>{kindLabel[k]}</a
 						>
 					{/each}
 				</nav>
@@ -163,6 +165,7 @@
 								<input type="hidden" name="id" value={c.id} />
 								<button
 									type="submit"
+									aria-label={`Delete collection ${c.name}`}
 									class="border-border hover:bg-muted/40 focus-visible:ring-ring rounded-md border px-3 py-2 text-xs font-medium focus-visible:ring-2 focus-visible:outline-none"
 									>Delete</button
 								>

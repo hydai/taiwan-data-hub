@@ -438,12 +438,30 @@ impl CollectionRepo for Storage {
         collection_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<Vec<CollectionItemRow>>, StorageError> {
-        // Ownership-scoped via a join — a non-owning caller
-        // reads zero rows and we map to `None` so the gateway
-        // can 404 instead of returning an empty list (which
-        // would conflate with "empty collection").
-        //
-        // First confirm the collection exists for this user.
+        // Ownership-scoped via a JOIN — the common
+        // "non-empty + owned" path stays a single round
+        // trip. Only the empty result needs a second probe
+        // to tell "empty collection (owned)" apart from
+        // "missing / not yours".
+        let rows = sqlx::query(
+            "SELECT ci.collection_id, ci.target_kind, ci.target_id, ci.added_at
+               FROM collection_items ci
+               JOIN collections c
+                 ON c.id = ci.collection_id
+              WHERE ci.collection_id = $1
+                AND c.user_id = $2
+              ORDER BY ci.added_at DESC",
+        )
+        .bind(collection_id)
+        .bind(user_id)
+        .fetch_all(self.pool())
+        .await?;
+        if !rows.is_empty() {
+            let parsed: Result<Vec<_>, _> =
+                rows.iter().map(CollectionItemRow::from_row).collect();
+            return Ok(Some(parsed?));
+        }
+        // Zero rows: re-probe the ownership-only state.
         let owns: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM collections WHERE id = $1 AND user_id = $2")
                 .bind(collection_id)
@@ -451,19 +469,10 @@ impl CollectionRepo for Storage {
                 .fetch_one(self.pool())
                 .await?;
         if owns.0 == 0 {
-            return Ok(None);
+            Ok(None)
+        } else {
+            Ok(Some(Vec::new()))
         }
-        let rows = sqlx::query(
-            "SELECT collection_id, target_kind, target_id, added_at
-               FROM collection_items
-              WHERE collection_id = $1
-              ORDER BY added_at DESC",
-        )
-        .bind(collection_id)
-        .fetch_all(self.pool())
-        .await?;
-        let parsed: Result<Vec<_>, _> = rows.iter().map(CollectionItemRow::from_row).collect();
-        Ok(Some(parsed?))
     }
 
     async fn add_item(

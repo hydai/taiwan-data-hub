@@ -86,7 +86,7 @@
 			<h1 class="flex-1 text-3xl font-bold tracking-tight text-neutral-900">
 				{dataset.name['zh-TW']}
 			</h1>
-			{#if data.commentsEnabled}
+			{#if data.communityEnabled}
 				<HeartButton
 					targetKind="dataset"
 					targetId={data.commentTargetId}
@@ -174,7 +174,7 @@
 		</ul>
 	</section>
 
-	{#if data.commentsEnabled}
+	{#if data.communityEnabled}
 		<CommentThread
 			targetKind="dataset"
 			targetId={data.commentTargetId}
