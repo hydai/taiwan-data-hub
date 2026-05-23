@@ -32,7 +32,14 @@
 	let step = $state<1 | 2 | 3>(1);
 	let kind = $state<SubmissionKind | null>(null);
 
-	const values = $derived<Record<string, string>>(failure?.values ?? {});
+	// Replay the snapshot only when the failure corresponds to
+	// the currently-selected kind. Without the kind-match guard
+	// a "change type" click would prefill overlapping fields
+	// (description, repo_url, …) from the prior kind's snapshot,
+	// which contradicts the "fresh form on type change" intent.
+	const values = $derived<Record<string, string>>(
+		failure?.kind === kind ? (failure?.values ?? {}) : {}
+	);
 
 	// Sync local step + kind with the action return so a failed
 	// submit lands back on step 2 with the user's prior input,
