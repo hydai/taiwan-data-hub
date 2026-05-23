@@ -29,6 +29,24 @@ import type { PageServerLoad } from './$types';
  * those to the gateway. The page does NOT leak the internal
  * `GATEWAY_HTTP_URL` to the client.
  */
+/**
+ * Strict cookie-presence check that survives values containing
+ * the cookie's name as a substring (e.g.
+ * `wat_tdh_session=hi`). Splits on `;`, trims each pair, and
+ * matches the exact name before `=`. Mirrors the logic in
+ * `$lib/account/gateway::extractCookie`.
+ */
+function cookieHeaderHas(cookieHeader: string | null, name: string): boolean {
+	if (cookieHeader === null) return false;
+	for (const pair of cookieHeader.split(';')) {
+		const trimmed = pair.trim();
+		const eq = trimmed.indexOf('=');
+		if (eq <= 0) continue;
+		if (trimmed.substring(0, eq) === name) return true;
+	}
+	return false;
+}
+
 export const load: PageServerLoad = async ({ fetch, params, request, setHeaders }) => {
 	const dataset = findDatasetBySlug(params.id);
 	if (!dataset) {
@@ -42,7 +60,7 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	// `Vary: Cookie` only fires in the per-user branch so the
 	// anonymous response keeps a wide hit rate (CDNs that key
 	// on every `Vary` header don't shred on unrelated cookies).
-	const hasSessionCookie = (request.headers.get('cookie') ?? '').includes('tdh_session=');
+	const hasSessionCookie = cookieHeaderHas(request.headers.get('cookie'), 'tdh_session');
 	if (hasSessionCookie) {
 		// Per-user response: must not be shared across viewers,
 		// and the CDN must key on the cookie if any layer

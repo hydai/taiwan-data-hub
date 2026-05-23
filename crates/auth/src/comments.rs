@@ -118,6 +118,13 @@ impl CommentService {
     /// rows are in `created_at ASC` order; the web layer
     /// builds the parent → reply tree by walking
     /// `parent_id`.
+    ///
+    /// Markdown rendering (comrak + ammonia) is CPU-bound, so
+    /// the whole batch runs inside a single
+    /// [`tokio::task::spawn_blocking`] to keep async worker
+    /// threads free under load. The list endpoint is public
+    /// and can be hit repeatedly; per-row inline rendering
+    /// would stall the runtime on a hot thread.
     pub async fn list_for_target(
         &self,
         target_kind: CommentTargetKind,
@@ -127,7 +134,17 @@ impl CommentService {
             .comments
             .list_for_target(target_kind, target_id)
             .await?;
-        Ok(rows.into_iter().map(render_row).collect())
+        let rendered = tokio::task::spawn_blocking(move || {
+            rows.into_iter().map(render_row).collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| {
+            // `JoinError` only fires if the blocking task
+            // panicked or the runtime is shutting down —
+            // either is a programmer bug, not user input.
+            AuthError::Internal(format!("comment-render task failed: {e}"))
+        })?;
+        Ok(rendered)
     }
 
     /// Create a new comment. `parent_id` is `Some` for a reply
