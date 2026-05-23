@@ -70,6 +70,10 @@
 	// derive the wrapper label so screen readers announce
 	// the right noun rather than always saying "dataset".
 	const groupLabel = $derived(`Rate this ${targetKind}`);
+	// Generate the star indices from the shared score
+	// constants so a future range tweak (e.g. extend to
+	// SCORE_MAX = 10) only needs to touch one place.
+	const stars = Array.from({ length: SCORE_MAX - SCORE_MIN + 1 }, (_, i) => SCORE_MIN + i);
 
 	function clamp(n: number): number {
 		return Math.max(SCORE_MIN, Math.min(SCORE_MAX, Math.round(n)));
@@ -198,7 +202,7 @@
 		screen readers (Chrome + JAWS / NVDA tested).
 	-->
 	<div role="group" aria-label={groupLabel} class="inline-flex items-center">
-		{#each [1, 2, 3, 4, 5] as star (star)}
+		{#each stars as star (star)}
 			{@const filled = star <= displayScore}
 			<button
 				type="button"
