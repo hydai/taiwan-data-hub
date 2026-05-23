@@ -63,8 +63,26 @@ where
     S: FnMut(Duration) -> SleepFut,
     SleepFut: std::future::Future<Output = ()>,
 {
+    // Defensive clamp: the sources.toml loader already
+    // rejects `max_attempts == 0`, but a hand-built
+    // `RetryConfig` (tests, future callers) could pass 0
+    // here and produce surprising outcomes — the loop
+    // would still call `op` once but the post-call
+    // `attempt >= max_attempts` check would short-circuit
+    // immediately, violating the "total tries including
+    // first" contract. Clamping to ≥ 1 keeps the API
+    // self-consistent regardless of caller.
+    let max_attempts = cfg.max_attempts.max(1);
     let mut attempt: u32 = 0;
-    let mut delay = cfg.initial_backoff;
+    // Clamp the initial delay to `max_backoff` for the
+    // same reason as the `max_attempts.max(1)` clamp
+    // above: the sources.toml loader rejects
+    // `initial_backoff > max_backoff` (via
+    // `BackoffOutOfOrder`), but a hand-built RetryConfig
+    // could pass it. Without this clamp the first sleep
+    // would exceed the documented "double until
+    // max_backoff" cap, violating the API contract.
+    let mut delay = cfg.initial_backoff.min(cfg.max_backoff);
     loop {
         attempt = attempt.saturating_add(1);
         match op().await {
@@ -75,21 +93,37 @@ where
                     attempts: attempt,
                 };
             }
-            Err(e) if attempt >= cfg.max_attempts => {
+            Err(e) if attempt >= max_attempts => {
                 return RetryOutcome::Err {
                     error: e,
                     attempts: attempt,
                 };
             }
             Err(e) => {
+                // `log_friendly` bounds the message size —
+                // `ConnectorError::BadStatus`'s Display
+                // includes the full upstream body, which
+                // would flood the log stream when an
+                // unhealthy upstream returns megabytes.
                 tracing::warn!(
                     attempt,
                     backoff_secs = delay.as_secs(),
-                    error = %e,
+                    error_kind = dlq_error_kind(&e),
+                    error = %log_friendly(&e),
                     "retriable error; backing off",
                 );
                 sleep(delay).await;
-                delay = (delay * 2).min(cfg.max_backoff);
+                // `Duration` multiplication panics on
+                // overflow. The sources.toml loader caps
+                // `retry_*_backoff_secs` at MAX_BACKOFF_SECS
+                // so this can't fire in production, but a
+                // hand-built `RetryConfig` (tests, future
+                // callers) could pass a huge `max_backoff`.
+                // `checked_mul` + fallback to `max_backoff`
+                // makes the doubling saturating.
+                delay = delay
+                    .checked_mul(2)
+                    .map_or(cfg.max_backoff, |d| d.min(cfg.max_backoff));
             }
         }
     }
@@ -124,6 +158,29 @@ pub fn dlq_error_kind(err: &ConnectorError) -> &'static str {
         ConnectorError::Config(_) => "config",
         ConnectorError::InvalidCursor { .. } => "invalid_cursor",
         ConnectorError::Unsupported(_) => "unsupported",
+    }
+}
+
+/// Bounded log-friendly form of a [`ConnectorError`].
+///
+/// `ConnectorError::BadStatus`'s `Display` impl is
+/// `HTTP {status}: {body}` and `body` is the full
+/// upstream response — multi-MB for an unhealthy
+/// upstream. Logging that on every retry attempt or on
+/// every terminal failure floods the log stream. This
+/// helper collapses `BadStatus` to `HTTP {status}` so
+/// the structured log carries just the status code; the
+/// full body is preserved in the DLQ row's `payload`
+/// where it's already capped at
+/// `DLQ_PAYLOAD_BODY_CHAR_LIMIT`.
+///
+/// Other variants pass through verbatim — their Display
+/// impls don't carry external payloads.
+#[must_use]
+pub fn log_friendly(err: &ConnectorError) -> String {
+    match err {
+        ConnectorError::BadStatus { status, .. } => format!("HTTP {status}"),
+        other => format!("{other}"),
     }
 }
 
@@ -281,6 +338,115 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
+    #[tokio::test]
+    async fn initial_backoff_above_max_backoff_clamped_at_start() {
+        // Defensive bar against hand-built RetryConfigs:
+        // even when `initial_backoff > max_backoff`, the
+        // first sleep must honour the cap.
+        let cfg = RetryConfig {
+            max_attempts: 2,
+            initial_backoff: Duration::from_secs(1000),
+            max_backoff: Duration::from_millis(50),
+        };
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let outcome = with_retry(
+            cfg,
+            || async {
+                Err::<(), _>(ConnectorError::BadStatus {
+                    status: 503,
+                    body: String::new(),
+                })
+            },
+            record_sleeps(sleeps.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Err { attempts: 2, .. }));
+        let durations = sleeps.take();
+        assert_eq!(durations, vec![Duration::from_millis(50)]);
+    }
+
+    #[tokio::test]
+    async fn backoff_doubling_saturates_on_duration_overflow() {
+        // `Duration::checked_mul(2)` returns None when the
+        // result can't be represented. The envelope must
+        // fall back to `max_backoff` instead of panicking.
+        // Use a max_backoff just above the Duration::MAX/2
+        // boundary so doubling overflows but the initial
+        // clamp (initial.min(max_backoff)) is a no-op.
+        // `checked_sub` keeps clippy's
+        // `unchecked-time-subtraction` lint happy.
+        let huge = Duration::MAX
+            .checked_sub(Duration::from_secs(1))
+            .expect("Duration::MAX - 1s is representable");
+        let cfg = RetryConfig {
+            max_attempts: 3,
+            initial_backoff: huge,
+            max_backoff: huge,
+        };
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let outcome = with_retry(
+            cfg,
+            || async {
+                Err::<(), _>(ConnectorError::BadStatus {
+                    status: 503,
+                    body: String::new(),
+                })
+            },
+            // Don't actually sleep — record the requested
+            // duration and return.
+            {
+                let into = sleeps.clone();
+                move |d| {
+                    let mut v = into.take();
+                    v.push(d);
+                    into.set(v);
+                    std::future::ready(())
+                }
+            },
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Err { attempts: 3, .. }));
+        // First sleep = initial (= max_backoff). Second
+        // sleep: 2 * huge overflows, `checked_mul` fails,
+        // fallback path returns `max_backoff` (= huge).
+        let durations = sleeps.take();
+        assert_eq!(durations, vec![huge, huge]);
+    }
+
+    #[tokio::test]
+    async fn zero_max_attempts_is_clamped_to_one() {
+        // Defensive bar: the loader rejects 0, but a
+        // hand-built RetryConfig could pass it. The
+        // envelope must still honour "at least one
+        // attempt" — call op once, return with
+        // attempts=1 (not 0), no extra sleep.
+        let cfg = RetryConfig {
+            max_attempts: 0,
+            initial_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(100),
+        };
+        let calls = Rc::new(Cell::new(0u32));
+        let sleeps = Rc::new(Cell::new(Vec::new()));
+        let outcome = with_retry(
+            cfg,
+            || {
+                let c = calls.clone();
+                async move {
+                    c.set(c.get() + 1);
+                    Err::<(), _>(ConnectorError::BadStatus {
+                        status: 500,
+                        body: String::new(),
+                    })
+                }
+            },
+            record_sleeps(sleeps.clone()),
+        )
+        .await;
+        assert!(matches!(outcome, RetryOutcome::Err { attempts: 1, .. }));
+        assert_eq!(calls.get(), 1);
+        assert!(sleeps.take().is_empty());
+    }
+
     #[test]
     fn classifier_treats_429_and_5xx_as_retriable() {
         assert!(is_retriable(&ConnectorError::BadStatus {
@@ -314,6 +480,28 @@ mod tests {
             reason: "x".into(),
         }));
         assert!(!is_retriable(&ConnectorError::Unsupported("x")));
+    }
+
+    #[test]
+    fn log_friendly_drops_bad_status_body() {
+        // BadStatus Display is `HTTP {status}: {body}`,
+        // but we don't want the body in logs — the cap
+        // on DLQ rows would be moot if the same string
+        // landed in `tracing` instead.
+        let huge_body = "x".repeat(100_000);
+        let s = log_friendly(&ConnectorError::BadStatus {
+            status: 502,
+            body: huge_body,
+        });
+        assert_eq!(s, "HTTP 502");
+    }
+
+    #[test]
+    fn log_friendly_passes_other_variants_through() {
+        // Other variants' Display impls don't carry
+        // external payloads — pass through verbatim.
+        let s = log_friendly(&ConnectorError::Decode("bad shape".into()));
+        assert!(s.contains("bad shape"), "got {s:?}");
     }
 
     #[test]

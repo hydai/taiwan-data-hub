@@ -16,7 +16,16 @@ use crate::{Storage, StorageError};
 
 /// Normalised `ConnectorError` category so SQL filters
 /// can target a failure mode without parsing the message.
-/// Mirrors the variant names in `connectors::ConnectorError`.
+///
+/// The first six variants mirror `connectors::ConnectorError`
+/// one-for-one (the worker's retry classifier produces them
+/// via `dlq_error_kind`). `Other` is a writer-side bucket
+/// for cases the classifier doesn't otherwise cover —
+/// extending the enum still requires lockstep updates in
+/// the CHECK constraint AND `from_wire`, so any value
+/// reaching `from_wire` that doesn't match a variant is a
+/// CHECK-drift bug (handled as `StorageError::Decode`,
+/// loud rather than silent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DlqErrorKind {
     Transport,
@@ -61,7 +70,12 @@ impl DlqErrorKind {
 pub struct NewDlqEntry {
     /// `datasets.source` token — `data_gov_tw`, `twse`, etc.
     pub source: String,
-    /// Operation that failed — `list_datasets`, `fetch_metadata`, …
+    /// Coarse operation tag identifying the unit of work
+    /// that failed. The worker writes `crawl_pass` today
+    /// (wrapping the whole `run_one_pass`); future per-
+    /// dataset envelopes (`fetch_metadata` / `fetch_data`)
+    /// will pick their own tags. Free-form by design —
+    /// adding a new tag doesn't require a schema migration.
     pub job_kind: String,
     /// How many tries the envelope made (≥ 1).
     pub attempts: i32,
@@ -91,12 +105,24 @@ pub trait EtlDlqRepo: Send + Sync {
     /// Insert one terminal-failure row.
     async fn insert(&self, new: NewDlqEntry) -> Result<DlqRow, StorageError>;
 
-    /// List open (unresolved) DLQ rows, newest first. Used
-    /// by the operator dashboard. `limit` caps the page;
-    /// callers paginate via repeated calls with the
-    /// previous page's last `id` (cursor).
-    async fn list_open(&self, after: Option<Uuid>, limit: i64)
-    -> Result<Vec<DlqRow>, StorageError>;
+    /// List open (unresolved) DLQ rows, newest first.
+    /// Used by the operator dashboard. `limit` caps the
+    /// page; callers paginate via repeated calls with the
+    /// previous page's last `id` as `before`.
+    ///
+    /// Parameter is named `before` (not `after`) because
+    /// the query is `id < $before ORDER BY id DESC` —
+    /// each call returns rows OLDER than the cursor. This
+    /// deliberately contrasts with `ReportRepo::list_open`,
+    /// which uses `after` for an ASC walk; keeping the
+    /// parameter names aligned with the actual direction
+    /// prevents a caller from accidentally composing the
+    /// two cursors backwards.
+    async fn list_open(
+        &self,
+        before: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<DlqRow>, StorageError>;
 }
 
 #[async_trait]
@@ -150,7 +176,7 @@ impl EtlDlqRepo for Storage {
 
     async fn list_open(
         &self,
-        after: Option<Uuid>,
+        before: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<DlqRow>, StorageError> {
         // Newest-first stable cursor via id DESC.
@@ -178,7 +204,7 @@ impl EtlDlqRepo for Storage {
               ORDER BY id DESC
               LIMIT $2",
         )
-        .bind(after)
+        .bind(before)
         .bind(limit)
         .fetch_all(self.pool())
         .await?;
@@ -204,5 +230,124 @@ impl EtlDlqRepo for Storage {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers_modules::postgres::Postgres as PgContainer;
+    use testcontainers_modules::testcontainers::ContainerAsync;
+    use testcontainers_modules::testcontainers::ImageExt;
+    use testcontainers_modules::testcontainers::runners::AsyncRunner;
+
+    /// Spin up a Postgres container, run every migration, and
+    /// return a [`Storage`] pointed at it. Mirrors the helper
+    /// in `comment_repo::tests` / `dataset_repo::tests`.
+    async fn fresh_storage() -> (Storage, ContainerAsync<PgContainer>) {
+        let container = PgContainer::default()
+            .with_tag("18-alpine")
+            .start()
+            .await
+            .expect("start postgres container");
+        let host = container.get_host().await.expect("host");
+        let port = container.get_host_port_ipv4(5432).await.expect("port");
+        let url = format!("postgres://postgres:postgres@{host}:{port}/postgres");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect");
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        (Storage::from_pool(pool), container)
+    }
+
+    fn sample_entry(source: &str, error_kind: DlqErrorKind) -> NewDlqEntry {
+        NewDlqEntry {
+            source: source.into(),
+            job_kind: "crawl_pass".into(),
+            attempts: 3,
+            error_kind,
+            error_message: "upstream returned 503".into(),
+            payload: Some(serde_json::json!({ "status": 503 })),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn insert_then_list_roundtrips() {
+        let (storage, _c) = fresh_storage().await;
+        let inserted = storage
+            .insert(sample_entry("data_gov_tw", DlqErrorKind::BadStatus))
+            .await
+            .expect("insert");
+        assert_eq!(inserted.source, "data_gov_tw");
+        assert_eq!(inserted.job_kind, "crawl_pass");
+        assert_eq!(inserted.attempts, 3);
+        assert_eq!(inserted.error_kind, DlqErrorKind::BadStatus);
+        assert!(inserted.resolved_at.is_none());
+        let listed = storage.list_open(None, 10).await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, inserted.id);
+        assert_eq!(listed[0].error_kind, DlqErrorKind::BadStatus);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn list_open_paginates_newest_first_via_before_cursor() {
+        let (storage, _c) = fresh_storage().await;
+        // Insert three rows in order; UUIDv7 ids are strictly
+        // time-ordered so `id DESC` ≡ insertion-DESC.
+        let a = storage
+            .insert(sample_entry("data_gov_tw", DlqErrorKind::BadStatus))
+            .await
+            .unwrap();
+        let b = storage
+            .insert(sample_entry("twse", DlqErrorKind::Transport))
+            .await
+            .unwrap();
+        let c = storage
+            .insert(sample_entry("moea", DlqErrorKind::Decode))
+            .await
+            .unwrap();
+        // Page 1: newest first, no cursor.
+        let page1 = storage.list_open(None, 2).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, c.id, "newest first");
+        assert_eq!(page1[1].id, b.id);
+        // Page 2: cursor is the last id on page 1. Should
+        // return the older row.
+        let page2 = storage.list_open(Some(page1[1].id), 2).await.unwrap();
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].id, a.id, "older than cursor");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn list_open_skips_resolved_rows() {
+        let (storage, _c) = fresh_storage().await;
+        let open = storage
+            .insert(sample_entry("data_gov_tw", DlqErrorKind::BadStatus))
+            .await
+            .unwrap();
+        let to_resolve = storage
+            .insert(sample_entry("twse", DlqErrorKind::Transport))
+            .await
+            .unwrap();
+        // Mark one row resolved by hand (the resolve UI lands
+        // in a later milestone; this exercises the partial
+        // index's predicate).
+        sqlx::query("UPDATE etl_dlq SET resolved_at = now() WHERE id = $1")
+            .bind(to_resolve.id)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let listed = storage.list_open(None, 10).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, open.id);
     }
 }

@@ -257,9 +257,14 @@ pub trait SourceConnector: Send + Sync + 'static {
     ) -> Result<ListResponse, ConnectorError>;
 
     /// Fetch the **full metadata** for one dataset, by its
-    /// upstream id. Useful when [`Self::list_datasets`] returns
-    /// summary records and a detail call is needed to populate
-    /// fields the list endpoint omits.
+    /// upstream id (`dataset_id` — the per-dataset
+    /// identifier returned in [`DatasetMetadata::source_id`],
+    /// not to be confused with the trait's
+    /// [`Self::source_id`] method, which returns the
+    /// per-connector [`SourceId`] enum). Useful when
+    /// [`Self::list_datasets`] returns summary records and
+    /// a detail call is needed to populate fields the list
+    /// endpoint omits.
     ///
     /// The default returns
     /// [`ConnectorError::Unsupported`] so a connector whose
@@ -268,16 +273,20 @@ pub trait SourceConnector: Send + Sync + 'static {
     /// [`Self::supports_incremental`] (or the connector-specific
     /// capability check) so the default stays unreachable at
     /// runtime.
-    async fn fetch_metadata(&self, source_id: &str) -> Result<DatasetMetadata, ConnectorError> {
-        let _ = source_id;
+    async fn fetch_metadata(&self, dataset_id: &str) -> Result<DatasetMetadata, ConnectorError> {
+        let _ = dataset_id;
         Err(ConnectorError::Unsupported(
             "fetch_metadata not implemented for this connector",
         ))
     }
 
     /// Fetch the **data payload** (file body) for one dataset.
-    /// `cues` lets the connector send conditional headers so an
-    /// unchanged file can short-circuit to a small 304.
+    /// `dataset_id` is the same per-dataset identifier
+    /// [`Self::fetch_metadata`] takes (NOT the connector's
+    /// [`SourceId`] — see that method's doc for the
+    /// distinction). `cues` lets the connector send
+    /// conditional headers so an unchanged file can
+    /// short-circuit to a small 304.
     ///
     /// Defaults to [`ConnectorError::Unsupported`] for the same
     /// reason as [`Self::fetch_metadata`]: not every connector
@@ -285,10 +294,10 @@ pub trait SourceConnector: Send + Sync + 'static {
     /// shouldn't carry a stub impl.
     async fn fetch_data(
         &self,
-        source_id: &str,
+        dataset_id: &str,
         cues: &ConditionalCues,
     ) -> Result<DataPayload, ConnectorError> {
-        let _ = (source_id, cues);
+        let _ = (dataset_id, cues);
         Err(ConnectorError::Unsupported(
             "fetch_data not implemented for this connector",
         ))

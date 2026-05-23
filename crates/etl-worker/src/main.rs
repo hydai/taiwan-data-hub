@@ -43,7 +43,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cache_pipeline::{CacheTickConfig, run_cache_tick};
 use crate::driver::{CrawlError, run_one_pass};
-use crate::retry::{RetryConfig, RetryOutcome, dlq_error_kind, with_retry};
+use crate::retry::{RetryConfig, RetryOutcome, dlq_error_kind, log_friendly, with_retry};
 use crate::sources::SourceConfig;
 
 /// #3.6 hot-cache pipeline tick: every 6 hours at the top of the
@@ -53,6 +53,26 @@ use crate::sources::SourceConfig;
 const CACHE_TICK_CRON: &str = "0 0 0,6,12,18 * * * *";
 
 const DEFAULT_SOURCES_PATH: &str = "config/sources.toml";
+
+/// Prefix cap for the `etl_dlq.error_message` column.
+/// Counts Unicode scalars, not UTF-16 code units, so a
+/// CJK upstream that returns 2000 zh-TW characters lands
+/// at exactly 2000 scalars (≈ 6000 bytes), not somewhere
+/// mid-codepoint. Chosen to fit a typical upstream error
+/// page's first paragraph without bloating the DLQ table
+/// if the upstream returns megabytes. When truncation
+/// fires, the stored value carries an extra
+/// `…[truncated]` marker beyond this cap so an operator
+/// can tell the row hit the limit — see
+/// [`truncate_scalars`] for the exact post-marker shape.
+const DLQ_MESSAGE_CHAR_LIMIT: usize = 2000;
+
+/// Same prefix-cap semantics as
+/// `DLQ_MESSAGE_CHAR_LIMIT`, applied to the
+/// `BadStatus.body` excerpt stored in the DLQ payload —
+/// smaller cap because the payload is best-effort
+/// context, not the primary diagnostic.
+const DLQ_PAYLOAD_BODY_CHAR_LIMIT: usize = 1000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -89,20 +109,32 @@ async fn main() -> Result<()> {
         .await
         .context("could not start cron scheduler")?;
 
-    // Build each enabled connector + register its cron job. A
-    // source that's enabled in the TOML but unimplemented in
-    // `build_connector_for` fails boot — much louder than a
-    // silently-skipped crawl.
+    // Build each enabled connector ONCE and reuse the same
+    // `Arc<dyn SourceConnector>` for cron registration AND any
+    // startup pass. A source that's enabled in the TOML but
+    // unimplemented in `build_connector_for` fails boot — much
+    // louder than a silently-skipped crawl.
+    let mut built: Vec<(SourceConfig, Arc<dyn SourceConnector>)> =
+        Vec::with_capacity(configs.len());
     for cfg in &configs {
-        let connector = build_connector_for(cfg.source_id)?;
-        register_source_job(&mut scheduler, *cfg, connector, storage.clone()).await?;
+        let connector = build_connector_for(cfg.source_id, &sources_path)?;
+        built.push((cfg.clone(), connector));
+    }
+    for (cfg, connector) in &built {
+        register_source_job(
+            &mut scheduler,
+            cfg.clone(),
+            connector.clone(),
+            storage.clone(),
+        )
+        .await?;
     }
 
     if run_at_startup()? {
         tracing::info!("ETL_RUN_AT_STARTUP=true; running one immediate pass per source");
-        for cfg in &configs {
-            let connector = build_connector_for(cfg.source_id)?;
-            crawl_with_retry_and_dlq(connector, storage.clone(), cfg.retry, cfg.source_id).await;
+        for (cfg, connector) in &built {
+            crawl_with_retry_and_dlq(connector.clone(), storage.clone(), cfg.retry, cfg.source_id)
+                .await;
         }
     }
 
@@ -153,8 +185,13 @@ async fn main() -> Result<()> {
 
 /// Construct the connector for one [`SourceId`]. Adding a new
 /// connector is: implement the trait in `crates/connectors`, add
-/// a case here, and flip `enabled = true` in `config/sources.toml`.
-fn build_connector_for(id: SourceId) -> Result<Arc<dyn SourceConnector>> {
+/// a case here, and flip `enabled = true` in the sources config
+/// (default `config/sources.toml`, overridable via
+/// `SOURCES_CONFIG_PATH`). `sources_path` is threaded through
+/// so the unimplemented-source error names the file the
+/// operator actually loaded, not a default that might not
+/// apply to their deploy.
+fn build_connector_for(id: SourceId, sources_path: &str) -> Result<Arc<dyn SourceConnector>> {
     match id {
         SourceId::DataGovTw => {
             let c = build_data_gov_tw_connector()?;
@@ -167,11 +204,11 @@ fn build_connector_for(id: SourceId) -> Result<Arc<dyn SourceConnector>> {
             // skipped crawl.
             anyhow::bail!(
                 "{id} connector is not yet implemented (see #5b.2–#5b.5); \
-                 set sources.{id}.enabled = false in config/sources.toml"
+                 set sources.{id}.enabled = false in {sources_path}"
             )
         }
         SourceId::UserContrib => {
-            anyhow::bail!("user_contrib is not ETL-driven; remove it from sources.toml")
+            anyhow::bail!("user_contrib is not ETL-driven; remove it from {sources_path}")
         }
     }
 }
@@ -186,23 +223,35 @@ async fn register_source_job(
     connector: Arc<dyn SourceConnector>,
     storage: Storage,
 ) -> Result<()> {
-    let job = Job::new_async_tz(cfg.cron_utc, Utc, move |_uuid, _l| {
+    // Snapshot the small Copy fields for the post-
+    // registration log (the closure consumes `cfg`).
+    let source_id = cfg.source_id;
+    let retry = cfg.retry;
+    let cron_utc_for_log = cfg.cron_utc.clone();
+    let job = Job::new_async_tz(cfg.cron_utc.as_str(), Utc, move |_uuid, _l| {
         let storage = storage.clone();
         let connector = connector.clone();
         Box::pin(async move {
-            tracing::info!(source = %cfg.source_id, "cron tick: starting crawl");
-            crawl_with_retry_and_dlq(connector, storage, cfg.retry, cfg.source_id).await;
+            tracing::info!(source = %source_id, "cron tick: starting crawl");
+            crawl_with_retry_and_dlq(connector, storage, retry, source_id).await;
         })
     })
-    .with_context(|| format!("failed to construct cron job for {}", cfg.source_id))?;
+    // Include `cron_utc` in the error context so an
+    // operator sees the offending expression immediately
+    // — the loader deliberately doesn't pre-validate cron
+    // syntax (scheduler is the authority), so this is
+    // the first surface where a typo lands.
+    .with_context(|| {
+        format!("failed to construct cron job for {source_id} (cron_utc = {cron_utc_for_log:?})")
+    })?;
     scheduler
         .add(job)
         .await
-        .with_context(|| format!("failed to register cron job for {}", cfg.source_id))?;
+        .with_context(|| format!("failed to register cron job for {source_id}"))?;
     tracing::info!(
-        source = %cfg.source_id,
-        cron_utc = cfg.cron_utc,
-        retry_max_attempts = cfg.retry.max_attempts,
+        source = %source_id,
+        cron_utc = %cron_utc_for_log,
+        retry_max_attempts = retry.max_attempts,
         "ETL source scheduled",
     );
     Ok(())
@@ -246,25 +295,145 @@ async fn crawl_with_retry_and_dlq(
     )
     .await;
     if let RetryOutcome::Err { error, attempts } = outcome {
+        // Log the bounded form — `ConnectorError::BadStatus`'s
+        // Display carries the full upstream body, which is the
+        // same risk we already capped for the DLQ row. Keep the
+        // log line and the DLQ row symmetric on size.
         tracing::error!(
             source = %source_id,
             attempts,
-            error = %error,
+            error_kind = dlq_error_kind(&error),
+            error = %log_friendly(&error),
             "crawl pass failed after retries; writing to etl_dlq",
         );
-        let error_kind =
-            DlqErrorKind::from_wire(dlq_error_kind(&error)).unwrap_or(DlqErrorKind::Other);
+        let error_kind = connector_error_to_dlq_kind(&error);
+        // `crawl_pass` reflects the actual unit of work
+        // (the whole `run_one_pass` — drain pagination,
+        // domain-resolve each dataset, upsert into PG)
+        // rather than naming a single phase like
+        // `list_datasets`. As future ETL surfaces grow
+        // their own retry envelopes (per-dataset
+        // `fetch_data`, ETag refresh, etc.), each picks
+        // its own `job_kind` so the DLQ filters target a
+        // specific failure mode.
+        //
+        // `error_message`'s prefix is capped at
+        // `DLQ_MESSAGE_CHAR_LIMIT` (Unicode scalars, not
+        // UTF-16 code units) — when truncation fires the
+        // stored value carries an extra `…[truncated]`
+        // marker so an operator can tell the row hit the
+        // cap. The full upstream payload (status code +
+        // body excerpt) lives in `payload` for the
+        // `BadStatus` variant; other variants put `None`
+        // there since their `Display` impl already
+        // carries the diagnostic.
+        let (error_message, payload) = build_dlq_message_and_payload(&error);
+        // `attempts` is a `u32` from the envelope, but the
+        // loader caps `retry_max_attempts` at 1000 (way
+        // below `i32::MAX`), so this conversion is
+        // infallible. `expect` makes the invariant
+        // explicit — if it ever fires, the cap drifted
+        // and the operator's misconfig has reached this
+        // code path.
         let entry = NewDlqEntry {
             source: source_id.as_str().to_string(),
-            job_kind: "list_datasets".to_string(),
-            attempts: i32::try_from(attempts).unwrap_or(i32::MAX),
+            job_kind: "crawl_pass".to_string(),
+            attempts: i32::try_from(attempts)
+                .expect("attempts ≤ MAX_RETRY_ATTEMPTS (boundary-validated)"),
             error_kind,
-            error_message: format!("{error}"),
-            payload: Some(json!({})),
+            error_message,
+            payload,
         };
         if let Err(e) = EtlDlqRepo::insert(&storage, entry).await {
             tracing::error!(error = %e, "could not write DLQ row");
         }
+    }
+}
+
+/// Truncate `s` so the **prefix** carries at most
+/// `limit` Unicode scalars. When truncation fires, an
+/// ellipsis marker (`…[truncated]`) is appended to the
+/// prefix so an operator reading the DLQ can tell the
+/// row hit the cap — meaning the returned string is at
+/// most `limit + len("…[truncated]")` scalars when
+/// truncated, and exactly `s` (≤ `limit` scalars)
+/// otherwise. Unicode-scalar counting matches the M5a
+/// comment-body cap so CJK text doesn't surprise an
+/// operator who configured the limit in zh-TW
+/// characters.
+///
+/// Single-pass: walks the iterator up to `limit + 1`
+/// chars, no more. A naive `chars().count() <= limit` check
+/// would scan the whole input before deciding whether to
+/// truncate — defeating the cap's purpose when an upstream
+/// returns megabytes. Here the work is bounded by `limit`
+/// regardless of input size.
+fn truncate_scalars(s: &str, limit: usize) -> String {
+    let mut iter = s.chars();
+    let mut out = String::new();
+    for _ in 0..limit {
+        match iter.next() {
+            Some(c) => out.push(c),
+            // String was ≤ limit chars; return what we
+            // accumulated, no marker needed.
+            None => return out,
+        }
+    }
+    // We consumed `limit` chars. If at least one more
+    // remains, truncation happened — peek once and emit
+    // the marker accordingly.
+    if iter.next().is_some() {
+        out.push_str("…[truncated]");
+    }
+    out
+}
+
+/// Direct `ConnectorError → DlqErrorKind` mapping.
+///
+/// The alternative would be a string round-trip via
+/// `dlq_error_kind(&err)` then `DlqErrorKind::from_wire(...)`
+/// then `unwrap_or(Other)`, which silently absorbs any
+/// future drift between `ConnectorError` variants and
+/// `DlqErrorKind` rows. With this direct exhaustive match,
+/// adding a new `ConnectorError` variant fails to compile
+/// until a matching `DlqErrorKind` row, CHECK, and
+/// `from_wire` case land — exactly the lockstep the type
+/// system can enforce. `dlq_error_kind` (returning
+/// `&'static str`) stays in `retry.rs` for tracing-log use.
+fn connector_error_to_dlq_kind(err: &connectors::ConnectorError) -> DlqErrorKind {
+    use connectors::ConnectorError as CE;
+    match err {
+        CE::Transport(_) => DlqErrorKind::Transport,
+        CE::BadStatus { .. } => DlqErrorKind::BadStatus,
+        CE::Decode(_) => DlqErrorKind::Decode,
+        CE::Config(_) => DlqErrorKind::Config,
+        CE::InvalidCursor { .. } => DlqErrorKind::InvalidCursor,
+        CE::Unsupported(_) => DlqErrorKind::Unsupported,
+    }
+}
+
+/// Split a `ConnectorError` into the primary message (capped) and
+/// an optional structured payload. `BadStatus` is the only variant
+/// that carries a separate body worth preserving; the others fold
+/// the diagnostic into `Display` already.
+fn build_dlq_message_and_payload(
+    error: &connectors::ConnectorError,
+) -> (String, Option<serde_json::Value>) {
+    use connectors::ConnectorError;
+    match error {
+        ConnectorError::BadStatus { status, body } => (
+            // Primary message is the compact "HTTP NNN" form —
+            // the full body lives in the payload below.
+            format!("HTTP {status}"),
+            Some(json!({
+                "status": *status,
+                "body_excerpt": truncate_scalars(body, DLQ_PAYLOAD_BODY_CHAR_LIMIT),
+            })),
+        ),
+        other => (
+            truncate_scalars(&format!("{other}"), DLQ_MESSAGE_CHAR_LIMIT),
+            None,
+        ),
     }
 }
 
@@ -428,6 +597,80 @@ mod tests {
         assert!(parse_max_connections(Some("-1".into())).is_err());
     }
 
+    #[test]
+    fn truncate_scalars_passes_short_strings_through() {
+        assert_eq!(truncate_scalars("hello", 10), "hello");
+        assert_eq!(truncate_scalars("", 10), "");
+    }
+
+    #[test]
+    fn truncate_scalars_caps_long_ascii() {
+        let s = "a".repeat(100);
+        let out = truncate_scalars(&s, 20);
+        // 20 'a's + the truncation marker. Marker is
+        // counted separately so the operator can tell the
+        // row hit the cap.
+        assert!(out.starts_with(&"a".repeat(20)));
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn truncate_scalars_counts_unicode_scalars_not_bytes() {
+        // 5 CJK scalars × 3 bytes each = 15 bytes; cap at
+        // 3 scalars truncates after the third char, not
+        // mid-byte.
+        let s = "資料庫錯誤";
+        let out = truncate_scalars(s, 3);
+        assert!(
+            out.starts_with("資料庫"),
+            "expected first 3 scalars preserved, got {out:?}",
+        );
+        assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn truncate_scalars_at_exact_limit_does_not_mark() {
+        // Inputs at exactly `limit` scalars are NOT
+        // truncated (we never read a (limit+1)th char,
+        // so no marker is emitted). Pins the boundary
+        // behaviour against off-by-one regressions.
+        let s = "a".repeat(20);
+        let out = truncate_scalars(&s, 20);
+        assert_eq!(out, s);
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn build_dlq_for_bad_status_carries_structured_payload() {
+        let huge_body = "x".repeat(10_000);
+        let err = connectors::ConnectorError::BadStatus {
+            status: 502,
+            body: huge_body,
+        };
+        let (msg, payload) = build_dlq_message_and_payload(&err);
+        // Primary message is compact — no body.
+        assert_eq!(msg, "HTTP 502");
+        let payload = payload.expect("BadStatus should produce payload");
+        assert_eq!(payload["status"], 502);
+        let excerpt = payload["body_excerpt"].as_str().expect("body_excerpt str");
+        // Excerpt capped at DLQ_PAYLOAD_BODY_CHAR_LIMIT
+        // plus the truncation marker.
+        assert!(
+            excerpt.chars().count() <= DLQ_PAYLOAD_BODY_CHAR_LIMIT + "…[truncated]".chars().count(),
+            "excerpt too long: {} scalars",
+            excerpt.chars().count(),
+        );
+        assert!(excerpt.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn build_dlq_for_other_errors_uses_display_capped() {
+        let err = connectors::ConnectorError::Decode("schema drift on field foo".into());
+        let (msg, payload) = build_dlq_message_and_payload(&err);
+        assert!(msg.contains("schema drift on field foo"));
+        assert!(payload.is_none(), "non-BadStatus should have no payload");
+    }
+
     /// `build_connector_for` is the choke point that gates an
     /// `enabled = true` source against an actually-implemented
     /// connector. Today only `DataGovTw` is implemented; the
@@ -435,17 +678,40 @@ mod tests {
     /// premature flip can't silently drop a crawl.
     #[test]
     fn build_connector_only_data_gov_tw_succeeds() {
+        let path = "config/sources.toml";
         // DataGovTw is the only enabled-AND-implemented source
         // in the checked-in sources.toml.
-        assert!(build_connector_for(SourceId::DataGovTw).is_ok());
+        assert!(build_connector_for(SourceId::DataGovTw, path).is_ok());
         // M5b.2-5 will turn these into `Ok` as their connectors
         // land; flipping the assertion in lockstep keeps the
         // test the spec.
-        assert!(build_connector_for(SourceId::Twse).is_err());
-        assert!(build_connector_for(SourceId::Moea).is_err());
-        assert!(build_connector_for(SourceId::Cwa).is_err());
-        assert!(build_connector_for(SourceId::FisheryMoa).is_err());
+        assert!(build_connector_for(SourceId::Twse, path).is_err());
+        assert!(build_connector_for(SourceId::Moea, path).is_err());
+        assert!(build_connector_for(SourceId::Cwa, path).is_err());
+        assert!(build_connector_for(SourceId::FisheryMoa, path).is_err());
         // user_contrib is never ETL-driven.
-        assert!(build_connector_for(SourceId::UserContrib).is_err());
+        assert!(build_connector_for(SourceId::UserContrib, path).is_err());
+    }
+
+    /// The error message must surface the actual loaded path,
+    /// not the default — otherwise an operator using
+    /// `SOURCES_CONFIG_PATH` to point at e.g. `/etc/td-hub/sources.toml`
+    /// would be told to edit the wrong file.
+    #[test]
+    fn build_connector_error_message_carries_custom_path() {
+        let path = "/etc/td-hub/sources.toml";
+        let result = build_connector_for(SourceId::Twse, path);
+        // Can't use `unwrap_err` because the Ok variant
+        // (`Arc<dyn SourceConnector>`) doesn't implement
+        // `Debug`. `let-else` keeps clippy's
+        // `manual-let-else` lint happy.
+        let Err(err) = result else {
+            panic!("expected Twse to be unimplemented")
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(path),
+            "expected {path:?} in message, got {msg:?}"
+        );
     }
 }
