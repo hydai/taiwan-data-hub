@@ -306,16 +306,19 @@ async fn refresh_aggregate(
     target_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<(), StorageError> {
-    // `pg_advisory_xact_lock(key1::int8, key2::int8)` takes
-    // two int8 keys. We fold the kind into the upper int8
-    // and the target_id's low 64 bits into the lower one so
-    // the lock is unique per `(kind, id)` pair without
-    // colliding across kinds.
-    let target_kind_hash = i64::from(hash_kind(target_kind));
-    let target_id_low = target_id_low_i64(target_id);
-    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
-        .bind(target_kind_hash)
-        .bind(target_id_low)
+    // `pg_advisory_xact_lock(bigint)` — single 64-bit key.
+    // The 2-arg `pg_advisory_xact_lock(int, int)` form is
+    // *32-bit* ints (int4), so binding `i64` here would
+    // either fail function resolution or overflow on cast.
+    // We pack the kind discriminator into the top 8 bits
+    // and the UUID-folded entropy into the low 56 so
+    // unrelated `(kind, id)` pairs almost never collide
+    // (the kind byte alone keeps the four polymorphic
+    // kinds disjoint, and 56 bits of UUID entropy makes
+    // intra-kind collisions astronomically rare).
+    let lock_key = advisory_lock_key(target_kind, target_id);
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
         .execute(&mut *conn)
         .await?;
     sqlx::query(
@@ -341,10 +344,10 @@ async fn refresh_aggregate(
 }
 
 /// Stable per-kind discriminator for the advisory lock. The
-/// four kinds map to four distinct int4 values so concurrent
-/// writers to different kinds don't serialize on the same
-/// key.
-fn hash_kind(kind: RatingTargetKind) -> i32 {
+/// four kinds map to four distinct u8 values that occupy the
+/// top byte of the 64-bit lock key so unrelated kinds don't
+/// queue on each other.
+fn hash_kind(kind: RatingTargetKind) -> u8 {
     match kind {
         RatingTargetKind::Dataset => 1,
         RatingTargetKind::Tool => 2,
@@ -353,16 +356,19 @@ fn hash_kind(kind: RatingTargetKind) -> i32 {
     }
 }
 
-/// Fold a UUID's 128-bit value into the i64 the second
-/// `pg_advisory_xact_lock` arg accepts. The two halves are
-/// XOR'd to preserve enough entropy that collisions across
-/// targets stay astronomically rare; `pg_advisory_lock`
-/// keys don't need to be cryptographically unique — only
-/// "distinct enough that unrelated writers don't queue on
-/// each other". The `from_ne_bytes` reinterprets the bit
-/// pattern as `i64` without the `cast_possible_wrap`
-/// concern.
-fn target_id_low_i64(id: Uuid) -> i64 {
-    let (hi, lo) = id.as_u64_pair();
-    i64::from_ne_bytes((hi ^ lo).to_ne_bytes())
+/// 64-bit composite key for `pg_advisory_xact_lock(bigint)`.
+/// Layout: `[kind:u8] [uuid_fold:u56]` where the kind byte
+/// occupies the most-significant byte so the four kinds are
+/// trivially disjoint, and the UUID fold (XOR of the two
+/// halves, masked to 56 bits) supplies enough entropy that
+/// intra-kind collisions are astronomically rare. Advisory
+/// lock keys don't need cryptographic uniqueness — only
+/// "distinct enough that unrelated writers don't serialise".
+/// `from_ne_bytes` reinterprets the `u64` bit pattern as
+/// `i64` without the `cast_possible_wrap` concern.
+fn advisory_lock_key(kind: RatingTargetKind, target_id: Uuid) -> i64 {
+    let (hi, lo) = target_id.as_u64_pair();
+    let uuid_fold = (hi ^ lo) & 0x00FF_FFFF_FFFF_FFFF;
+    let kind_byte = u64::from(hash_kind(kind)) << 56;
+    i64::from_ne_bytes((kind_byte | uuid_fold).to_ne_bytes())
 }
