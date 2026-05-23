@@ -366,11 +366,16 @@ fn hash_kind(kind: RatingTargetKind) -> u8 {
 /// intra-kind collisions are astronomically rare. Advisory
 /// lock keys don't need cryptographic uniqueness — only
 /// "distinct enough that unrelated writers don't serialise".
-/// `from_ne_bytes` reinterprets the `u64` bit pattern as
-/// `i64` without the `cast_possible_wrap` concern.
+///
+/// `from_be_bytes` reinterprets the `u64` bit pattern as
+/// `i64` via a **fixed** byte order so two Postgres clients
+/// on different architectures (or running on big-endian
+/// hosts) compute the same key for the same `(kind, id)`.
+/// Native-endian (`to_ne_bytes`) would let a mixed-arch
+/// deployment serialise writers using different lock keys.
 fn advisory_lock_key(kind: RatingTargetKind, target_id: Uuid) -> i64 {
     let (hi, lo) = target_id.as_u64_pair();
     let uuid_fold = (hi ^ lo) & 0x00FF_FFFF_FFFF_FFFF;
     let kind_byte = u64::from(hash_kind(kind)) << 56;
-    i64::from_ne_bytes((kind_byte | uuid_fold).to_ne_bytes())
+    i64::from_be_bytes((kind_byte | uuid_fold).to_be_bytes())
 }

@@ -40,14 +40,20 @@ export function parseRatingView(value: unknown): RatingView | null {
 	if (value === null || typeof value !== 'object') return null;
 	const v = value as Record<string, unknown>;
 	// avg_score: null or a finite number in [0, SCORE_MAX].
-	// Server clamps `count == 0` to null, so a number here
-	// implies count > 0.
 	if (v.avg_score !== null) {
 		if (typeof v.avg_score !== 'number' || !Number.isFinite(v.avg_score)) return null;
 		if (v.avg_score < 0 || v.avg_score > SCORE_MAX) return null;
 	}
 	// count: non-negative integer.
 	if (typeof v.count !== 'number' || !Number.isInteger(v.count) || v.count < 0) return null;
+	// Enforce the avg/count invariant the server promises:
+	// `count == 0` must come with `avg_score == null`
+	// (no ratings → no average), and `count > 0` must
+	// come with a numeric avg. Reject either drift so a
+	// gateway shape regression can't leak a misleading
+	// "0.00 ★ · 0 ratings" line into the UI.
+	if (v.count === 0 && v.avg_score !== null) return null;
+	if (v.count > 0 && v.avg_score === null) return null;
 	// viewer_score: null or an integer in [SCORE_MIN, SCORE_MAX].
 	if (v.viewer_score !== null) {
 		if (
