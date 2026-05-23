@@ -163,7 +163,6 @@
 	</section>
 
 	<CommentThread
-		gatewayBase={data.gatewayBase}
 		targetKind="dataset"
 		targetId={data.commentTargetId}
 		currentUserId={data.currentUserId}

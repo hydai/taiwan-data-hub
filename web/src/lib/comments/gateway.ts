@@ -4,27 +4,31 @@
 
 import { COMMENT_TARGET_KINDS, type CommentTargetKind, type RenderedComment } from './types';
 
-/** Build the URL for the comments collection (list + create). */
-export function commentsUrl(base: string): string {
-	return `${base}/api/v1/comments`;
+/**
+ * URL builders are intentionally same-origin (root-relative).
+ * Browser fetches resolve against the page origin so the
+ * host-only session cookie (no `Domain=` attribute) is sent
+ * automatically. Production routes `/api/v1/*` to the gateway
+ * via the reverse proxy; dev does the same via the vite
+ * `server.proxy` config. The internal `GATEWAY_HTTP_URL` never
+ * reaches the browser.
+ */
+export function commentsUrl(): string {
+	return `/api/v1/comments`;
 }
 
 /** Build the URL for an individual comment (edit / delete). */
-export function commentByIdUrl(base: string, id: string): string {
-	return `${base}/api/v1/comments/${encodeURIComponent(id)}`;
+export function commentByIdUrl(id: string): string {
+	return `/api/v1/comments/${encodeURIComponent(id)}`;
 }
 
 /** Build the list URL with the required query params. */
-export function commentsListUrl(
-	base: string,
-	targetKind: CommentTargetKind,
-	targetId: string
-): string {
+export function commentsListUrl(targetKind: CommentTargetKind, targetId: string): string {
 	const params = new URLSearchParams({
 		target_kind: targetKind,
 		target_id: targetId
 	});
-	return `${commentsUrl(base)}?${params.toString()}`;
+	return `${commentsUrl()}?${params.toString()}`;
 }
 
 /**

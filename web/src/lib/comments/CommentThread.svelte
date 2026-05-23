@@ -6,11 +6,17 @@
 	reply on any root, in-place edit within the 5-minute window,
 	and soft-delete via the gateway.
 
-	Authentication state comes via the `user` prop: when null,
-	the form is replaced with a "please sign in" prompt and edit
-	/ delete affordances are hidden. The component fetches the
-	thread itself on mount and after each mutation so a
-	logged-out reader still sees the latest state.
+	Authentication state comes via the `currentUserId` prop:
+	when `null`, the form is replaced with a "please sign in"
+	prompt and edit / delete affordances are hidden. The
+	component fetches the thread itself on mount and after each
+	mutation so a logged-out reader still sees the latest state.
+
+	All gateway calls are same-origin (`/api/v1/comments…`) so
+	the host-only session cookie is sent automatically and the
+	internal gateway URL never reaches the browser. The reverse
+	proxy (Caddy in prod, vite proxy in dev) routes `/api/v1/*`
+	to the gateway.
 -->
 <script lang="ts">
 	import { onMount } from 'svelte';
@@ -25,12 +31,10 @@
 	import { MAX_COMMENT_BODY_LEN } from '$lib/comments/types';
 
 	let {
-		gatewayBase,
 		targetKind,
 		targetId,
 		currentUserId
 	}: {
-		gatewayBase: string;
 		targetKind: CommentTargetKind;
 		targetId: string;
 		/** `null` for logged-out readers. */
@@ -72,7 +76,7 @@
 	async function loadThread(): Promise<void> {
 		thread = { state: 'loading' };
 		try {
-			const res = await fetch(commentsListUrl(gatewayBase, targetKind, targetId), {
+			const res = await fetch(commentsListUrl(targetKind, targetId), {
 				method: 'GET',
 				headers: { accept: 'application/json' },
 				credentials: 'include'
@@ -115,7 +119,7 @@
 		submitting = true;
 		submitError = null;
 		try {
-			const res = await fetch(commentsUrl(gatewayBase), {
+			const res = await fetch(commentsUrl(), {
 				method: 'POST',
 				headers: {
 					accept: 'application/json',
@@ -172,7 +176,7 @@
 			return;
 		}
 		try {
-			const res = await fetch(commentByIdUrl(gatewayBase, editingId), {
+			const res = await fetch(commentByIdUrl(editingId), {
 				method: 'PATCH',
 				headers: {
 					accept: 'application/json',
@@ -205,7 +209,7 @@
 		const ok = window.confirm('Delete this comment?');
 		if (!ok) return;
 		try {
-			const res = await fetch(commentByIdUrl(gatewayBase, c.id), {
+			const res = await fetch(commentByIdUrl(c.id), {
 				method: 'DELETE',
 				headers: { accept: 'application/json' },
 				credentials: 'include'

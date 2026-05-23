@@ -22,9 +22,12 @@ import type { PageServerLoad } from './$types';
  *   * `currentUserId` — read from `/api/v1/me`; `null` for
  *     anonymous traffic. The CommentThread component renders
  *     a "sign in to comment" prompt instead of the form.
- *   * `gatewayBase` — same-origin (empty string) by default;
- *     overridable for cross-origin deploys via
- *     `GATEWAY_HTTP_URL`.
+ *
+ * The browser-side `CommentThread` component does its own
+ * fetching against same-origin `/api/v1/comments…` paths —
+ * the reverse proxy (Caddy in prod, vite proxy in dev) routes
+ * those to the gateway. The page does NOT leak the internal
+ * `GATEWAY_HTTP_URL` to the client.
  */
 export const load: PageServerLoad = async ({ fetch, params, request, setHeaders }) => {
 	const dataset = findDatasetBySlug(params.id);
@@ -36,8 +39,9 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	// below populates `currentUserId`, which a shared cache
 	// MUST NOT serve to other users. Without a cookie, the
 	// page is identical for every viewer and is safe to share.
-	// `Vary: Cookie` is the safety net for the no-cookie case
-	// in deploys behind a CDN that ignores `private`.
+	// `Vary: Cookie` only fires in the per-user branch so the
+	// anonymous response keeps a wide hit rate (CDNs that key
+	// on every `Vary` header don't shred on unrelated cookies).
 	const hasSessionCookie = (request.headers.get('cookie') ?? '').includes('tdh_session=');
 	if (hasSessionCookie) {
 		// Per-user response: must not be shared across viewers,
@@ -88,7 +92,6 @@ export const load: PageServerLoad = async ({ fetch, params, request, setHeaders 
 	return {
 		dataset,
 		commentTargetId,
-		currentUserId,
-		gatewayBase
+		currentUserId
 	};
 };
