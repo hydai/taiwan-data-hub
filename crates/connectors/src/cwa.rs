@@ -139,9 +139,9 @@ pub struct CwaConnector {
 
 /// Newtype wrapper so the key can't accidentally land in a
 /// generic `Debug` log line. The `Debug` impl is custom and
-/// always renders `"<redacted>"`; the cleartext is only ever
-/// exposed via [`Self::expose`], which is the one place a
-/// reviewer should look when checking key handling.
+/// always renders `"ApiKey(<redacted>)"` — the cleartext is
+/// only ever exposed via [`Self::expose`], which is the one
+/// place a reviewer should look when checking key handling.
 #[derive(Clone)]
 struct ApiKey(String);
 
@@ -306,16 +306,28 @@ fn validate_relative_path(path: &str) -> Result<(), crate::ConnectorError> {
     Ok(())
 }
 
-/// Strip the query string before echoing a path back into
-/// an error message. Callers may inadvertently include a
-/// real `Authorization=...` value in the query string (the
-/// exact misconfiguration the duplicate-rejection guard
-/// catches); echoing the full path verbatim would defeat
-/// the `ApiKey` newtype's redaction and leak the key into
-/// logs. The path component alone is sufficient context for
-/// debugging the shape error.
+/// Strip the query string AND fragment before echoing a
+/// path back into an error message. Callers may
+/// inadvertently include a real `Authorization=...` value
+/// in either the query string (the exact misconfiguration
+/// the duplicate-rejection guard catches) or — more
+/// pathologically — in a URL fragment. Fragments are
+/// upstream-side and never sent over the wire, but they
+/// CAN end up in error messages and log output, so the
+/// sanitizer is conservative: drop everything from the
+/// earliest of `?` or `#`. The path component alone is
+/// sufficient context for debugging the shape error.
 fn redact_query(path: &str) -> &str {
-    path.split_once('?').map_or(path, |(prefix, _)| prefix)
+    let q = path.find('?');
+    let h = path.find('#');
+    let cut = match (q, h) {
+        (Some(qi), Some(hi)) => Some(qi.min(hi)),
+        (qi, hi) => qi.or(hi),
+    };
+    match cut {
+        Some(i) => &path[..i],
+        None => path,
+    }
 }
 
 #[async_trait]
@@ -1036,16 +1048,52 @@ mod tests {
     }
 
     #[test]
-    fn redact_query_strips_query_string() {
+    fn redact_query_strips_query_and_fragment() {
+        // Query string stripped.
         assert_eq!(redact_query("/api/x?Authorization=secret"), "/api/x");
         assert_eq!(redact_query("/api/x?a=1&b=2"), "/api/x");
-        // No query string: pass through unchanged.
+        // Fragment stripped too — even though fragments
+        // never reach the upstream, a misconfigured caller
+        // could put a secret there and we don't want it
+        // surfacing in error logs.
+        assert_eq!(redact_query("/api/x#Authorization=secret"), "/api/x");
+        // Both present: drop from the earliest cut so we
+        // don't accidentally keep half the query string
+        // when the fragment appears first.
+        assert_eq!(redact_query("/api/x#frag?after"), "/api/x");
+        assert_eq!(redact_query("/api/x?q#frag"), "/api/x");
+        // No query or fragment: pass through unchanged.
         assert_eq!(redact_query("/api/x"), "/api/x");
         // Empty path: pass through.
         assert_eq!(redact_query(""), "");
-        // Fragment without query: pass through (fragment is
-        // an upstream-side detail, never carries a key).
-        assert_eq!(redact_query("/api/x#frag"), "/api/x#frag");
+    }
+
+    #[tokio::test]
+    async fn polite_get_error_does_not_leak_fragment_supplied_secret() {
+        // Fragments never reach the upstream, but if a
+        // caller mistakenly puts a secret in one, our
+        // own error messages MUST NOT echo it back.
+        let connector = CwaConnector::builder()
+            .base_url("https://example.test")
+            .api_key("test-key")
+            .auto_fetch_robots(false)
+            .build()
+            .await
+            .unwrap();
+        let leak_marker = "FRAGMENT-LEAK-MARKER-ABC789";
+        // Use an absolute URL to trigger the
+        // validate_relative_path error (the most common
+        // path-bearing error site that's exercisable
+        // without robots/wiremock).
+        let err = connector
+            .polite_get(&format!("https://evil.example/x#{leak_marker}"))
+            .await
+            .expect_err("absolute URL must be rejected");
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains(leak_marker),
+            "error message leaked fragment content: {rendered:?}"
+        );
     }
 
     #[tokio::test]

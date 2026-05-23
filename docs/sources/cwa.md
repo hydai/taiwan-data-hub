@@ -87,9 +87,9 @@ goes through the same throttle, so even bootstrap is polite.
 ## Key handling — what NOT to do
 
 - **Don't log the key.** The connector wraps it in an `ApiKey` newtype whose
-  `Debug` impl renders `"<redacted>"`. If you reach into the internals for
-  debugging, use the explicit `expose()` accessor — that's the one place a
-  reviewer can grep for.
+  `Debug` impl renders `"ApiKey(<redacted>)"`. If you reach into the
+  internals for debugging, use the explicit `expose()` accessor — that's
+  the one place a reviewer can grep for.
 - **Don't check the key into git.** `.env` files, secret managers,
   CI variables — anything but a commit.
 - **Don't share keys across environments.** Issue separate keys for dev,
