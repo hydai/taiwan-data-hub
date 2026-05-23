@@ -51,12 +51,17 @@ retry_initial_backoff_secs = 30
 retry_max_backoff_secs = 1800
 
 [sources.cwa]
-# Enable when the CWA connector lands (#5b.4). CWA is a
-# weather observation source — short-cycle data that
-# benefits from a more frequent refresh than a nightly
+# CWA is a weather observation source — short-cycle data
+# that benefits from a more frequent refresh than a nightly
 # pass. Every 6 hours matches the "frequently-queried"
 # sensitivity the cache pipeline uses.
-enabled = false
+#
+# REQUIRES `CWA_API_KEY` in the worker's environment. See
+# docs/sources/cwa.md for the sign-up flow. The connector
+# fails boot loudly if the variable is missing when this
+# row is enabled — better than a silent 401-loop every 6
+# hours.
+enabled = true
 cron_utc = "0 0 0,6,12,18 * * * *"
 retry_max_attempts = 3
 retry_initial_backoff_secs = 30
