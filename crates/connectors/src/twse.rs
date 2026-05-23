@@ -72,8 +72,12 @@ const USER_AGENT: &str = concat!(
 );
 
 /// The three TWSE feeds the catalog walk emits. The string
-/// values become the row's `datasets.source_id` column on
-/// upsert, so they need to be stable across releases.
+/// values become the row's `datasets.source_id` column AND
+/// its `slug` (see the per-feed `*_metadata` helpers below),
+/// so they need to be stable across releases. The
+/// `source_id == slug` equality is intentional today; if
+/// the upstream renames its path the fork happens at the
+/// constant rather than at the call site.
 const DATASET_ID_DAILY_TRADES: &str = "twse-stock-day";
 const DATASET_ID_MONTHLY_REVENUE: &str = "twse-monthly-revenue";
 const DATASET_ID_MAJOR_NEWS: &str = "twse-major-news";
@@ -350,7 +354,13 @@ fn daily_trades_metadata() -> DatasetMetadata {
     );
     DatasetMetadata {
         source_id: DATASET_ID_DAILY_TRADES.into(),
-        slug: "twse-stock-day".into(),
+        // `slug` reuses the same constant as `source_id`
+        // by design: for TWSE the upstream identifier IS
+        // a slug-shaped string, and pinning both to one
+        // constant prevents accidental drift on edits.
+        // If they ever diverge (e.g. upstream renames its
+        // path) the fork happens at the constant.
+        slug: DATASET_ID_DAILY_TRADES.into(),
         title_i18n: title,
         description_i18n: description,
         license: "OGDL-Taiwan-1.0".into(),
@@ -383,7 +393,7 @@ fn monthly_revenue_metadata() -> DatasetMetadata {
     );
     DatasetMetadata {
         source_id: DATASET_ID_MONTHLY_REVENUE.into(),
-        slug: "twse-monthly-revenue".into(),
+        slug: DATASET_ID_MONTHLY_REVENUE.into(),
         title_i18n: title,
         description_i18n: description,
         license: "OGDL-Taiwan-1.0".into(),
@@ -410,7 +420,7 @@ fn major_news_metadata() -> DatasetMetadata {
     );
     DatasetMetadata {
         source_id: DATASET_ID_MAJOR_NEWS.into(),
-        slug: "twse-major-news".into(),
+        slug: DATASET_ID_MAJOR_NEWS.into(),
         title_i18n: title,
         description_i18n: description,
         license: "OGDL-Taiwan-1.0".into(),
