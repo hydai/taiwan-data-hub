@@ -81,6 +81,15 @@ CREATE TABLE submissions (
     CONSTRAINT submissions_status_known CHECK (
         status IN ('pending', 'approved', 'rejected', 'withdrawn')
     ),
+    -- Defence in depth: the Rust submission service is the only
+    -- writer and always emits a `{"kind": "..."}` discriminator
+    -- matching the column, but a manual SQL write / backfill /
+    -- future bug could drift the two. This CHECK refuses any
+    -- INSERT or UPDATE that desyncs them, so the moderation
+    -- queue can trust the column without re-parsing JSONB.
+    CONSTRAINT submissions_payload_kind_matches CHECK (
+        payload ->> 'kind' = submission_kind
+    ),
     -- A row that carries reviewer metadata MUST be in a
     -- terminal-with-review state. Conversely a pending /
     -- withdrawn row must NOT carry reviewer metadata.

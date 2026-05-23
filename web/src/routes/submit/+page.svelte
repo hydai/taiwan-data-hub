@@ -382,7 +382,9 @@
 				<a class="underline underline-offset-2" href={resolve('/account/submissions')}
 					>your submissions page</a
 				>, or
-				<a class="underline underline-offset-2" href={resolve('/submit')}>submit another</a>.
+				<a class="underline underline-offset-2" href={resolve('/submit')} data-sveltekit-reload
+					>submit another</a
+				>.
 			</p>
 		</div>
 	{/if}
