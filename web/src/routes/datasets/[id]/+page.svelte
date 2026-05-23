@@ -146,8 +146,10 @@
 			<dd class="mt-1 text-sm text-neutral-900">{dataset.license}</dd>
 			{#if dataset.source.licenseUrl}
 				<!-- #5b.6: clickable link to the license document when the
-					 source publishes one. Absence is silently graceful so
-					 pre-migration rows degrade to license name only. -->
+					 YAML fixture (config/datasets.yaml) carries a
+					 `source.licenseUrl`. The field is optional — entries
+					 without it degrade to license name only, no broken
+					 link rendered. -->
 				<dd class="mt-1">
 					<a
 						class="text-sm break-all text-primary-700 underline underline-offset-2 hover:text-primary-800"
