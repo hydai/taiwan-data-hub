@@ -16,10 +16,10 @@
 mod api_keys_routes;
 mod api_routes;
 mod bookmarks_routes;
-mod ratings_routes;
 mod comments_routes;
 mod moderation_routes;
 mod rate_limit_middleware;
+mod ratings_routes;
 mod session_middleware;
 mod submissions_routes;
 
@@ -482,8 +482,10 @@ fn build_auth_router_if_available(
     };
     let api_key_service = Arc::new(auth::ApiKeyService::new(api_key_repo));
     let submission_service = Arc::new(auth::SubmissionService::new(submission_repo.clone()));
-    let moderation_service =
-        Arc::new(auth::ModerationService::new(submission_repo, user_repo.clone()));
+    let moderation_service = Arc::new(auth::ModerationService::new(
+        submission_repo,
+        user_repo.clone(),
+    ));
     let comment_service = Arc::new(auth::CommentService::new(comment_repo));
     let bookmark_service = Arc::new(auth::BookmarkService::new(bookmark_repo));
     let collection_service = Arc::new(auth::CollectionService::new(collection_repo));

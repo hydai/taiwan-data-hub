@@ -174,7 +174,7 @@ impl RatingRepo for Storage {
         .fetch_one(&mut *tx)
         .await
         .map_err(crate::sqlx_errors::map_unique_violation)?;
-        refresh_aggregate(&mut *tx, target_kind, target_id, now).await?;
+        refresh_aggregate(&mut tx, target_kind, target_id, now).await?;
         tx.commit().await?;
         RatingRow::from_row(&row)
     }
@@ -196,7 +196,7 @@ impl RatingRepo for Storage {
         .bind(target_id)
         .execute(&mut *tx)
         .await?;
-        refresh_aggregate(&mut *tx, target_kind, target_id, now).await?;
+        refresh_aggregate(&mut tx, target_kind, target_id, now).await?;
         tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
@@ -220,15 +220,17 @@ impl RatingRepo for Storage {
         .transpose()?;
         let viewer_score = match viewer_id {
             None => None,
-            Some(uid) => sqlx::query_scalar::<_, i16>(
-                "SELECT score FROM ratings
+            Some(uid) => {
+                sqlx::query_scalar::<_, i16>(
+                    "SELECT score FROM ratings
                   WHERE user_id = $1 AND target_kind = $2 AND target_id = $3",
-            )
-            .bind(uid)
-            .bind(target_kind.as_str())
-            .bind(target_id)
-            .fetch_optional(self.pool())
-            .await?,
+                )
+                .bind(uid)
+                .bind(target_kind.as_str())
+                .bind(target_id)
+                .fetch_optional(self.pool())
+                .await?
+            }
         };
         Ok(RatingView {
             aggregate,

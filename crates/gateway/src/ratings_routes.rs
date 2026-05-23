@@ -14,9 +14,7 @@
 
 use std::sync::Arc;
 
-use auth::{
-    AuthError, RatingDenialReason, RatingService, SCORE_MAX, SCORE_MIN, ValidatedSession,
-};
+use auth::{AuthError, RatingDenialReason, RatingService, SCORE_MAX, SCORE_MIN, ValidatedSession};
 use axum::Json;
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
@@ -185,9 +183,9 @@ enum ApiError {
 impl ApiError {
     fn from_rating_denial(reason: RatingDenialReason) -> Self {
         match reason {
-            RatingDenialReason::ScoreOutOfRange => Self::Validation(format!(
-                "score must be between {SCORE_MIN} and {SCORE_MAX}"
-            )),
+            RatingDenialReason::ScoreOutOfRange => {
+                Self::Validation(format!("score must be between {SCORE_MIN} and {SCORE_MAX}"))
+            }
             RatingDenialReason::AccountTooNew => Self::Forbidden("account_too_new"),
             // A revoked session still passes the validation
             // middleware (it's keyed on the session row),
