@@ -3,11 +3,25 @@
  * for authenticated users in multi-user mode; the SvelteKit
  * `create` action POSTs the validated payload to the gateway.
  *
- * Personal-mode + anonymous traffic are routed to the
- * "please sign in" branch by the load function so the form
- * is never rendered in a context it can't submit from. The
- * layout already drives auth-aware navigation; this server
- * just hardens the access gate at the route level.
+ * The load function maps the gateway state to one of three
+ * branches so the form is never rendered in a context it
+ * can't submit from:
+ *
+ *   * **personal mode** → `state: 'unavailable'` with the
+ *     "Submissions are disabled on this deployment" copy.
+ *     Detected via a 404 on `/api/v1/me` because that route
+ *     is only mounted when DATABASE_URL + SESSION_HMAC_KEY
+ *     are configured.
+ *   * **anonymous multi-user** → `state: 'unauthenticated'`
+ *     with a "please sign in" prompt. Detected via a 401 or
+ *     a `{ user: null }` body.
+ *   * **authenticated multi-user** → `state: 'ok'` and the
+ *     form renders.
+ *
+ * The layout already drives auth-aware navigation; this
+ * server just hardens the access gate at the route level so
+ * a stale layout cache cannot let an anonymous request reach
+ * the form.
  */
 
 import { env } from '$env/dynamic/private';
