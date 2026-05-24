@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "臺灣行政區地圖 — 人口熱區",
+    "en": "Taiwan administrative map — population heatmap"
+  },
+  "description_i18n": {
+    "zh-TW": "以 22 個縣市為單位呈現臺灣人口分布,將 geo_basemap MCP 工具與人口資料的兩來源結合視覺化。為避免地圖向量資料過大,本展示以縣市層級簡化地理輪廓;正式版以 368 個鄉鎮區為單位需連線至載入完整向量界線資料的後端。",
+    "en": "Choropleth of Taiwan population at the 22-county level — visualises the geo_basemap MCP tool joined with population data. The 368-township level is intentionally simplified to keep the bundled SVG small; production deployments need a backend with the full township boundary vectors loaded."
+  },
+  "tags": ["geo", "map", "population", "choropleth"],
+  "status": "beta"
+}
