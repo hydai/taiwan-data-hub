@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>實價登錄熱圖</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>實價登錄熱圖 <span class="tag">展示用方塊熱圖</span></h1>
+				<p class="muted">
+					年份滑桿驅動熱圖重染,點擊任一縣市可看樣本交易紀錄;示範
+					<code>query_rows</code> MCP 工具的「先聚合再下鑽」模式。
+				</p>
+				<p class="caveat">
+					熱圖數值與下鑽交易皆為依公開均值生成的合成樣本,並非真實實價登錄紀錄;面板配置與互動行為可用於評估正式版 UX。
+				</p>
+			</header>
+
+			<form id="control-form" aria-label="時間滑桿">
+				<fieldset>
+					<legend>年份</legend>
+					<input id="year-slider" type="range" min="0" max="0" step="1" value="0" />
+					<span id="year-display" class="year-display" aria-live="polite"></span>
+				</fieldset>
+			</form>
+
+			<section class="map-and-detail">
+				<div id="map" class="cartogram" aria-label="22 縣市實價方塊熱圖" role="group"></div>
+				<aside id="detail" class="detail" aria-live="polite">
+					<p class="muted">點擊任一縣市以檢視該年度樣本交易紀錄。</p>
+				</aside>
+			</section>
+
+			<section class="legend-row">
+				<div id="legend" class="legend"></div>
+				<p id="summary" class="muted summary"></p>
+			</section>
+
+			<footer>
+				<p class="muted">
+					iframe 沙箱 + 嚴格 CSP 下執行;不發起任何網路呼叫,所有資料(熱圖數值、樣本交易)來自同目錄
+					<code>sample-data.js</code>。
+				</p>
+			</footer>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./sample-data.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "實價登錄熱圖",
+    "en": "Real estate price heatmap"
+  },
+  "description_i18n": {
+    "zh-TW": "依年份滑動,以方塊型熱圖呈現 22 個縣市的中位數房價(每坪),點擊任一縣市可看樣本交易紀錄。示範 query_rows MCP 工具的『先聚合再下鑽』模式 (pre-aggregated tiles + per-county drill-down)。數字為遵循公開均值的合成樣本,正式版需連線至載入內政部不動產交易實價登錄資料的後端。",
+    "en": "Year-by-year tile heatmap of median housing price per ping across Taiwan's 22 counties, with per-county drill-down to sample transactions on click. Demonstrates the query_rows MCP-tool aggregate-then-drill pattern. Values are synthetic samples calibrated to public averages; production needs a backend with the MOI real-estate transaction registry loaded."
+  },
+  "tags": ["housing", "heatmap", "time-series", "drill-down"],
+  "status": "beta"
+}
