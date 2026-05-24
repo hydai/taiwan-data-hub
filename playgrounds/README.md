@@ -76,12 +76,24 @@ Updates the share-link state. The parent re-encodes and replaces the
 URL query string so the user can copy the bar to share. Throttle this
 in your app — every call posts a message and rewrites history.
 
-### `tdh.fetch(path: string, init?: RequestInit): Promise<Response>`
+### `tdh.fetch(path, init?): Promise<Response>`
 
-Proxies a fetch through the parent frame. `path` MUST be a
-gateway-relative path starting with `/api/v1/`. The parent rejects
-any other path; the iframe never gets a chance to hit
-arbitrary URLs.
+Proxies a fetch through the parent frame and returns a real
+`Response`.
+
+**Restricted by design** — the playground proxy is a *read-only,
+anonymous* surface, not a general `fetch` wrapper:
+
+| Constraint | Reason |
+|---|---|
+| `path` MUST start with `/api/v1/` (post-URL-normalisation, so dot-segment escapes like `/api/v1/../admin` are rejected) | Confines the proxy to the public gateway namespace |
+| `init.method` MUST be `GET` or `HEAD` | Playgrounds are user-untrusted code; they cannot act *as* the logged-in user |
+| `credentials` is forced to `'omit'` regardless of what you pass | The gateway sees playground traffic as anonymous; session cookies never reach the proxied request |
+| `init.body` is structured-cloneable strings only | postMessage limit — pass JSON pre-stringified |
+
+If your playground needs to write or use the user's session, the
+framework doesn't support it yet — open an issue describing the
+use case before authoring around the restriction.
 
 ## Iframe security model
 

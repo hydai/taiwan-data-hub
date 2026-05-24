@@ -113,8 +113,20 @@
 					return;
 				}
 				var headers = msg.contentType ? { 'content-type': msg.contentType } : {};
+				// fetch spec: Response() throws if a body is supplied with a
+				// null-body status (204 No Content, 205 Reset Content, 304
+				// Not Modified) — even an empty string counts as a body.
+				// HEAD responses also have null body. Coerce to null so the
+				// proxied fetch promise resolves instead of leaving the
+				// callback queued forever.
+				var requestedMethod = (safeInit && safeInit.method ? safeInit.method : 'GET').toUpperCase();
+				var nullBodyStatus =
+					requestedMethod === 'HEAD' ||
+					msg.status === 204 ||
+					msg.status === 205 ||
+					msg.status === 304;
 				resolve(
-					new Response(msg.body, {
+					new Response(nullBodyStatus ? null : msg.body, {
 						status: msg.status,
 						headers: headers
 					})
