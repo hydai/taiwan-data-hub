@@ -85,8 +85,8 @@ pub struct ManifestMeta {
     /// `/.well-known/oauth-protected-resource` (which #7.4 lands).
     pub mode: Mode,
     /// Provider organization name advertised in the Google A2A
-    /// agent card (#7.3). Defaults to "Taiwan Data Hub
-    /// Contributors"; downstream forks can override.
+    /// agent card (#7.3). Defaults to `Taiwan Data Hub Contributors`;
+    /// downstream forks can override.
     pub provider_organization: String,
     /// Provider URL advertised in the agent card. Defaults to the
     /// upstream GitHub repo URL — operators almost certainly want
@@ -156,9 +156,10 @@ pub fn router(dispatcher: &Dispatcher, meta: &ManifestMeta) -> Router {
         )
 }
 
-/// Pre-render a serialisable manifest into the cached
-/// `body + etag` pair every handler serves. Pulled out so all
-/// three routes share the same allocation + caching path.
+/// Pre-render a serialisable payload (MCP manifest, A2A agent
+/// card, or skills index) into the cached `body + etag` pair
+/// every handler serves. Pulled out so all three routes share
+/// the same allocation + caching path.
 fn build_state<T: Serialize>(payload: &T) -> Arc<ManifestState> {
     // All three well-known payloads (MCP manifest, A2A agent
     // card, skills index) are statically-typed structs whose
