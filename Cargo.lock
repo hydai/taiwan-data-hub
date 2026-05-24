@@ -5366,6 +5366,7 @@ dependencies = [
  "async-trait",
  "mcp-core",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",

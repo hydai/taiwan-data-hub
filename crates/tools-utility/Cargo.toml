@@ -21,9 +21,17 @@ workspace = true
 async-trait = { workspace = true }
 mcp-core = { path = "../mcp-core" }
 regex = { workspace = true }
+# Added in #6.9 batch A — geo helpers call OSM/Nominatim over HTTPS
+# (json + rustls-tls + gzip inherited from the workspace pin are
+# sufficient for the GET-only search/reverse endpoints).
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Async primitives for the geocode rate limiter (slot-based
+# `Mutex<Instant>` so consecutive Nominatim calls respect the
+# 1 req/s public-usage rule).
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [dev-dependencies]
 # Tests build their own runtime via `tokio::runtime::Builder` — we
