@@ -53,8 +53,9 @@
 				<p class="muted">
 					框架契約:此頁面執行於 <code>iframe sandbox="allow-scripts"</code> 與
 					嚴格 CSP 之下,僅能透過 <code>tdh.fetch('/api/v1/...')</code> 對母頁面代理 GET / HEAD
-					請求。本 playground 不發起任何網路呼叫,所有資料來自本地
-					<code>sample-data.json</code>。
+					請求。本 playground 不發起任何網路呼叫,所有資料來自同目錄下的
+					<code>sample-data.js</code>(以 <code>&lt;script src&gt;</code> 載入,符合 CSP
+					<code>script-src 'self'</code>)。
 				</p>
 			</footer>
 		</main>

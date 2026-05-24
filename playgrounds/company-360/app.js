@@ -1,16 +1,18 @@
 /* Company 360 playground.
  *
- * Loads `sample-data.json` (shipped as a static asset under the
- * playground's prefix), reads the initial 統編 from the framework's
- * share-link state, and renders three panels: business registry,
- * judicial cases, procurement awards. Pushes every search back into
- * the share-link state so a URL pasted into chat reproduces the
- * exact view.
+ * Loads `sample-data.js` (shipped alongside this script under the
+ * playground's served prefix and pulled in via `<script src>` from
+ * index.html — see the CSP note below for why JS-tag-loaded data
+ * is the right path here), reads the initial 統編 from the
+ * framework's share-link state, and renders three panels:
+ * business registry, judicial cases, procurement awards. Pushes
+ * every search back into the share-link state so a URL pasted
+ * into chat reproduces the exact view.
  *
  * The framework's `tdh.fetch` could in principle hit
- * `/api/v1/sample-data.json` etc., but this playground keeps every
- * data dependency local: no network calls, deterministic output,
- * works offline. Real live-data playgrounds will arrive once the
+ * `/api/v1/...` endpoints, but this playground keeps every data
+ * dependency local: no network calls, deterministic output, works
+ * offline. Real live-data playgrounds will arrive once the
  * gateway exposes dataset query endpoints (M7 territory).
  */
 
@@ -80,7 +82,14 @@
 			var btn = document.createElement('button');
 			btn.type = 'button';
 			btn.className = 'sample';
-			btn.textContent = key + ' — ' + (company.registry && company.registry.name) || key;
+			// Build the label as an explicit conditional. The earlier
+			// inline form `key + ' — ' + (registry && name) || key`
+			// concatenates before applying `||`, so the LHS is always
+			// truthy and the `|| key` fallback never fired — when a
+			// registry was missing a name, the button rendered as
+			// `<key> — undefined`.
+			var name = company.registry && company.registry.name;
+			btn.textContent = name ? key + ' — ' + name : key;
 			btn.dataset.taxId = key;
 			btn.addEventListener('click', function (ev) {
 				var taxId = ev.currentTarget.dataset.taxId;
