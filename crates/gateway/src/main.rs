@@ -19,6 +19,7 @@ mod bookmarks_routes;
 mod comments_routes;
 mod llms_txt;
 mod moderation_routes;
+mod openapi;
 mod rate_limit_middleware;
 mod ratings_routes;
 mod reports_routes;
@@ -86,6 +87,12 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
     "/.well-known/agent-skills.json",
     "/.well-known/api-catalog",
     "/.well-known/oauth-protected-resource",
+    // #7.5 — OpenAPI 3.1 spec + Swagger UI + ReDoc. Generated
+    // from compile-time utoipa annotations, no runtime
+    // dependency, so always-on.
+    "/api/openapi.json",
+    "/api/docs",
+    "/api/redoc",
 ];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
@@ -280,11 +287,13 @@ fn build_router(
         // or auth dependency, so it serves in personal mode
         // too.
         .merge(api_routes::config_router(mode))
-        // #7.2 — `/.well-known/mcp.json` is always-on because the
-        // tool registry + env config are available regardless of
-        // Storage. Merged here so it sits alongside `/healthz`
-        // and `/mcp` in the IP-rate-limit layer below.
-        .merge(well_known_router);
+        // M7 well-known + OpenAPI surfaces (#7.2–#7.5) are
+        // always-on because they derive from compile-time state
+        // (tool registry, env config, annotated handlers).
+        // Merged here so they sit alongside `/healthz` and
+        // `/mcp` in the IP-rate-limit layer below.
+        .merge(well_known_router)
+        .merge(openapi::router());
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -564,7 +573,7 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     }
     tracing::info!(
         mode = mode.as_str(),
-        "well-known surfaces mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json, /.well-known/api-catalog, /.well-known/oauth-protected-resource"
+        "well-known + REST docs mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json, /.well-known/api-catalog, /.well-known/oauth-protected-resource, /api/openapi.json, /api/docs (Swagger UI), /api/redoc"
     );
     well_known::router(dispatcher, &meta)
 }
@@ -1661,11 +1670,12 @@ mod tests {
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         // Always-on now includes all five M7 well-known
-        // surfaces (#7.2 + #7.3 + #7.4) since each derives from
-        // in-process state with no DB dependency. /llms.txt
-        // routes still don't appear without DATABASE_URL set.
+        // surfaces (#7.2 + #7.3 + #7.4) and the OpenAPI trio
+        // (#7.5) since each derives from in-process state
+        // with no DB dependency. /llms.txt routes still don't
+        // appear without DATABASE_URL set.
         assert!(entry.detail.contains(
-            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json,/.well-known/api-catalog,/.well-known/oauth-protected-resource"
+            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json,/.well-known/api-catalog,/.well-known/oauth-protected-resource,/api/openapi.json,/api/docs,/api/redoc"
         ));
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
@@ -1716,10 +1726,10 @@ mod tests {
     #[test]
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
-        // Always-on set is /healthz, /readyz, /mcp, plus all
-        // five M7 well-known surfaces (#7.2 + #7.3 + #7.4). The
-        // llms.txt routes must NOT appear without the storage
-        // flag set.
+        // Always-on set is /healthz, /readyz, /mcp, the five
+        // M7 well-known surfaces (#7.2 + #7.3 + #7.4), and the
+        // OpenAPI trio (#7.5). The llms.txt routes must NOT
+        // appear without the storage flag set.
         assert_eq!(
             without,
             vec![
@@ -1731,6 +1741,9 @@ mod tests {
                 "/.well-known/agent-skills.json",
                 "/.well-known/api-catalog",
                 "/.well-known/oauth-protected-resource",
+                "/api/openapi.json",
+                "/api/docs",
+                "/api/redoc",
             ],
         );
         let with = resolved_public_routes(true);
@@ -1740,6 +1753,9 @@ mod tests {
         assert!(with.contains(&"/.well-known/agent-skills.json"));
         assert!(with.contains(&"/.well-known/api-catalog"));
         assert!(with.contains(&"/.well-known/oauth-protected-resource"));
+        assert!(with.contains(&"/api/openapi.json"));
+        assert!(with.contains(&"/api/docs"));
+        assert!(with.contains(&"/api/redoc"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
     }
