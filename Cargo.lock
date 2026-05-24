@@ -5363,14 +5363,24 @@ dependencies = [
 name = "tools-utility"
 version = "0.1.0"
 dependencies = [
+ "ammonia",
  "async-trait",
+ "base64",
+ "blake3",
+ "chrono",
+ "chrono-tz",
+ "hex",
  "mcp-core",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "slug",
  "thiserror",
  "tokio",
+ "ulid",
+ "uuid",
 ]
 
 [[package]]

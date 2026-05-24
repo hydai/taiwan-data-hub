@@ -19,8 +19,36 @@ workspace = true
 # the dep list minimal makes future supply-chain audits cheap and
 # avoids unused-dep noise in clippy.
 async-trait = { workspace = true }
+# #6.10 batch B — encoders, hashers, IDs, text. Workspace already
+# carries sha2 / hex / base64 / chrono / uuid / ammonia (via auth
+# + gateway / storage). We add blake3 / ulid / slug / chrono-tz
+# as the new small focused deps the batch needs. (`jsonwebtoken`
+# lives in workspace deps too but is intentionally NOT pulled
+# into this crate — `decode_jwt_unverified` decodes the segments
+# using base64 + serde directly because the tool's contract is
+# explicitly "no signature verification".)
+ammonia = { workspace = true }
+base64 = { workspace = true }
+blake3 = "1"
+chrono = { workspace = true, features = ["clock", "std"] }
+# `chrono-tz` is a new direct dep on this crate — first user is
+# `time_convert_timezone` (the existing `date_tools` use chrono
+# directly without IANA tz lookups). Kept here rather than in
+# `[workspace.dependencies]` because tools-utility is currently
+# the only crate that needs it; promote to workspace later if a
+# second crate picks it up.
+chrono-tz = "0.10"
+hex = { workspace = true }
 mcp-core = { path = "../mcp-core" }
 regex = { workspace = true }
+sha2 = { workspace = true }
+slug = "0.1"
+# `std` feature pulls in `Ulid::new()` (uses SystemTime + rand);
+# default-features = false would force callers to provide both
+# manually. We're fine with the std assumption — `cargo test` and
+# `tokio::runtime` already require std elsewhere in the crate.
+ulid = "1"
+uuid = { workspace = true }
 # Added in #6.9 batch A — geo helpers call OSM/Nominatim over HTTPS
 # (json + rustls-tls + gzip inherited from the workspace pin are
 # sufficient for the GET-only search/reverse endpoints).

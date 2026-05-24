@@ -19,6 +19,8 @@ pub mod date;
 pub mod date_tools;
 pub mod dictionaries;
 pub mod dictionary_tools;
+pub mod encoders;
+pub mod encoders_tool;
 pub mod formats;
 pub mod formats_tool;
 pub mod geo;
@@ -27,6 +29,8 @@ pub mod geo_geocode_tool;
 pub mod geo_nominatim;
 pub mod geo_polygon_tool;
 pub mod geo_reverse_geocode_tool;
+pub mod hashers_tool;
+pub mod ids_tool;
 pub mod json_helpers;
 pub mod national_id;
 pub mod normalize_address_tool;
@@ -34,6 +38,8 @@ pub mod passport;
 pub mod stats;
 pub mod stats_tools;
 pub mod tax_id;
+pub mod text_misc_tool;
+pub mod time_zone_tool;
 pub mod validate_id_tool;
 
 pub use canonical_tool::{
@@ -95,6 +101,29 @@ pub use stats_tools::{
     TOOL_PERCENTILE as STATS_PERCENTILE_TOOL_NAME, TOOL_SUMMARY as STATS_SUMMARY_TOOL_NAME,
 };
 
+// #6.10 batch B exports — 10 misc utility tools.
+pub use encoders_tool::{
+    Base64DecodeTool, Base64EncodeTool, HexDecodeTool, HexEncodeTool, JwtDecodeTool,
+    TOOL_BASE64_DECODE as DECODE_BASE64_TOOL_NAME, TOOL_BASE64_ENCODE as ENCODE_BASE64_TOOL_NAME,
+    TOOL_HEX_DECODE as DECODE_HEX_TOOL_NAME, TOOL_HEX_ENCODE as ENCODE_HEX_TOOL_NAME,
+    TOOL_JWT_DECODE as DECODE_JWT_UNVERIFIED_TOOL_NAME,
+    TOOL_URL_DECODE as DECODE_URL_COMPONENT_TOOL_NAME,
+    TOOL_URL_ENCODE as ENCODE_URL_COMPONENT_TOOL_NAME, UrlDecodeTool, UrlEncodeTool,
+};
+pub use hashers_tool::{
+    Blake3Tool, Sha256Tool, TOOL_BLAKE3 as HASH_BLAKE3_TOOL_NAME,
+    TOOL_SHA256 as HASH_SHA256_TOOL_NAME,
+};
+pub use ids_tool::{
+    TOOL_ULID as GENERATE_ULID_TOOL_NAME, TOOL_UUID_V4 as GENERATE_UUID_V4_TOOL_NAME,
+    TOOL_UUID_V7 as GENERATE_UUID_V7_TOOL_NAME, UlidTool, UuidV4Tool, UuidV7Tool,
+};
+pub use text_misc_tool::{
+    HtmlSanitizeTool, RegexTestTool, SlugifyTool, TOOL_HTML_SANITIZE as HTML_SANITIZE_TOOL_NAME,
+    TOOL_REGEX_TEST as TEXT_REGEX_TEST_TOOL_NAME, TOOL_SLUGIFY as TEXT_SLUGIFY_TOOL_NAME,
+};
+pub use time_zone_tool::{TOOL_NAME as TIME_CONVERT_TIMEZONE_TOOL_NAME, TimezoneConvertTool};
+
 use mcp_core::DispatcherBuilder;
 
 /// Register every utility tool with the supplied dispatcher builder.
@@ -138,4 +167,28 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(AutocorrelationTool::new())
         .register(DecomposeSeasonalTool::new())
         .register(AnomalyIsolationTool::new())
+        // #6.10 batch B — 10 of the 20 misc tools the DoD lists.
+        // Remaining 8 DoD bullets (pdf_extract, url_to_markdown,
+        // json_path, json_schema_validate, language_detect,
+        // big5_utf8_transcode, tw_traditional_simplified,
+        // holiday_between_dates) are deferred to a follow-up
+        // because each needs a heavy new crate (e.g. pdf-extract,
+        // html2md, jsonpath_lib, jsonschema, whatlang,
+        // encoding_rs, opencc-rs). See the #70 thread.
+        .register(Base64EncodeTool::new())
+        .register(Base64DecodeTool::new())
+        .register(UrlEncodeTool::new())
+        .register(UrlDecodeTool::new())
+        .register(HexEncodeTool::new())
+        .register(HexDecodeTool::new())
+        .register(JwtDecodeTool::new())
+        .register(Sha256Tool::new())
+        .register(Blake3Tool::new())
+        .register(UuidV4Tool::new())
+        .register(UuidV7Tool::new())
+        .register(UlidTool::new())
+        .register(SlugifyTool::new())
+        .register(RegexTestTool::new())
+        .register(HtmlSanitizeTool::new())
+        .register(TimezoneConvertTool::new())
 }
