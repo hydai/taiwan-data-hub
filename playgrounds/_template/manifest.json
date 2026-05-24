@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "範本",
+    "en": "Template"
+  },
+  "description_i18n": {
+    "zh-TW": "示範 playground 框架的最小可運作範例:狀態列、共享連結、API 代理呼叫。複製此目錄改名為自己的 slug 即可開始。",
+    "en": "Smallest working example of the playground framework — state-bar, share link, and proxied API call. Copy this directory under your own slug to start."
+  },
+  "tags": ["template"],
+  "status": "stable"
+}

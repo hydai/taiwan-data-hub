@@ -1,5 +1,6 @@
 import { loadConnectors } from '$lib/connectors/load';
 import { loadDomainGroups } from '$lib/domains/load';
+import { loadPlaygrounds } from '$lib/playgrounds/registry';
 import type { RequestHandler } from './$types';
 
 /**
@@ -17,7 +18,8 @@ const STATIC_ROUTES: readonly { path: string; priority: number; changefreq: stri
 	{ path: '/domains', priority: 0.9, changefreq: 'weekly' },
 	{ path: '/datasets', priority: 0.9, changefreq: 'daily' },
 	{ path: '/collections', priority: 0.8, changefreq: 'weekly' },
-	{ path: '/connectors', priority: 0.8, changefreq: 'weekly' }
+	{ path: '/connectors', priority: 0.8, changefreq: 'weekly' },
+	{ path: '/playgrounds', priority: 0.8, changefreq: 'weekly' }
 ];
 
 /**
@@ -35,6 +37,7 @@ export const GET: RequestHandler = ({ url, setHeaders }) => {
 	const origin = url.origin;
 	const domainSlugs = loadDomainGroups().flatMap((g) => g.domains.map((d) => d.slug));
 	const connectorSlugs = loadConnectors().map((c) => c.slug);
+	const playgroundSlugs = loadPlaygrounds().map((p) => p.slug);
 
 	const urls: { loc: string; priority?: number; changefreq?: string }[] = [
 		...STATIC_ROUTES.map((r) => ({
@@ -49,6 +52,11 @@ export const GET: RequestHandler = ({ url, setHeaders }) => {
 		})),
 		...connectorSlugs.map((slug) => ({
 			loc: `${origin}/connectors/${slug}`,
+			priority: 0.6,
+			changefreq: 'monthly'
+		})),
+		...playgroundSlugs.map((slug) => ({
+			loc: `${origin}/playgrounds/${slug}`,
 			priority: 0.6,
 			changefreq: 'monthly'
 		}))
