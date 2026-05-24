@@ -18,31 +18,12 @@
 	avatar style stays consistent across the eight cards.
 -->
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import MetaTags from '$lib/seo/MetaTags.svelte';
+	import { renderInstallSnippet } from '$lib/connectors/snippet';
 	import type { Connector, ConnectorStatus } from '$lib/connectors/types';
 
 	let { data } = $props();
-
-	/**
-	 * Render the YAML-supplied config template as the Claude Desktop
-	 * `claude_desktop_config.json` shape: `{"mcpServers": {<slug>:
-	 * <template>}}`. Two-space indent keeps the snippet copy-paste
-	 * friendly in narrow card widths.
-	 *
-	 * We strip the `env` key when empty so `token_required: false`
-	 * cards render a tighter snippet — `JSON.stringify` would emit
-	 * `"env": {}` otherwise.
-	 */
-	function renderSnippet(c: Connector): string {
-		const inner: Record<string, unknown> = {
-			command: c.mcp_config_template.command,
-			args: [...c.mcp_config_template.args]
-		};
-		if (c.mcp_config_template.env) {
-			inner.env = { ...c.mcp_config_template.env };
-		}
-		return JSON.stringify({ mcpServers: { [c.slug]: inner } }, null, 2);
-	}
 
 	/**
 	 * Visual styling for the status pill. Picked to read at a glance
@@ -158,17 +139,26 @@
 					{connector.install_instructions_i18n['zh-TW']}
 				</p>
 
-				<details class="mt-auto rounded-md border border-neutral-200 bg-neutral-50">
-					<summary
-						class="cursor-pointer rounded-md px-3 py-2 text-sm font-medium text-primary-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+				<div class="mt-auto space-y-3">
+					<details class="rounded-md border border-neutral-200 bg-neutral-50">
+						<summary
+							class="cursor-pointer rounded-md px-3 py-2 text-sm font-medium text-primary-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+						>
+							Install snippet
+						</summary>
+						<pre
+							class="overflow-x-auto rounded-b-md bg-neutral-900 px-3 py-3 text-xs leading-relaxed text-neutral-100"><code
+								>{renderInstallSnippet(connector)}</code
+							></pre>
+					</details>
+
+					<a
+						class="inline-flex w-full items-center justify-center rounded-md bg-primary-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:outline-none"
+						href={resolve('/connectors/[slug]', { slug: connector.slug })}
 					>
-						Install snippet
-					</summary>
-					<pre
-						class="overflow-x-auto rounded-b-md bg-neutral-900 px-3 py-3 text-xs leading-relaxed text-neutral-100"><code
-							>{renderSnippet(connector)}</code
-						></pre>
-				</details>
+						Full install guide
+					</a>
+				</div>
 			</li>
 		{/each}
 	</ul>

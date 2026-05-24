@@ -1,3 +1,4 @@
+import { loadConnectors } from '$lib/connectors/load';
 import { loadDomainGroups } from '$lib/domains/load';
 import type { RequestHandler } from './$types';
 
@@ -33,6 +34,7 @@ const STATIC_ROUTES: readonly { path: string; priority: number; changefreq: stri
 export const GET: RequestHandler = ({ url, setHeaders }) => {
 	const origin = url.origin;
 	const domainSlugs = loadDomainGroups().flatMap((g) => g.domains.map((d) => d.slug));
+	const connectorSlugs = loadConnectors().map((c) => c.slug);
 
 	const urls: { loc: string; priority?: number; changefreq?: string }[] = [
 		...STATIC_ROUTES.map((r) => ({
@@ -44,6 +46,11 @@ export const GET: RequestHandler = ({ url, setHeaders }) => {
 			loc: `${origin}/domains/${slug}`,
 			priority: 0.7,
 			changefreq: 'weekly'
+		})),
+		...connectorSlugs.map((slug) => ({
+			loc: `${origin}/connectors/${slug}`,
+			priority: 0.6,
+			changefreq: 'monthly'
 		}))
 	];
 
