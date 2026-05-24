@@ -569,10 +569,20 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
 }
 
 /// Parse a comma-separated list of OAuth authorization-server URLs.
-/// Each entry is trimmed + validated via [`normalise_public_base_url`];
-/// invalid entries are dropped with a `warn!` so a misconfigured
-/// boot publishes only the well-formed AS issuers instead of
-/// poisoning the discovery document with broken URLs.
+/// Each entry's surrounding whitespace is trimmed, then validated
+/// via [`validate_oauth_issuer_url`]; invalid entries are dropped
+/// with a `warn!` so a misconfigured boot publishes only the
+/// well-formed AS issuers instead of poisoning the discovery
+/// document with broken URLs.
+///
+/// **Issuer-identity preservation**: unlike
+/// [`normalise_public_base_url`], the issuer-URL validator does
+/// NOT trim trailing slashes. Per RFC 8414 §3 the issuer
+/// identifier is matched by exact string equality (`https://as/`
+/// vs `https://as` are distinct issuers from the OAuth/OIDC
+/// metadata-discovery point of view), so silently rewriting one
+/// shape into the other would make a downstream client reject
+/// the AS as the wrong issuer.
 fn parse_oauth_authorization_servers(raw: &str) -> Vec<String> {
     raw.split(',')
         .filter_map(|entry| {
@@ -580,7 +590,7 @@ fn parse_oauth_authorization_servers(raw: &str) -> Vec<String> {
             if trimmed.is_empty() {
                 return None;
             }
-            match normalise_public_base_url(trimmed) {
+            match validate_oauth_issuer_url(trimmed) {
                 Ok(url) => Some(url),
                 Err(e) => {
                     tracing::warn!(
@@ -593,6 +603,46 @@ fn parse_oauth_authorization_servers(raw: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Validate an OAuth issuer URL while preserving the exact
+/// caller-supplied form (including a trailing `/` if present).
+/// Per RFC 8414 §3 the issuer identifier is matched by exact
+/// string equality, so any normalisation step that drops a path
+/// component would invalidate client-side issuer comparisons.
+///
+/// Rejects malformed URLs, non-`http(s)` schemes, missing hosts,
+/// query strings, fragments, and userinfo — same defence as
+/// [`normalise_public_base_url`] minus the trailing-slash trim.
+fn validate_oauth_issuer_url(raw: &str) -> Result<String, String> {
+    if raw.is_empty() {
+        return Err("value is blank".into());
+    }
+    let url = Url::parse(raw).map_err(|e| format!("not a valid URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "scheme must be http or https, got {:?}",
+            url.scheme()
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("missing host component".into());
+    }
+    if url.query().is_some() {
+        return Err("issuer URL must not carry a query string".into());
+    }
+    if url.fragment().is_some() {
+        return Err("issuer URL must not carry a fragment".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "issuer URL must not carry userinfo (user:pass@) — credentials would leak".into(),
+        );
+    }
+    // Return the caller's exact input (after whitespace trim, but
+    // not slash-trim) so a trailing `/` survives. Issuer matching
+    // per RFC 8414 §3 is byte-exact.
+    Ok(raw.to_owned())
 }
 
 /// Validate + normalise a public-facing base URL supplied via env
@@ -1694,13 +1744,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_oauth_authorization_servers_filters_and_normalises() {
+    fn parse_oauth_authorization_servers_preserves_issuer_shape() {
         // Empty input → empty list.
         assert!(parse_oauth_authorization_servers("").is_empty());
-        // Single valid entry, trimmed + slash-stripped.
+        // Surrounding whitespace trimmed; trailing `/` PRESERVED
+        // because per RFC 8414 §3 the issuer identifier is matched
+        // by byte-exact equality.
         assert_eq!(
             parse_oauth_authorization_servers("  https://as.example/  "),
-            vec!["https://as.example".to_string()],
+            vec!["https://as.example/".to_string()],
         );
         // Comma-separated list with one valid + one invalid +
         // one empty entry — only the valid one survives.
@@ -1710,9 +1762,46 @@ mod tests {
             ),
             vec![
                 "https://primary.example".to_string(),
-                "https://secondary.example".to_string(),
+                "https://secondary.example/".to_string(),
             ],
         );
+    }
+
+    #[test]
+    fn validate_oauth_issuer_url_preserves_trailing_slash_and_path() {
+        // Trailing slash survives — RFC 8414 §3 issuer comparison
+        // is byte-exact so the validator must NOT normalise.
+        assert_eq!(
+            validate_oauth_issuer_url("https://as.example/").unwrap(),
+            "https://as.example/",
+        );
+        assert_eq!(
+            validate_oauth_issuer_url("https://as.example").unwrap(),
+            "https://as.example",
+        );
+        // Paths are part of the issuer identifier (some IdPs nest
+        // the AS under a `/realm/` path) — also preserved verbatim.
+        assert_eq!(
+            validate_oauth_issuer_url("https://idp.example/realms/main").unwrap(),
+            "https://idp.example/realms/main",
+        );
+    }
+
+    #[test]
+    fn validate_oauth_issuer_url_rejects_unsafe_inputs() {
+        assert!(validate_oauth_issuer_url("").is_err());
+        assert!(validate_oauth_issuer_url("not a url").is_err());
+        assert!(validate_oauth_issuer_url("ftp://as.example").is_err());
+        assert!(validate_oauth_issuer_url("file:///etc/passwd").is_err());
+        // Query / fragment / userinfo all rejected — same defence
+        // as `normalise_public_base_url`, just without the slash
+        // trim.
+        let err = validate_oauth_issuer_url("https://as.example?x=1").unwrap_err();
+        assert!(err.contains("query"), "unexpected error: {err}");
+        let err = validate_oauth_issuer_url("https://as.example#frag").unwrap_err();
+        assert!(err.contains("fragment"), "unexpected error: {err}");
+        let err = validate_oauth_issuer_url("https://user:pass@as.example").unwrap_err();
+        assert!(err.contains("userinfo"), "unexpected error: {err}");
     }
 
     #[test]

@@ -157,11 +157,14 @@ struct ManifestState {
     content_type: &'static str,
 }
 
-/// Build the well-known subrouter that mounts all three M7
-/// agent-discovery surfaces (#7.2 + #7.3): `/.well-known/mcp.json`
-/// (MCP manifest), `/.well-known/agent-card.json` (Google A2A
-/// agent card), and `/.well-known/agent-skills.json` (skill →
-/// MCP tool id index). Each body is rendered once from the
+/// Build the well-known subrouter that mounts all five M7
+/// agent-discovery surfaces (#7.2 + #7.3 + #7.4):
+/// `/.well-known/mcp.json` (MCP manifest),
+/// `/.well-known/agent-card.json` (Google A2A agent card),
+/// `/.well-known/agent-skills.json` (skill → MCP tool id index),
+/// `/.well-known/api-catalog` (RFC 9727 linkset), and
+/// `/.well-known/oauth-protected-resource` (RFC 9728 metadata).
+/// Each body is rendered once from the
 /// supplied [`Dispatcher`] snapshot + [`ManifestMeta`] at
 /// construction time — the registry is fixed for the process
 /// lifetime so a per-request rebuild would be wasted work.
@@ -644,11 +647,11 @@ fn build_oauth_resource(meta: &ManifestMeta) -> OAuthProtectedResource {
 /// RFC 9728 OAuth Protected Resource Metadata body. Schema:
 /// <https://datatracker.ietf.org/doc/html/rfc9728>.
 ///
-/// Field name `kind`/`type` mismatches are deliberate: the spec
-/// uses `snake_case` field names so no rename annotations are
-/// needed. Optional fields use `Option` + `skip_serializing_if`
-/// so the JSON output only carries set fields, matching the
-/// "absence means default" convention.
+/// Field names mirror RFC 9728's `snake_case` convention exactly,
+/// so no serde rename annotations are needed. Optional fields
+/// use `Option` + `skip_serializing_if` so the JSON output only
+/// carries values the operator has actually set, matching the
+/// spec's "absence means default" convention.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OAuthProtectedResource {
     pub resource: String,
