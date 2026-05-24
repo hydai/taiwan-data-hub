@@ -5,16 +5,13 @@
  *   - anomaly list (vendors with >5× YoY growth)
  *   - per-agency total (horizontal bar list)
  *
- * Filters: year selector + currency unit. All dynamic styles use
- * CSS classes / inline-data widths via `--bar-pct` custom prop —
- * the framework CSP blocks `element.style.foo = ...` mutations so
- * we set the custom property via a `style` *attribute* set on
- * creation through `setAttribute('style', ...)`. Wait — that's
- * the same thing. We need a different approach.
- *
- * For width, we use percentage classes `.w-N` defined in style.css
- * (rounded to nearest 5 %, 0-100), set via classList. That keeps
- * bar widths CSS-only.
+ * Filters: year selector + currency unit. All dynamic styles are
+ * CSS classes — the framework CSP blocks `element.style.foo = ...`
+ * mutations. Bar widths use percentage classes `.w-0` … `.w-100`
+ * defined in style.css (rounded to nearest 5 %), applied via
+ * `classList.add('w-' + bucket)`. Colour bins, grid placement,
+ * etc. follow the same data-attr-or-class idiom established in
+ * the earlier playgrounds.
  */
 
 (async function () {
@@ -175,13 +172,29 @@
 			'agency_id',
 			'amount_ntd'
 		);
+		// Backfill agencies that have ZERO contracts for the
+		// selected year so the panel always shows the full set of
+		// 10 (the DoD asks for per-agency comparison; silently
+		// omitting agencies with zero spend would hide the
+		// "no awards this year" signal).
+		var seen = new Set(
+			totals.map(function (t) {
+				return t.id;
+			})
+		);
+		for (var ai = 0; ai < data.agencies.length; ai += 1) {
+			var ag = data.agencies[ai];
+			if (!seen.has(ag.id)) totals.push({ id: ag.id, total: 0 });
+		}
 		var sorted = sortDesc(totals);
 		var max = sorted.length ? sorted[0].total : 1;
 		agencyList.textContent = '';
 		for (var i = 0; i < sorted.length; i += 1) {
 			var s = sorted[i];
-			var ag = agencyById[s.id];
-			agencyList.appendChild(barRow(i + 1, ag ? ag.name : s.id, s.total, max, divisor, suffix));
+			var agency = agencyById[s.id];
+			agencyList.appendChild(
+				barRow(i + 1, agency ? agency.name : s.id, s.total, max, divisor, suffix)
+			);
 		}
 	}
 

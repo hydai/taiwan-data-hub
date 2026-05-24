@@ -134,7 +134,6 @@ form#filters label {
 	display: flex;
 	flex-direction: column;
 	gap: 0.375rem;
-	counter-reset: row;
 }
 .bar-list li {
 	display: grid;
