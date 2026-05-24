@@ -32,9 +32,12 @@
 	var summaryEl = document.getElementById('summary');
 	var metricRadios = document.querySelectorAll('input[name="metric"]');
 
-	// 7-step palette — light to dark; viridis-inspired but native
-	// CSS colors only (no external palette dependency).
-	var PALETTE = ['#f1f5f9', '#cbd5e1', '#94a3b8', '#64748b', '#475569', '#334155', '#1e293b'];
+	// 7-step palette, kept in CSS as `.bin-0` … `.bin-6` (see
+	// style.css). The framework CSP forbids inline styles, so we
+	// can't set `el.style.background = ...` at runtime — we just
+	// toggle the bin class. PALETTE_LENGTH stays here so the bin
+	// computation logic doesn't need to import CSS.
+	var PALETTE_LENGTH = 7;
 
 	var validMetrics = new Set(['density', 'population']);
 	var selectedCounty = null;
@@ -69,9 +72,17 @@
 			btn.type = 'button';
 			btn.className = 'tile';
 			btn.dataset.code = c.code;
-			btn.style.gridColumn = String(c.col);
-			btn.style.gridRow = String(c.row);
-			btn.setAttribute('aria-label', c.name + ' — 人口 ' + c.pop.toLocaleString('zh-TW'));
+			// Grid position via data-attrs (NOT inline style — CSP
+			// blocks .style.gridColumn / .style.gridRow). The
+			// matching attribute selectors live in style.css.
+			btn.dataset.col = String(c.col);
+			btn.dataset.row = String(c.row);
+			// Don't set aria-label: it would override the visible
+			// children (label + value) and would also lock the
+			// announced value to a single metric. The native
+			// accessible name comes from the button's text content,
+			// which `recolor()` keeps in sync with the selected
+			// metric automatically.
 			var label = document.createElement('span');
 			label.className = 'tile-label';
 			label.textContent = c.name;
@@ -103,7 +114,7 @@
 		var values = counties.map(function (c) { return metricValue(c, metric); });
 		var min = Math.min.apply(null, values);
 		var max = Math.max.apply(null, values);
-		var ticks = computeTicks(min, max, PALETTE.length);
+		var ticks = computeTicks(min, max, PALETTE_LENGTH);
 		var tiles = mapEl.querySelectorAll('.tile');
 		var totalPop = 0;
 		for (var i = 0; i < tiles.length; i += 1) {
@@ -112,8 +123,10 @@
 			if (!c) continue;
 			var v = metricValue(c, metric);
 			var idx = bucketIndex(v, ticks);
-			tile.style.background = PALETTE[idx];
-			tile.style.color = idx >= 4 ? '#fafafa' : '#0f172a';
+			// Reset any previous bin class then apply the new one.
+			// classList tokens are bin-0 … bin-6; defined in style.css.
+			for (var b = 0; b < PALETTE_LENGTH; b += 1) tile.classList.remove('bin-' + b);
+			tile.classList.add('bin-' + idx);
 			var valEl = tile.querySelector('.tile-value');
 			valEl.textContent = formatMetric(v, metric);
 			tile.classList.toggle('selected', c.code === selectedCounty);
@@ -126,7 +139,7 @@
 			' 人;' +
 			(metric === 'population' ? '人口數' : '人口密度') +
 			'分為 ' +
-			PALETTE.length +
+			PALETTE_LENGTH +
 			' 個分桶。';
 		if (selectedCounty) {
 			var sel = counties.find(function (cc) { return cc.code === selectedCounty; });
@@ -159,7 +172,13 @@
 		dl.appendChild(dt('面積'));
 		dl.appendChild(dd(c.area_km2.toLocaleString('zh-TW') + ' km²'));
 		dl.appendChild(dt('密度'));
-		dl.appendChild(dd((c.pop / c.area_km2).toLocaleString('zh-TW', { maximumFractionDigits: 1 }) + ' 人/km²'));
+		// Reuse metricValue so the area=0 guard is consistent
+		// between the map (which uses metricValue) and the panel
+		// (which used to divide directly and could show Infinity).
+		var density = metricValue(c, 'density');
+		dl.appendChild(
+			dd(density.toLocaleString('zh-TW', { maximumFractionDigits: 1 }) + ' 人/km²')
+		);
 		detailEl.appendChild(dl);
 	}
 
@@ -169,17 +188,20 @@
 		label.className = 'legend-label';
 		label.textContent = metric === 'population' ? '人口數' : '人口密度';
 		legendEl.appendChild(label);
-		for (var i = 0; i < PALETTE.length; i += 1) {
+		for (var i = 0; i < PALETTE_LENGTH; i += 1) {
 			var bin = document.createElement('span');
 			bin.className = 'legend-bin';
 			var swatch = document.createElement('span');
-			swatch.className = 'legend-swatch';
-			swatch.style.background = PALETTE[i];
+			// Reuse the same `bin-N` palette class the tiles use, so
+			// the legend stays in lockstep with the map and no
+			// inline style is needed.
+			swatch.className = 'legend-swatch bin-' + i;
 			bin.appendChild(swatch);
 			var t = document.createElement('span');
 			t.className = 'legend-tick';
 			t.textContent =
-				formatMetric(ticks[i], metric) + (i < PALETTE.length - 1 ? '–' + formatMetric(ticks[i + 1], metric) : '+');
+				formatMetric(ticks[i], metric) +
+				(i < PALETTE_LENGTH - 1 ? '–' + formatMetric(ticks[i + 1], metric) : '+');
 			bin.appendChild(t);
 			legendEl.appendChild(bin);
 		}
