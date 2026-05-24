@@ -71,7 +71,13 @@ fn throttle() -> &'static Mutex<Instant> {
 }
 
 fn base_url() -> String {
-    std::env::var("NOMINATIM_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+    // Trim trailing slashes from the override — `format!("{base}/search")`
+    // would otherwise produce `https://host//search`, which some
+    // reverse proxies normalise away but others reject outright.
+    // Default value has no trailing slash, so this is a no-op for
+    // the common case.
+    let raw = std::env::var("NOMINATIM_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    raw.trim_end_matches('/').to_string()
 }
 
 /// Wait until our throttle slot is free, then update the slot for
