@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Company 360 — 公司全景查詢</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>Company 360 <span class="tag">展示用</span></h1>
+				<p class="muted">
+					輸入統一編號(8 碼),於單一面板呈現
+					<strong>商業登記 × 司法案件 × 政府採購</strong>三來源 join 後的視圖。
+				</p>
+				<p class="caveat">
+					此 playground 內建四家公開公司(台積電、鴻海、統一、中華電信)的示範資料,司法案件與採購欄位皆為說明面板配置用樣本,非真實紀錄。正式版需連線到載入相關資料集的後端。
+				</p>
+			</header>
+
+			<form id="search-form">
+				<label for="tax-id">統一編號</label>
+				<input
+					id="tax-id"
+					name="tax-id"
+					type="text"
+					inputmode="numeric"
+					pattern="\d{8}"
+					placeholder="例:22099131"
+					maxlength="8"
+					required
+				/>
+				<button type="submit">查詢</button>
+			</form>
+
+			<aside class="hints" aria-label="可用的示範統編">
+				<p class="muted">內建資料的統編(點擊載入):</p>
+				<ul id="sample-list"></ul>
+			</aside>
+
+			<section id="result" hidden aria-live="polite"></section>
+
+			<section id="empty" hidden>
+				<p>找不到統編 <code id="empty-tax-id"></code>。</p>
+				<p class="muted">
+					此 playground 內建的示範資料僅涵蓋四家公司;查詢任意統編需要連線到 Taiwan Data
+					Hub 後端(載入 MOEA 商業登記 + 司法院案件 + 政府電子採購資料)。
+				</p>
+			</section>
+
+			<footer>
+				<p class="muted">
+					框架契約:此頁面執行於 <code>iframe sandbox="allow-scripts"</code> 與
+					嚴格 CSP 之下,僅能透過 <code>tdh.fetch('/api/v1/...')</code> 對母頁面代理 GET / HEAD
+					請求。本 playground 不發起任何網路呼叫,所有資料來自同目錄下的
+					<code>sample-data.js</code>(以 <code>&lt;script src&gt;</code> 載入,符合 CSP
+					<code>script-src 'self'</code>)。
+				</p>
+			</footer>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./sample-data.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>
