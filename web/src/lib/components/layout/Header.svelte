@@ -184,7 +184,7 @@
 		<button
 			type="button"
 			onclick={onToggleMenu}
-			aria-label={isMenuOpen ? 'Close menu' : 'Open menu'}
+			aria-label={isMenuOpen ? m.aria_close_menu() : m.aria_open_menu()}
 			aria-expanded={isMenuOpen}
 			aria-haspopup="dialog"
 			class="inline-flex h-10 w-10 items-center justify-center rounded-md text-neutral-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none md:hidden"

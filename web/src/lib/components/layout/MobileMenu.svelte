@@ -93,7 +93,7 @@
 		id="mobile-menu"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Mobile navigation"
+		aria-label={m.aria_mobile_navigation_dialog()}
 		class="fixed inset-0 z-50 md:hidden"
 	>
 		<!-- Backdrop is mouse-only dismissal — keyboard users have ESC
@@ -134,7 +134,7 @@
 				</button>
 			</div>
 
-			<nav aria-label="Mobile" class="flex-1 space-y-1 px-3 py-4">
+			<nav aria-label={m.aria_nav_mobile()} class="flex-1 space-y-1 px-3 py-4">
 				{#each navLinks as link (link.href)}
 					<!-- Same `deLocalizeUrl` rationale as Header.svelte. -->
 					{@const active = deLocalizeUrl(page.url).pathname.startsWith(link.href)}

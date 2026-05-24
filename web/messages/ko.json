@@ -1,27 +1,24 @@
 {
 	"$schema": "https://inlang.com/schema/inlang-message-format",
 	"hello_world": "안녕하세요, 세계",
-
 	"app_name": "Taiwan Data Hub",
 	"app_tagline_short": "Open-source, self-hostable MCP service hub for Taiwan public data.",
-
 	"nav_domains": "Domains",
 	"nav_datasets": "Datasets",
 	"nav_collections": "Collections",
 	"nav_connectors": "Connectors",
 	"nav_playgrounds": "Playgrounds",
 	"nav_licenses": "Licenses",
-
 	"locale_switcher_label": "Language",
 	"mobile_menu_label": "Menu",
-
 	"aria_brand_home": "Taiwan Data Hub — home",
 	"aria_nav_main": "Main",
 	"aria_close_menu": "Close menu",
-
+	"aria_open_menu": "Open menu",
+	"aria_nav_mobile": "Mobile",
+	"aria_mobile_navigation_dialog": "Mobile navigation",
 	"badge_personal_mode": "Personal mode",
 	"badge_personal_mode_tooltip": "Set MODE=multi-user on the gateway to enable auth",
-
 	"footer_license": "License",
 	"footer_source": "Source",
 	"footer_contact": "Contact",
@@ -30,7 +27,6 @@
 	"footer_contact_prefix": "Bug reports and feature requests via",
 	"footer_contact_suffix": ".",
 	"footer_copyright_suffix": "Taiwan Data Hub contributors — fully open source, self-hostable, no client-side tracking.",
-
 	"home_pre_alpha_badge": "Pre-alpha · design phase",
 	"home_scaffold_heading": "This is a scaffold.",
 	"home_scaffold_prefix": "Real marketplace UI lands in",
