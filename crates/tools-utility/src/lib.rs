@@ -12,6 +12,7 @@
 //! for `serde_json::Value` round-trips.
 
 pub mod address;
+pub mod anomaly;
 pub mod canonical;
 pub mod canonical_tool;
 pub mod date;
@@ -20,10 +21,18 @@ pub mod dictionaries;
 pub mod dictionary_tools;
 pub mod formats;
 pub mod formats_tool;
+pub mod geo;
+pub mod geo_distance_tool;
+pub mod geo_geocode_tool;
+pub mod geo_nominatim;
+pub mod geo_polygon_tool;
+pub mod geo_reverse_geocode_tool;
 pub mod json_helpers;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;
+pub mod stats;
+pub mod stats_tools;
 pub mod tax_id;
 pub mod validate_id_tool;
 
@@ -56,6 +65,36 @@ pub use normalize_address_tool::{
 };
 pub use validate_id_tool::{TOOL_NAME as TW_VALIDATE_ID_TOOL_NAME, ValidateIdTool};
 
+// #6.9 — wave-2 generic tool exports (geo + stats + time-series +
+// anomaly). Naming convention: `TOOL_<NAME>` constant + `<NAME>Tool`
+// struct so a future round of registry refactoring can lift them
+// into a macro without renaming.
+pub use anomaly::isolation_scores;
+pub use geo::{distance_haversine_m, point_in_polygon};
+pub use geo_distance_tool::{DistanceHaversineTool, TOOL_NAME as GEO_DISTANCE_HAVERSINE_TOOL_NAME};
+pub use geo_geocode_tool::{GeocodeTool, TOOL_NAME as GEO_GEOCODE_TOOL_NAME};
+pub use geo_polygon_tool::{PointInPolygonTool, TOOL_NAME as GEO_POINT_IN_POLYGON_TOOL_NAME};
+pub use geo_reverse_geocode_tool::{
+    ReverseGeocodeTool, TOOL_NAME as GEO_REVERSE_GEOCODE_TOOL_NAME,
+};
+pub use stats::{
+    Histogram, LinearFit, SeasonalDecomposition, Summary, autocorrelation,
+    decompose_seasonal_additive, histogram, linear_regression, moving_average, pearson_correlation,
+    percentile, summary,
+};
+pub use stats_tools::{
+    AnomalyIsolationTool, AutocorrelationTool, CorrelationTool, DecomposeSeasonalTool,
+    HistogramTool, LinearRegressionTool, MovingAverageTool, PercentileTool, SummaryStatisticsTool,
+    TOOL_ANOMALY as STATS_ANOMALY_ISOLATION_TOOL_NAME,
+    TOOL_AUTOCORRELATION as SERIES_AUTOCORRELATION_TOOL_NAME,
+    TOOL_CORRELATION as STATS_CORRELATION_TOOL_NAME,
+    TOOL_DECOMPOSE_SEASONAL as SERIES_DECOMPOSE_SEASONAL_TOOL_NAME,
+    TOOL_HISTOGRAM as STATS_HISTOGRAM_TOOL_NAME,
+    TOOL_LINEAR_REGRESSION as STATS_LINEAR_REGRESSION_TOOL_NAME,
+    TOOL_MOVING_AVERAGE as SERIES_MOVING_AVERAGE_TOOL_NAME,
+    TOOL_PERCENTILE as STATS_PERCENTILE_TOOL_NAME, TOOL_SUMMARY as STATS_SUMMARY_TOOL_NAME,
+};
+
 use mcp_core::DispatcherBuilder;
 
 /// Register every utility tool with the supplied dispatcher builder.
@@ -84,4 +123,19 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(dictionary_tools::COUNTY_CODE_GET_TOOL)
         .register(dictionary_tools::COUNTY_CODE_SEARCH_TOOL)
         .register(ValidateFormatTool)
+        // #6.9 — wave-2 generic tools (geo / stats / time-series /
+        // anomaly). 13 tools per the issue's Definition of Done.
+        .register(DistanceHaversineTool::new())
+        .register(PointInPolygonTool::new())
+        .register(GeocodeTool::new())
+        .register(ReverseGeocodeTool::new())
+        .register(SummaryStatisticsTool::new())
+        .register(PercentileTool::new())
+        .register(HistogramTool::new())
+        .register(CorrelationTool::new())
+        .register(LinearRegressionTool::new())
+        .register(MovingAverageTool::new())
+        .register(AutocorrelationTool::new())
+        .register(DecomposeSeasonalTool::new())
+        .register(AnomalyIsolationTool::new())
 }

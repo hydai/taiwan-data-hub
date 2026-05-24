@@ -1,0 +1,184 @@
+//! Minimal Nominatim HTTP client shared by the `geo_geocode` and
+//! `geo_reverse_geocode` MCP tools.
+//!
+//! Nominatim's public-usage policy is strict:
+//!   - Mandatory descriptive `User-Agent` header
+//!   - 1 request per second absolute maximum
+//!   - No bulk geocoding (one-shot lookups only)
+//!
+//! We comply by:
+//!   - Setting a project-identifying `User-Agent` on every request
+//!   - Routing all calls through a process-wide async mutex that
+//!     enforces ≥ 1 s between calls (slot-based — the next caller
+//!     sleeps until `min_next_at` has passed before issuing)
+//!
+//! Operators that need higher throughput should self-host
+//! Nominatim or use a commercial geocoder; the env var
+//! `NOMINATIM_BASE_URL` lets a self-host swap in their endpoint.
+
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use reqwest::Client;
+use serde::Deserialize;
+use thiserror::Error;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
+
+/// Project-identifying user-agent. The Nominatim usage policy
+/// requires "an HTTP referer and / or a valid HTTP user-agent
+/// identifying the application", and rejects generic strings like
+/// "curl/x.y" or "Mozilla/...".
+const USER_AGENT: &str = concat!(
+    "Taiwan-Data-Hub/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/hydai/taiwan-data-hub)"
+);
+
+/// Public default. Self-hosters override via `NOMINATIM_BASE_URL`.
+pub const DEFAULT_BASE_URL: &str = "https://nominatim.openstreetmap.org";
+
+/// Minimum spacing between consecutive requests, in line with the
+/// Nominatim public-usage rule.
+const MIN_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Per-request timeout — slow upstream shouldn't hang the whole MCP
+/// dispatcher.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One-time-initialised, process-wide HTTP client. Cheap to reuse,
+/// keeps a connection pool, sets the user-agent + timeout once.
+static CLIENT: OnceLock<Client> = OnceLock::new();
+
+/// Slot-based throttle: holds the earliest time we may issue the
+/// next request. Callers await the lock, sleep until the slot opens,
+/// then issue and stamp `now + MIN_INTERVAL` into the slot before
+/// releasing.
+static THROTTLE: OnceLock<Mutex<Instant>> = OnceLock::new();
+
+fn client() -> &'static Client {
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("reqwest client build must succeed")
+    })
+}
+
+fn throttle() -> &'static Mutex<Instant> {
+    THROTTLE.get_or_init(|| Mutex::new(Instant::now()))
+}
+
+fn base_url() -> String {
+    std::env::var("NOMINATIM_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
+
+/// Wait until our throttle slot is free, then update the slot for
+/// the next caller. The slot stamp is `now + MIN_INTERVAL` so a
+/// sub-second loop of geocodes naturally gets serialised at 1 Hz.
+async fn await_slot() {
+    let mut next_at = throttle().lock().await;
+    let now = Instant::now();
+    if now < *next_at {
+        tokio::time::sleep(*next_at - now).await;
+    }
+    *next_at = Instant::now() + MIN_INTERVAL;
+}
+
+#[derive(Debug, Error)]
+pub enum NominatimError {
+    #[error("nominatim request failed: {0}")]
+    Request(String),
+    #[error("nominatim response was not JSON: {0}")]
+    Decode(String),
+    #[error("nominatim returned HTTP {0}")]
+    Status(u16),
+}
+
+/// `/search` — forward geocode (free-text → coordinates).
+/// Returns up to `limit` results sorted by Nominatim's relevance.
+pub async fn search(query: &str, limit: u32) -> Result<Vec<NominatimSearchHit>, NominatimError> {
+    await_slot().await;
+    let url = format!("{}/search", base_url());
+    let resp = client()
+        .get(&url)
+        .query(&[
+            ("q", query),
+            ("format", "jsonv2"),
+            ("limit", &limit.to_string()),
+            ("addressdetails", "1"),
+        ])
+        // `without_url()` strips the request URL from the error chain
+        // so query parameters can't leak into log lines.
+        .send()
+        .await
+        .map_err(|e| NominatimError::Request(e.without_url().to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(NominatimError::Status(status.as_u16()));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| NominatimError::Request(e.without_url().to_string()))?;
+    serde_json::from_slice::<Vec<NominatimSearchHit>>(&body)
+        .map_err(|e| NominatimError::Decode(e.to_string()))
+}
+
+/// `/reverse` — reverse geocode (coordinates → free-text + address parts).
+pub async fn reverse(lat: f64, lon: f64) -> Result<NominatimReverseHit, NominatimError> {
+    await_slot().await;
+    let url = format!("{}/reverse", base_url());
+    let resp = client()
+        .get(&url)
+        .query(&[
+            ("lat", lat.to_string()),
+            ("lon", lon.to_string()),
+            ("format", "jsonv2".to_string()),
+            ("addressdetails", "1".to_string()),
+        ])
+        .send()
+        .await
+        .map_err(|e| NominatimError::Request(e.without_url().to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(NominatimError::Status(status.as_u16()));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| NominatimError::Request(e.without_url().to_string()))?;
+    serde_json::from_slice::<NominatimReverseHit>(&body)
+        .map_err(|e| NominatimError::Decode(e.to_string()))
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub struct NominatimSearchHit {
+    pub display_name: String,
+    /// Stringly typed in Nominatim's JSON — keep the on-wire shape
+    /// so callers can post-process without re-parsing.
+    pub lat: String,
+    pub lon: String,
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub class: Option<String>,
+    #[serde(default)]
+    pub addresstype: Option<String>,
+    #[serde(default)]
+    pub importance: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub struct NominatimReverseHit {
+    pub display_name: String,
+    pub lat: String,
+    pub lon: String,
+    #[serde(default)]
+    pub address: Option<serde_json::Value>,
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
+    pub class: Option<String>,
+}
