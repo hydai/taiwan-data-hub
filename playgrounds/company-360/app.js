@@ -119,7 +119,11 @@
 		result.appendChild(renderJudicialPanel(record));
 		result.appendChild(renderProcurementPanel(record));
 		var note = document.createElement('p');
-		note.className = 'muted disclaimer';
+		// Just `disclaimer` — adding `muted` would lose the yellow
+		// callout color because `p.muted { color: ... }` is more
+		// specific than `.disclaimer { color: ... }` and would win
+		// the cascade.
+		note.className = 'disclaimer';
 		note.textContent = disclaimerZh;
 		result.appendChild(note);
 	}
