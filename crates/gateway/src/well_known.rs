@@ -62,12 +62,14 @@ pub struct ManifestMeta {
     /// reverse proxy advertise the user-visible host, not the
     /// container's internal address.
     pub public_base_url: String,
-    /// Display name advertised in `name`. Falls through to a
-    /// hard-coded default; an operator can override for branded
-    /// deployments.
+    /// Display name advertised in the manifest's `name` field.
+    /// Currently always the hard-coded default — an
+    /// env-driven override (`MCP_SERVER_NAME`) is a follow-up
+    /// once branded deployments need it.
     pub server_name: String,
-    /// Tagline rendered as `description`. Same default-with-override
-    /// shape as `server_name`.
+    /// Tagline rendered as `description`. Same shape as
+    /// `server_name`: default-only today, env-driven override
+    /// when the contract calls for one.
     pub description: String,
     /// `Cargo.toml`-derived `CARGO_PKG_VERSION` of the gateway
     /// crate. Static `&'static str` because the value resolves at
@@ -102,8 +104,9 @@ impl ManifestMeta {
     }
 }
 
-/// Pre-rendered manifest body + validator. Held behind `Arc` so
-/// every HTTP request is a refcount bump rather than re-serialising
+/// Pre-rendered manifest body together with its strong `ETag`
+/// (the conditional-GET validator). Held behind `Arc` so every
+/// HTTP request is a refcount bump rather than re-serialising
 /// the JSON.
 #[derive(Debug, Clone)]
 struct ManifestState {

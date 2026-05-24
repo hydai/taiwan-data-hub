@@ -987,6 +987,14 @@ impl DoctorReport {
             env.s3_secret_access_key.as_deref(),
             env.s3_session_token.as_deref(),
         ));
+        report.push_entry(validate_public_base_url(
+            MCP_PUBLIC_URL_ENV,
+            env.mcp_public_url.as_deref(),
+        ));
+        report.push_entry(validate_public_base_url(
+            LLMS_TXT_BASE_URL_ENV,
+            env.llms_txt_base_url.as_deref(),
+        ));
         report
     }
 
@@ -1032,6 +1040,12 @@ struct EnvSnapshot {
     s3_access_key_id: Option<String>,
     s3_secret_access_key: Option<String>,
     s3_session_token: Option<String>,
+    /// Optional public-facing base URL for the `/.well-known/mcp.json`
+    /// manifest (#7.2). Validated via [`normalise_public_base_url`].
+    mcp_public_url: Option<String>,
+    /// Optional public-facing base URL embedded in `/llms.txt`
+    /// cross-links (#7.1). Validated via the same helper.
+    llms_txt_base_url: Option<String>,
 }
 
 impl EnvSnapshot {
@@ -1047,6 +1061,8 @@ impl EnvSnapshot {
             s3_access_key_id: non_empty_env("S3_ACCESS_KEY_ID"),
             s3_secret_access_key: non_empty_env("S3_SECRET_ACCESS_KEY"),
             s3_session_token: non_empty_env("S3_SESSION_TOKEN"),
+            mcp_public_url: non_empty_env(MCP_PUBLIC_URL_ENV),
+            llms_txt_base_url: non_empty_env(LLMS_TXT_BASE_URL_ENV),
         }
     }
 }
@@ -1150,6 +1166,25 @@ fn validate_database_url(raw: Option<&str>) -> DoctorEntry {
                     ),
                 ),
             },
+        },
+    }
+}
+
+/// Doctor entry for the public-base-URL env vars (`MCP_PUBLIC_URL`,
+/// `LLMS_TXT_BASE_URL`). Routes the raw value through the same
+/// [`normalise_public_base_url`] helper `serve` uses at boot so a
+/// malformed value lights up in doctor instead of as a `warn!` line
+/// after the gateway starts.
+fn validate_public_base_url(label: &str, raw: Option<&str>) -> DoctorEntry {
+    match raw {
+        None => doctor_entry(
+            label,
+            DoctorStatus::Info,
+            "unset — falls back to placeholder base URL",
+        ),
+        Some(raw) => match normalise_public_base_url(raw) {
+            Ok(normalised) => doctor_entry(label, DoctorStatus::Ok, normalised),
+            Err(e) => doctor_entry(label, DoctorStatus::Error, e),
         },
     }
 }
@@ -1813,7 +1848,7 @@ mod tests {
     fn doctor_report_from_snapshot_threads_through_all_validators() {
         let env = EnvSnapshot::default();
         let report = DoctorReport::from_snapshot(&env);
-        assert_eq!(report.entries.len(), 5);
+        assert_eq!(report.entries.len(), 7);
         assert_eq!(report.error_count(), 0);
         let labels: Vec<&str> = report.entries.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
@@ -1823,8 +1858,37 @@ mod tests {
                 "GATEWAY_ADDR",
                 "DATABASE_URL",
                 "OBJECT_STORE_*",
-                "S3_*"
+                "S3_*",
+                "MCP_PUBLIC_URL",
+                "LLMS_TXT_BASE_URL",
             ],
         );
+    }
+
+    #[test]
+    fn validate_public_base_url_unset_is_info() {
+        let entry = validate_public_base_url("MCP_PUBLIC_URL", None);
+        assert_eq!(entry.status, DoctorStatus::Info);
+        assert!(entry.detail.contains("placeholder"));
+    }
+
+    #[test]
+    fn validate_public_base_url_valid_input_normalises() {
+        // Trailing slash gets trimmed (the normaliser is shared with
+        // the env reader so the doctor output matches what `serve`
+        // would do).
+        let entry = validate_public_base_url("MCP_PUBLIC_URL", Some("https://hub.example/"));
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert_eq!(entry.detail, "https://hub.example");
+    }
+
+    #[test]
+    fn validate_public_base_url_malformed_is_error() {
+        let entry = validate_public_base_url("LLMS_TXT_BASE_URL", Some("not a url"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        let entry =
+            validate_public_base_url("MCP_PUBLIC_URL", Some("https://user:pass@hub.example"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("userinfo"));
     }
 }

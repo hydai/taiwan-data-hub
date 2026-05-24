@@ -25,14 +25,14 @@ pub use rmcp;
 
 /// Wire-format string of the MCP protocol version the server speaks.
 ///
-/// Single source of truth shared by [`McpServer`] (which advertises
-/// it in the `initialize` response via
-/// `rmcp::model::ProtocolVersion::V_2025_11_25`) and any out-of-band
-/// surface that has to publish the same value — e.g. the gateway's
-/// `/.well-known/mcp.json` manifest. Pinning the literal here +
-/// a debug-time assertion against the rmcp constant means an SDK
-/// upgrade that bumps the version surfaces as a test failure
-/// rather than silent drift between surfaces.
+/// Pinned to the same value `McpServer` advertises in the
+/// `initialize` response (via the rmcp constant
+/// `ProtocolVersion::V_2025_11_25`). Out-of-band surfaces that need
+/// to publish the version — e.g. the gateway's
+/// `/.well-known/mcp.json` manifest — consume this constant rather
+/// than re-typing the literal, and the test below guards against
+/// the rmcp dep bumping the version without `PROTOCOL_VERSION`
+/// being updated in lockstep.
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
 #[cfg(test)]
