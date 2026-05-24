@@ -160,6 +160,9 @@
 					>
 						<option value="zh-TW">繁中</option>
 						<option value="en">EN</option>
+						<option value="ja">日本語</option>
+						<option value="ko">한국어</option>
+						<option value="fr">Français</option>
 					</select>
 				</div>
 				<p class="text-xs text-neutral-500">Auth UI lands in M4.</p>
