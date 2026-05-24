@@ -71,11 +71,13 @@ impl Default for Limits {
     }
 }
 
-/// Storage-side `search_datasets` clamps `limit` to 100. Mirroring
-/// the constant here keeps the loop honest if the storage cap ever
-/// moves — the builder would over-fetch instead of silently dropping
-/// the tail.
-const SEARCH_PAGE_SIZE: u32 = 100;
+/// Per-iteration `search_datasets` page size. Pinned to storage's
+/// own clamp constant so the loop can never silently drop the tail
+/// because the catalog walker asked for more rows than storage will
+/// return. Referencing the constant directly (rather than mirroring
+/// the magic number) makes the coupling explicit — any future change
+/// to `SearchParams::MAX_LIMIT` reaches this loop automatically.
+const SEARCH_PAGE_SIZE: u32 = SearchParams::MAX_LIMIT;
 
 /// `Cache-Control` value applied to every response. One-hour public
 /// cache balances "agents see fresh data" against "edge caches do
@@ -94,33 +96,45 @@ const CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
 /// expects without needing to remember the exact number.
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Body + validator paired together so each route's `ETag` is
+/// derived from exactly the bytes that route serves. Lets a
+/// conditional `If-None-Match` on `/llms-index.txt` return 304
+/// even after a catalog-page change, because the index validator
+/// only moves when the index body does.
+#[derive(Debug, Clone)]
+struct Representation {
+    body: Bytes,
+    etag: String,
+}
+
+impl Representation {
+    fn new(text: String) -> Self {
+        let etag = etag_for([text.as_str()]);
+        Self {
+            body: Bytes::from(text),
+            etag,
+        }
+    }
+}
+
 /// Snapshot of the rendered llms.txt corpus. `pages.len() == 1` means
 /// the catalog fit under the size budget so `/llms.txt` serves that
 /// single page directly; `> 1` means we paginated and `/llms.txt`
 /// redirects callers to the index.
 ///
-/// Page bodies are stored as `Bytes` so the HTTP handlers can build
-/// response bodies with a refcount bump instead of cloning the
-/// underlying byte buffer — important because a single page can be
-/// several megabytes.
-///
-/// `index` is **always** populated (single-page case carries the
-/// "everything fits at /llms.txt" stand-in) so the `etag` field
-/// hashes exactly the bytes every handler serves — no
-/// representation-vs-validator drift on `/llms-index.txt`.
+/// Each [`Representation`] pairs the rendered body with an `ETag`
+/// derived from exactly its own bytes — `/llms.txt`,
+/// `/llms-index.txt`, and each `/llms-page/{n}` all carry distinct
+/// validators that only move when the served body does. Without
+/// per-representation `ETag`s a conditional GET on the index would
+/// see 304 churn whenever a single catalog page changed.
 #[derive(Debug, Clone)]
 struct Snapshot {
-    pages: Vec<Bytes>,
+    pages: Vec<Representation>,
     /// Index body served at `/llms-index.txt`. Always populated —
     /// paginated path stores the full multi-page index; single-page
     /// path stores the small "everything fits at /llms.txt" doc.
-    index: Bytes,
-    /// `SHA-256` of every page concatenated with the index body.
-    /// Distinct `ETag`s between snapshots even when only one page
-    /// changed because any content change shifts the digest. The
-    /// index is folded in so the validator and the served body
-    /// for `/llms-index.txt` always come from the same snapshot.
-    etag: String,
+    index: Representation,
     generated_at: DateTime<Utc>,
 }
 
@@ -292,7 +306,7 @@ impl LlmsTxtCache {
                 match self.build().await {
                     Ok(snap) => {
                         let pages = snap.pages.len();
-                        let bytes: usize = snap.pages.iter().map(Bytes::len).sum();
+                        let bytes: usize = snap.pages.iter().map(|r| r.body.len()).sum();
                         // Atomic swap: the new snapshot is fully
                         // built before we touch the cache slot, so
                         // concurrent HTTP requests during the
@@ -333,29 +347,22 @@ impl std::fmt::Debug for LlmsTxtCache {
 /// real work.
 fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> Snapshot {
     if let Some(single_page) = try_render_single_page(meta, hits, limits.single_page_cap) {
-        // Always store an index body — single-page case uses the
-        // small "everything fits at /llms.txt" stand-in so the
-        // `etag` field covers exactly the bytes `/llms-index.txt`
-        // will serve. Without this, clients revalidating that
-        // route would see 304 churn whenever the catalog page
-        // changed even though the rendered index body didn't.
-        let index = render_single_page_index(meta);
-        let etag = etag_for([single_page.as_str(), index.as_str()]);
+        // Single-page index is the small "everything fits at
+        // /llms.txt" stand-in. Each representation carries its own
+        // ETag so a conditional GET on /llms-index.txt returns
+        // 304 even when the catalog page changes — the index
+        // body doesn't depend on `hits` in this branch.
         Snapshot {
-            pages: vec![Bytes::from(single_page)],
-            index: Bytes::from(index),
-            etag,
+            pages: vec![Representation::new(single_page)],
+            index: Representation::new(render_single_page_index(meta)),
             generated_at: Utc::now(),
         }
     } else {
         let pages = paginate_hits(meta, hits, limits);
         let index = render_index(meta, pages.len());
-        let etag =
-            etag_for(std::iter::once(index.as_str()).chain(pages.iter().map(String::as_str)));
         Snapshot {
-            pages: pages.into_iter().map(Bytes::from).collect(),
-            index: Bytes::from(index),
-            etag,
+            pages: pages.into_iter().map(Representation::new).collect(),
+            index: Representation::new(index),
             generated_at: Utc::now(),
         }
     }
@@ -621,19 +628,26 @@ pub fn router(cache: Arc<LlmsTxtCache>) -> Router {
 async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap) -> Response {
     match cache.get_or_build().await {
         Ok(snap) => {
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
+            // `/llms.txt` serves the index in paginated mode,
+            // the single page otherwise. Each [`Representation`]
+            // carries its own ETag so the validator the client
+            // sees only moves when *its* representation does.
+            let repr = if snap.is_paginated() {
+                &snap.index
+            } else {
+                match snap.pages.first() {
+                    Some(r) => r,
+                    None => return error_response_internal("empty snapshot"),
+                }
+            };
+            if let Some(resp) = not_modified_if_match(&headers, &repr.etag, snap.generated_at) {
                 return resp;
             }
             // `Bytes::clone()` is a refcount bump, not a buffer
             // copy — important on the hot path because page bodies
             // can be several MB. The shared buffer flows directly
             // into the response body.
-            let body = if snap.is_paginated() {
-                snap.index.clone()
-            } else {
-                snap.pages.first().cloned().unwrap_or_default()
-            };
-            success_response(body, &snap.etag, snap.generated_at)
+            success_response(repr.body.clone(), &repr.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
     }
@@ -642,16 +656,16 @@ async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap
 async fn handler_index(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap) -> Response {
     match cache.get_or_build().await {
         Ok(snap) => {
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
+            // `/llms-index.txt` is always populated — the
+            // single-page case carries the small "everything fits
+            // at /llms.txt" stand-in. The validator hashes only
+            // the index body so a catalog-page change can't
+            // invalidate this representation.
+            let repr = &snap.index;
+            if let Some(resp) = not_modified_if_match(&headers, &repr.etag, snap.generated_at) {
                 return resp;
             }
-            // Even when the catalog fits in one page we serve a
-            // minimal index that points back at /llms.txt. The
-            // snapshot always carries an index body (single-page
-            // case renders the small "everything fits" stand-in
-            // at build time) so the validator in `snap.etag`
-            // matches the bytes we hand back here.
-            success_response(snap.index.clone(), &snap.etag, snap.generated_at)
+            success_response(repr.body.clone(), &repr.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
     }
@@ -674,13 +688,13 @@ async fn handler_page(
             // that case would break the "404 marks the end of
             // pagination" contract and let agents loop on a stale
             // cache entry past a freshly-added trailing page.
-            let Some(body) = snap.pages.get(n - 1) else {
+            let Some(repr) = snap.pages.get(n - 1) else {
                 return page_not_found_response("no such page");
             };
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
+            if let Some(resp) = not_modified_if_match(&headers, &repr.etag, snap.generated_at) {
                 return resp;
             }
-            success_response(body.clone(), &snap.etag, snap.generated_at)
+            success_response(repr.body.clone(), &repr.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
     }
@@ -829,6 +843,19 @@ fn error_response(err: &LlmsTxtError) -> Response {
         .into_response()
 }
 
+/// 500 for invariants the renderer should have upheld (e.g. an
+/// empty `pages` vec). Distinct from [`error_response`] so the log
+/// surfaces "snapshot shape is corrupt" rather than a normal
+/// upstream failure.
+fn error_response_internal(reason: &'static str) -> Response {
+    tracing::error!(reason, "llms.txt snapshot invariant violated");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "llms.txt snapshot invariant violated; see gateway logs",
+    )
+        .into_response()
+}
+
 /// Minimal stand-in index for the case where the catalog fits in a
 /// single page but a client still asks for `/llms-index.txt`. Keeps
 /// the contract that the index route always returns something
@@ -922,11 +949,11 @@ mod tests {
         // Single-page case still carries an index body — the
         // "everything fits at /llms.txt" stand-in so the etag
         // covers the bytes /llms-index.txt actually serves.
-        let index = std::str::from_utf8(&snap.index).unwrap();
+        let index = std::str::from_utf8(&snap.index.body).unwrap();
         assert!(index.contains("https://example.test/llms.txt"));
         // Pages are stored as `Bytes`; decode to `&str` for the
         // substring assertions. UTF-8 is mandatory in the renderer.
-        let body = std::str::from_utf8(&snap.pages[0]).unwrap();
+        let body = std::str::from_utf8(&snap.pages[0].body).unwrap();
         assert!(body.starts_with("# Test Hub"));
         assert!(body.contains("[air-quality title](<https://example.test/datasets/air-quality>)"));
         assert!(body.contains("[forest-land title](<https://example.test/datasets/forest-land>)"));
@@ -953,13 +980,13 @@ mod tests {
             "expected pagination, got {} pages",
             snap.pages.len()
         );
-        let index = std::str::from_utf8(&snap.index).unwrap();
+        let index = std::str::from_utf8(&snap.index.body).unwrap();
         assert!(index.contains(&format!("Page {}", snap.pages.len())));
         for page in &snap.pages {
             assert!(
-                page.len() <= limits.page_budget + 4096,
+                page.body.len() <= limits.page_budget + 4096,
                 "page size {} exceeded budget",
-                page.len()
+                page.body.len()
             );
         }
     }
@@ -1112,7 +1139,7 @@ mod tests {
         ]));
         let cache = LlmsTxtCache::new(source, meta());
         let snap = cache.build().await.unwrap();
-        let body = std::str::from_utf8(&snap.pages[0]).unwrap();
+        let body = std::str::from_utf8(&snap.pages[0].body).unwrap();
         assert!(body.contains("[a title]"));
         assert!(body.contains("[b title]"));
         assert!(body.contains("[c title]"));
@@ -1130,9 +1157,9 @@ mod tests {
         // has exhausted its responses, so a rebuild would yield an
         // empty page and the assertion would fail.
         let second = cache.get_or_build().await.unwrap();
-        assert_eq!(first.etag, second.etag);
+        assert_eq!(first.pages[0].etag, second.pages[0].etag);
         assert!(
-            std::str::from_utf8(&second.pages[0])
+            std::str::from_utf8(&second.pages[0].body)
                 .unwrap()
                 .contains("[a title]")
         );
@@ -1153,18 +1180,18 @@ mod tests {
         let cache = LlmsTxtCache::new(source, meta());
         let first = cache.get_or_build().await.unwrap();
         assert!(
-            std::str::from_utf8(&first.pages[0])
+            std::str::from_utf8(&first.pages[0].body)
                 .unwrap()
                 .contains("[first title]")
         );
         cache.invalidate().await;
         let second = cache.get_or_build().await.unwrap();
         assert!(
-            std::str::from_utf8(&second.pages[0])
+            std::str::from_utf8(&second.pages[0].body)
                 .unwrap()
                 .contains("[second title]")
         );
-        assert_ne!(first.etag, second.etag);
+        assert_ne!(first.pages[0].etag, second.pages[0].etag);
     }
 
     #[test]
@@ -1252,6 +1279,38 @@ mod tests {
         assert_eq!(resp.status(), 404);
     }
 
+    #[test]
+    fn per_representation_etags_differ_between_routes() {
+        // Each of /llms.txt, /llms-index.txt, and /llms-page/{n}
+        // serves a different rendered body, so their ETags must
+        // be distinct — a conditional GET on one resource can't
+        // be answered with another resource's validator. Build
+        // a paginated snapshot so all three representations
+        // exist on the same snapshot.
+        let limits = small_limits();
+        let mut hits = Vec::new();
+        for i in 0..30 {
+            hits.push(fixture_hit(
+                &format!("ds-{i:04}"),
+                Some("sensor reading description that survives truncation"),
+            ));
+        }
+        let snap = render_snapshot(&meta(), &hits, &limits);
+        let etags: Vec<&str> = std::iter::once(snap.index.etag.as_str())
+            .chain(snap.pages.iter().map(|r| r.etag.as_str()))
+            .collect();
+        // All distinct.
+        for i in 0..etags.len() {
+            for j in (i + 1)..etags.len() {
+                assert_ne!(
+                    etags[i], etags[j],
+                    "ETag collision between distinct representations: {} == {}",
+                    etags[i], etags[j],
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn router_returns_404_on_out_of_range_even_with_matching_if_none_match() {
         // Guards the "404 marks end of pagination" contract:
@@ -1270,7 +1329,9 @@ mod tests {
         }]));
         let cache = Arc::new(LlmsTxtCache::new(source, meta()));
         let snap = cache.get_or_build().await.unwrap();
-        let etag = snap.etag.clone();
+        // Any valid ETag will do — the test asserts the 404
+        // sentinel wins regardless of the conditional header.
+        let etag = snap.pages[0].etag.clone();
         let app = router(cache);
 
         let resp = app
@@ -1344,9 +1405,12 @@ mod tests {
             next_offset: None,
         }]));
         let cache = Arc::new(LlmsTxtCache::new(source, meta()));
-        // Prime the snapshot so we know the ETag.
+        // Prime the snapshot so we know the ETag served at
+        // /llms.txt — single-page case, so the catalog page's
+        // own validator (NOT the index's) is what the handler
+        // emits and what we have to match.
         let snap = cache.get_or_build().await.unwrap();
-        let etag = snap.etag.clone();
+        let etag = snap.pages[0].etag.clone();
 
         let app = router(cache);
 
