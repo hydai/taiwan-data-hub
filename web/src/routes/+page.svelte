@@ -1,19 +1,30 @@
 <script lang="ts">
 	import MetaTags from '$lib/seo/MetaTags.svelte';
+	import { m } from '$lib/paraglide/messages';
 
 	// Svelte 5 Runes — pre-alpha placeholder home.
 	// Replaced by the real marketplace shell in M2 #2.2/#2.4.
+	//
+	// Milestone `id` + `name` are project-internal labels (build-time
+	// brand strings) — kept untranslated. `status` is a controlled
+	// vocabulary so it goes through the message catalog.
+	const STATUS_IN_PROGRESS = 'in_progress';
+	const STATUS_PLANNED = 'planned';
 	const milestones = [
-		{ id: 'M0', name: 'Foundations', status: 'in progress' },
-		{ id: 'M1', name: 'MCP MVP', status: 'planned' },
-		{ id: 'M2', name: 'Marketplace UI', status: 'planned' },
-		{ id: 'M3', name: 'Rich MCP + Utility Wave 1', status: 'planned' },
-		{ id: 'M4', name: 'Auth + Personal/Multi-user', status: 'planned' },
-		{ id: 'M5a', name: 'Community Features', status: 'planned' },
-		{ id: 'M5b', name: 'Multi-source ETL', status: 'planned' },
-		{ id: 'M6', name: 'Connectors + Playground + Util W2', status: 'planned' },
-		{ id: 'M7', name: 'Discovery + REST + i18n', status: 'planned' }
-	];
+		{ id: 'M0', name: 'Foundations', status: STATUS_IN_PROGRESS },
+		{ id: 'M1', name: 'MCP MVP', status: STATUS_PLANNED },
+		{ id: 'M2', name: 'Marketplace UI', status: STATUS_PLANNED },
+		{ id: 'M3', name: 'Rich MCP + Utility Wave 1', status: STATUS_PLANNED },
+		{ id: 'M4', name: 'Auth + Personal/Multi-user', status: STATUS_PLANNED },
+		{ id: 'M5a', name: 'Community Features', status: STATUS_PLANNED },
+		{ id: 'M5b', name: 'Multi-source ETL', status: STATUS_PLANNED },
+		{ id: 'M6', name: 'Connectors + Playground + Util W2', status: STATUS_PLANNED },
+		{ id: 'M7', name: 'Discovery + REST + i18n', status: STATUS_PLANNED }
+	] as const;
+
+	function statusLabel(status: (typeof milestones)[number]['status']) {
+		return status === STATUS_IN_PROGRESS ? m.home_status_in_progress() : m.home_status_planned();
+	}
 </script>
 
 <MetaTags
@@ -25,35 +36,36 @@
 <div class="mx-auto max-w-3xl px-6 py-16">
 	<header class="space-y-2">
 		<p class="text-sm font-medium tracking-wide text-primary-700 uppercase">
-			Pre-alpha · design phase
+			{m.home_pre_alpha_badge()}
 		</p>
-		<h1 class="text-4xl font-bold tracking-tight">Taiwan Data Hub</h1>
-		<p class="text-lg text-neutral-600">
-			Open-source, self-hostable MCP service hub for Taiwan public data.
-		</p>
+		<h1 class="text-4xl font-bold tracking-tight">
+			{m.app_name_taiwan()}
+			{m.app_name_data_hub()}
+		</h1>
+		<p class="text-lg text-neutral-600">{m.app_tagline_short()}</p>
 	</header>
 
 	<section class="mt-10 rounded-lg border border-neutral-200 bg-primary-50 p-5">
-		<h2 class="text-base font-semibold">This is a scaffold.</h2>
+		<h2 class="text-base font-semibold">{m.home_scaffold_heading()}</h2>
 		<p class="mt-1 text-sm text-neutral-700">
-			Real marketplace UI lands in
-			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/milestone/3">M2</a>. Until
-			then, see
+			{m.home_scaffold_body_prefix()}
+			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/milestone/3">M2</a
+			>{m.home_scaffold_body_middle()}
 			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/blob/main/docs/DESIGN.md"
 				>docs/DESIGN.md</a
 			>
-			for the full system design.
+			{m.home_scaffold_body_suffix()}
 		</p>
 	</section>
 
 	<section class="mt-10">
-		<h2 class="text-xl font-semibold">Roadmap</h2>
+		<h2 class="text-xl font-semibold">{m.home_roadmap_heading()}</h2>
 		<ul class="mt-4 divide-y divide-neutral-200 rounded-md border border-neutral-200">
-			{#each milestones as m (m.id)}
+			{#each milestones as milestone (milestone.id)}
 				<li class="flex items-center justify-between px-4 py-3">
-					<span class="font-mono text-sm font-semibold text-primary-700">{m.id}</span>
-					<span class="flex-1 px-4 text-sm">{m.name}</span>
-					<span class="text-xs text-neutral-500">{m.status}</span>
+					<span class="font-mono text-sm font-semibold text-primary-700">{milestone.id}</span>
+					<span class="flex-1 px-4 text-sm">{milestone.name}</span>
+					<span class="text-xs text-neutral-500">{statusLabel(milestone.status)}</span>
 				</li>
 			{/each}
 		</ul>

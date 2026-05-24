@@ -18,7 +18,7 @@
 	import { cn } from '$lib/utils';
 	import type { MeUser } from '$lib/gateway/config';
 	import type { GatewayMode } from '$lib/gateway/types';
-
+	import { m } from '$lib/paraglide/messages';
 	import { deLocalizeUrl, type Locale as ParaglideLocale } from '$lib/paraglide/runtime';
 
 	/**
@@ -67,7 +67,8 @@
 			class="text-lg font-bold tracking-tight text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
 			aria-label="Taiwan Data Hub — home"
 		>
-			<span class="text-primary-700">Taiwan</span> Data Hub
+			<span class="text-primary-700">{m.app_name_taiwan()}</span>
+			{m.app_name_data_hub()}
 		</a>
 
 		<nav aria-label="Main" class="hidden md:flex md:items-center md:gap-6">
@@ -90,13 +91,13 @@
 					)}
 					aria-current={active ? 'page' : undefined}
 				>
-					{link.label}
+					{link.label()}
 				</a>
 			{/each}
 		</nav>
 
 		<div class="hidden md:flex md:items-center md:gap-4">
-			<label class="sr-only" for="locale">Language</label>
+			<label class="sr-only" for="locale">{m.locale_switcher_label()}</label>
 			<select
 				id="locale"
 				value={locale}
@@ -121,9 +122,9 @@
 				     by the missing sign-in button. -->
 				<span
 					class="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600"
-					title="Set MODE=multi-user on the gateway to enable auth"
+					title={m.badge_personal_mode_tooltip()}
 				>
-					Personal mode
+					{m.badge_personal_mode()}
 				</span>
 			{:else if user}
 				<!-- Multi-user, signed in: user-id chip + Account

@@ -1,4 +1,38 @@
 {
 	"$schema": "https://inlang.com/schema/inlang-message-format",
-	"hello_world": "你好，世界"
+	"hello_world": "你好，世界",
+
+	"app_name_taiwan": "台灣",
+	"app_name_data_hub": "資料中樞",
+	"app_tagline_short": "開放、自架的台灣公開資料 MCP 服務中樞。",
+
+	"nav_domains": "領域",
+	"nav_datasets": "資料集",
+	"nav_collections": "收藏",
+	"nav_connectors": "連接器",
+	"nav_playgrounds": "互動範例",
+	"nav_licenses": "授權條款",
+
+	"locale_switcher_label": "語言",
+	"mobile_menu_label": "選單",
+
+	"badge_personal_mode": "個人模式",
+	"badge_personal_mode_tooltip": "於 gateway 設定 MODE=multi-user 以啟用認證",
+
+	"footer_license": "授權條款",
+	"footer_source": "原始碼",
+	"footer_contact": "聯絡",
+	"footer_license_prefix": "以下列授權釋出：",
+	"footer_contact_prefix": "問題回報與功能建議：",
+	"footer_copyright_suffix": "Taiwan Data Hub 貢獻者 — 完全開源、可自架、無客戶端追蹤。",
+
+	"home_pre_alpha_badge": "預先版本 · 設計階段",
+	"home_subtitle": "開放、自架的 MCP 服務中樞，匯集台灣公開資料。",
+	"home_scaffold_heading": "本頁為骨架。",
+	"home_scaffold_body_prefix": "完整的資料市集將於",
+	"home_scaffold_body_middle": "上線；在此之前可參閱",
+	"home_scaffold_body_suffix": "了解整體系統設計。",
+	"home_roadmap_heading": "路線圖",
+	"home_status_in_progress": "進行中",
+	"home_status_planned": "規劃中"
 }

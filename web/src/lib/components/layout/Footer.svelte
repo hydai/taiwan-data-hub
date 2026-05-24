@@ -6,6 +6,8 @@
 	Uses design tokens from #2.1; no raw color literals.
 -->
 <script lang="ts">
+	import { m } from '$lib/paraglide/messages';
+
 	// Project's first publication year. The displayed range auto-extends
 	// to the current year so the copyright stays accurate without manual
 	// updates. Same year on both endpoints collapses to a single year.
@@ -21,9 +23,11 @@
 	<div class="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
 		<div class="grid grid-cols-1 gap-8 md:grid-cols-3">
 			<section aria-labelledby="footer-license">
-				<h2 id="footer-license" class="text-sm font-semibold text-neutral-900">License</h2>
+				<h2 id="footer-license" class="text-sm font-semibold text-neutral-900">
+					{m.footer_license()}
+				</h2>
 				<p class="mt-2 text-sm text-neutral-600">
-					Open source under
+					{m.footer_license_prefix()}
 					<a
 						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/blob/main/LICENSE">Apache-2.0</a
@@ -32,7 +36,9 @@
 			</section>
 
 			<section aria-labelledby="footer-source">
-				<h2 id="footer-source" class="text-sm font-semibold text-neutral-900">Source</h2>
+				<h2 id="footer-source" class="text-sm font-semibold text-neutral-900">
+					{m.footer_source()}
+				</h2>
 				<p class="mt-2 text-sm text-neutral-600">
 					<a
 						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
@@ -42,9 +48,11 @@
 			</section>
 
 			<section aria-labelledby="footer-contact">
-				<h2 id="footer-contact" class="text-sm font-semibold text-neutral-900">Contact</h2>
+				<h2 id="footer-contact" class="text-sm font-semibold text-neutral-900">
+					{m.footer_contact()}
+				</h2>
 				<p class="mt-2 text-sm text-neutral-600">
-					Bug reports and feature requests via
+					{m.footer_contact_prefix()}
 					<a
 						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/issues">GitHub Issues</a
@@ -53,8 +61,8 @@
 			</section>
 		</div>
 		<div class="mt-10 border-t border-neutral-200 pt-6 text-xs text-neutral-500">
-			© {copyrightYears} Taiwan Data Hub contributors — fully open source, self-hostable, no client-side
-			tracking.
+			© {copyrightYears}
+			{m.footer_copyright_suffix()}
 		</div>
 	</div>
 </footer>

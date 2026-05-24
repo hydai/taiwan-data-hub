@@ -1,4 +1,38 @@
 {
 	"$schema": "https://inlang.com/schema/inlang-message-format",
-	"hello_world": "こんにちは、世界"
+	"hello_world": "こんにちは、世界",
+
+	"app_name_taiwan": "Taiwan",
+	"app_name_data_hub": "Data Hub",
+	"app_tagline_short": "Open-source, self-hostable MCP service hub for Taiwan public data.",
+
+	"nav_domains": "Domains",
+	"nav_datasets": "Datasets",
+	"nav_collections": "Collections",
+	"nav_connectors": "Connectors",
+	"nav_playgrounds": "Playgrounds",
+	"nav_licenses": "Licenses",
+
+	"locale_switcher_label": "Language",
+	"mobile_menu_label": "Menu",
+
+	"badge_personal_mode": "Personal mode",
+	"badge_personal_mode_tooltip": "Set MODE=multi-user on the gateway to enable auth",
+
+	"footer_license": "License",
+	"footer_source": "Source",
+	"footer_contact": "Contact",
+	"footer_license_prefix": "Open source under",
+	"footer_contact_prefix": "Bug reports and feature requests via",
+	"footer_copyright_suffix": "Taiwan Data Hub contributors — fully open source, self-hostable, no client-side tracking.",
+
+	"home_pre_alpha_badge": "Pre-alpha · design phase",
+	"home_subtitle": "Open-source, self-hostable MCP service hub for Taiwan public data.",
+	"home_scaffold_heading": "This is a scaffold.",
+	"home_scaffold_body_prefix": "Real marketplace UI lands in",
+	"home_scaffold_body_middle": ". Until then, see",
+	"home_scaffold_body_suffix": "for the full system design.",
+	"home_roadmap_heading": "Roadmap",
+	"home_status_in_progress": "in progress",
+	"home_status_planned": "planned"
 }
