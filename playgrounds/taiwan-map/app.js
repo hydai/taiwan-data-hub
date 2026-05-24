@@ -105,8 +105,6 @@
 		var max = Math.max.apply(null, values);
 		var ticks = computeTicks(min, max, PALETTE.length);
 		var tiles = mapEl.querySelectorAll('.tile');
-		var minIdx = PALETTE.length - 1;
-		var maxIdx = 0;
 		var totalPop = 0;
 		for (var i = 0; i < tiles.length; i += 1) {
 			var tile = tiles[i];
@@ -120,8 +118,6 @@
 			valEl.textContent = formatMetric(v, metric);
 			tile.classList.toggle('selected', c.code === selectedCounty);
 			totalPop += c.pop;
-			if (idx < minIdx) minIdx = idx;
-			if (idx > maxIdx) maxIdx = idx;
 		}
 		renderLegend(ticks, metric);
 		summaryEl.textContent =

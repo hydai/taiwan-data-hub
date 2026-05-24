@@ -123,6 +123,14 @@ form#metric-form label {
 	transform: scale(1.04);
 	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
+/* Keyboard focus: explicit ring so tab traversal is visible. No
+   transform here on purpose — focus moves rapidly during keyboard
+   nav and scaling tiles would cause layout jitter. */
+.tile:focus-visible {
+	outline: 3px solid #2563eb;
+	outline-offset: 2px;
+	z-index: 1;
+}
 .tile.selected {
 	outline: 2px solid #2563eb;
 	outline-offset: 1px;

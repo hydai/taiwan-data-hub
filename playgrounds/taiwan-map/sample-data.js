@@ -4,10 +4,11 @@
  * to satisfy CSP `script-src 'self'`; `fetch('./sample-data.json')`
  * would be blocked by `connect-src 'none'`).
  *
- * Population figures are 2024 figures from the Ministry of the
- * Interior monthly statistics report (rounded to the nearest
- * person). Area figures are from each county's official profile.
- * Density = population / area_km2 (computed at render time).
+ * Population figures are the Ministry of the Interior's year-end
+ * 2024 statistics (戶政司「2024 年底人口統計」, rounded to the
+ * nearest person). Area figures are from each county's official
+ * profile. Density = population / area_km2 (computed at render
+ * time).
  *
  * `tile_layout` is a 6-column × 14-row cartogram — NOT a real
  * geographic projection. Each county sits in a row roughly
