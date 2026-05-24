@@ -13,8 +13,8 @@ pub const TOOL_NAME: &str = "geo_point_in_polygon";
 /// Maximum vertex count accepted by the MCP wrapper. Matches the
 /// 100 k cap the stats tools use for their `values` arrays — the
 /// ray-cast loop is O(n) and we want a hard upper bound so an
-/// adversarial caller can't push the dispatcher into the seconds-
-/// to-allocate-Vec regime. Re-enforced both in the JSON schema
+/// adversarial caller can't push the dispatcher into seconds of
+/// Vec allocation. Reinforced both in the JSON schema
 /// (`maxItems`) and at parse time in case a future caller bypasses
 /// schema validation.
 const MAX_POLYGON_VERTICES: usize = 100_000;
