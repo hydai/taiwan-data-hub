@@ -42,6 +42,15 @@ export function playgroundCspHeader(): string {
 		"connect-src 'none'",
 		"frame-ancestors 'self'",
 		"base-uri 'none'",
-		"form-action 'none'"
+		"form-action 'none'",
+		// Sandbox the response at the document level so direct top-
+		// level loads (e.g. a user pasting `/playgrounds/<slug>/app/
+		// index.html` into the address bar, or following a shared
+		// link) get the same isolation as the iframe attribute. The
+		// `iframe sandbox="allow-scripts"` covers the in-frame case;
+		// this CSP directive extends the same constraint to any
+		// browsing context the response ends up in, so a hostile
+		// playground can't trick a user into opening it unsandboxed.
+		'sandbox allow-scripts'
 	].join('; ');
 }

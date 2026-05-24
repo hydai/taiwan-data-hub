@@ -71,6 +71,82 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 		);
 	}
 
+	/**
+	 * The shim posts READY as soon as it loads. If the iframe loaded
+	 * from cache before `attachPlaygroundHost` ran (fast/repeat
+	 * visits), the READY message has already been dispatched to a
+	 * window with no listener, and `tdh.getState()` inside the
+	 * playground would hang forever. Belt-and-braces:
+	 *
+	 *   - send INIT immediately if the iframe is already loaded
+	 *   - send INIT on the iframe's next `load` event regardless
+	 *   - send INIT in response to READY (existing path)
+	 *
+	 * The shim de-duplicates INIT internally, so all three firing is
+	 * harmless — what we MUST avoid is *zero* INITs reaching the
+	 * playground.
+	 */
+	function kickInit(): void {
+		if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
+			sendInit();
+		}
+	}
+
+	function handleIframeLoad(): void {
+		sendInit();
+	}
+
+	function postApiError(id: string, error: string): void {
+		iframe.contentWindow?.postMessage(
+			{
+				type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
+				id,
+				ok: false,
+				status: 0,
+				contentType: null,
+				body: '',
+				error
+			},
+			'*'
+		);
+	}
+
+	/**
+	 * Normalise the iframe-supplied `init` into a typed record after
+	 * checking every field — `event.data` originates from author-
+	 * controlled code, so we can't trust the shape declared in
+	 * `protocol.ts`. Returns `null` to signal the parent should
+	 * reject the call without proxying.
+	 */
+	function coerceInit(
+		raw: unknown
+	): { method?: string; headers?: Record<string, string>; body?: string } | null {
+		if (raw === undefined) return {};
+		if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+		const src = raw as Record<string, unknown>;
+		const out: { method?: string; headers?: Record<string, string>; body?: string } = {};
+		if (src.method !== undefined) {
+			if (typeof src.method !== 'string') return null;
+			out.method = src.method;
+		}
+		if (src.headers !== undefined) {
+			if (src.headers === null || typeof src.headers !== 'object' || Array.isArray(src.headers)) {
+				return null;
+			}
+			const headersOut: Record<string, string> = {};
+			for (const [k, v] of Object.entries(src.headers as Record<string, unknown>)) {
+				if (typeof k !== 'string' || typeof v !== 'string') return null;
+				headersOut[k] = v;
+			}
+			out.headers = headersOut;
+		}
+		if (src.body !== undefined) {
+			if (typeof src.body !== 'string') return null;
+			out.body = src.body;
+		}
+		return out;
+	}
+
 	async function proxyApiCall(
 		id: string,
 		path: string,
@@ -86,17 +162,9 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 		// prefix.
 		const normalised = safeGatewayPath(path);
 		if (normalised === null) {
-			iframe.contentWindow?.postMessage(
-				{
-					type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
-					id,
-					ok: false,
-					status: 0,
-					contentType: null,
-					body: '',
-					error: `Path "${path}" rejected: must resolve under ${PLAYGROUND_GATEWAY_PREFIX} (same-origin, no dot-segment escape)`
-				},
-				'*'
+			postApiError(
+				id,
+				`Path "${path}" rejected: must resolve under ${PLAYGROUND_GATEWAY_PREFIX} (same-origin, no dot-segment escape)`
 			);
 			return;
 		}
@@ -110,19 +178,11 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 		// queried, never mutated, via the playground proxy.
 		const requestedMethod = (init?.method ?? 'GET').toUpperCase();
 		if (!PLAYGROUND_ALLOWED_METHODS.has(requestedMethod)) {
-			iframe.contentWindow?.postMessage(
-				{
-					type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
-					id,
-					ok: false,
-					status: 0,
-					contentType: null,
-					body: '',
-					error: `Method "${requestedMethod}" rejected: playground proxy only forwards ${[
-						...PLAYGROUND_ALLOWED_METHODS
-					].join(' / ')}`
-				},
-				'*'
+			postApiError(
+				id,
+				`Method "${requestedMethod}" rejected: playground proxy only forwards ${[
+					...PLAYGROUND_ALLOWED_METHODS
+				].join(' / ')}`
 			);
 			return;
 		}
@@ -151,18 +211,7 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 				'*'
 			);
 		} catch (e) {
-			iframe.contentWindow?.postMessage(
-				{
-					type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
-					id,
-					ok: false,
-					status: 0,
-					contentType: null,
-					body: '',
-					error: e instanceof Error ? e.message : 'fetch failed'
-				},
-				'*'
-			);
+			postApiError(id, e instanceof Error ? e.message : 'fetch failed');
 		}
 	}
 
@@ -179,12 +228,23 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 				return;
 			case PLAYGROUND_MSG_TYPES.API_CALL: {
 				const m = data as {
-					id: string;
-					path: string;
-					init?: { method?: string; headers?: Record<string, string>; body?: string };
+					id?: unknown;
+					path?: unknown;
+					init?: unknown;
 				};
 				if (typeof m.id !== 'string' || typeof m.path !== 'string') return;
-				void proxyApiCall(m.id, m.path, m.init);
+				// Validate every field of `init` before it reaches
+				// `toUpperCase()` etc. — a hostile playground that
+				// bypasses the shim could otherwise post
+				// `{method: 42}` and crash this handler with an
+				// unhandled `TypeError`, leaving the call's promise
+				// unresolved.
+				const coerced = coerceInit(m.init);
+				if (coerced === null) {
+					postApiError(m.id, 'Malformed api-call init: every field must be string-typed.');
+					return;
+				}
+				void proxyApiCall(m.id, m.path, coerced);
 				return;
 			}
 			default:
@@ -197,9 +257,12 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 	}
 
 	window.addEventListener('message', handleMessage);
+	iframe.addEventListener('load', handleIframeLoad);
+	kickInit();
 
 	return function detach(): void {
 		window.removeEventListener('message', handleMessage);
+		iframe.removeEventListener('load', handleIframeLoad);
 		if (pendingUrlUpdate !== null) {
 			clearTimeout(pendingUrlUpdate);
 			pendingUrlUpdate = null;
