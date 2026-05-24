@@ -1,0 +1,211 @@
+# Source of truth for the MCP-server showcase surfaced on
+# /connectors. Each entry is an external MCP server that composes
+# well with Taiwan Data Hub for AI-agent workflows — they're not
+# Taiwan Data Hub's own data connectors (those live in
+# `config/sources.toml`).
+#
+# Schema (validated by web/src/lib/connectors/load.ts):
+#   slug:                 stable kebab-case identifier. Used as the
+#                         key in the rendered mcpServers JSON when no
+#                         override is given. No /connectors/<slug>
+#                         route exists yet in M6 #6.1; the per-server
+#                         install guide route lands in #6.2.
+#   sort_order:           display order on /connectors (lower first)
+#   name_i18n:            i18n map; zh-TW required, en recommended
+#   description_i18n:     i18n map; zh-TW required, en recommended —
+#                         one-paragraph framing shown on the card
+#   install_instructions_i18n:
+#                         i18n map; zh-TW required, en recommended —
+#                         short single-paragraph install-summary
+#                         (e.g. prerequisites + where to get the
+#                         token). #6.2 will expand each connector
+#                         into a per-client install guide page.
+#   homepage_url:         canonical project / docs URL (https only)
+#   mcp_config_template:  JSON-renderable object the user pastes into
+#                         their MCP client config. Schema mirrors the
+#                         Claude Desktop `claude_desktop_config.json`
+#                         block: `command` (required string) + `args`
+#                         (required string[]) + optional `env` map of
+#                         env-var name → placeholder value (the
+#                         loader requires env values be all-caps
+#                         placeholder strings like `<NOTION_API_KEY>`
+#                         so they can't be accidentally committed
+#                         with a real secret).
+#   token_required:       boolean; drives the badge on the card.
+#                         Must agree with whether mcp_config_template
+#                         declares an `env` block — the loader
+#                         enforces the invariant so a doc edit can't
+#                         silently mislead users.
+#   status:               one of `stable | beta | experimental`.
+#                         Drives a small status pill on the card and
+#                         signals upgrade readiness.
+
+- slug: playwright
+  sort_order: 10
+  name_i18n:
+    zh-TW: Playwright
+    en: Playwright
+  description_i18n:
+    zh-TW: 微軟維護的瀏覽器自動化 MCP 伺服器,讓代理能開啟頁面、點擊元素、截圖,適合搭配資料平台跑端到端探索流程。
+    en: Microsoft's browser-automation MCP server — lets agents open pages, click elements, and capture screenshots. Pairs well with data tools for end-to-end exploration flows.
+  install_instructions_i18n:
+    zh-TW: 直接以 `npx` 啟動,無需 API 金鑰。首次執行會自動下載 Playwright 瀏覽器二進位檔。
+    en: Launches via `npx`, no API key required. Playwright will download browser binaries on first run.
+  homepage_url: https://github.com/microsoft/playwright-mcp
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@playwright/mcp@latest"
+  token_required: false
+  status: stable
+
+- slug: chrome-devtools
+  sort_order: 20
+  name_i18n:
+    zh-TW: Chrome DevTools
+    en: Chrome DevTools
+  description_i18n:
+    zh-TW: 將 Chrome DevTools Protocol 暴露給代理,可檢視 DOM、攔截網路請求、跑效能追蹤,診斷前端 / 抓取真實瀏覽器情境的好幫手。
+    en: Exposes the Chrome DevTools Protocol to agents — inspect the DOM, intercept network traffic, run performance traces. Ideal for frontend diagnosis and real-browser context capture.
+  install_instructions_i18n:
+    zh-TW: 透過 `npx` 啟動,需要本機有 Chrome / Chromium。連線到既有的偵錯埠或讓伺服器自動帶起一份。
+    en: Launches via `npx` and needs a local Chrome/Chromium install. Connects to an existing debug port or spins up its own instance.
+  homepage_url: https://github.com/ChromeDevTools/chrome-devtools-mcp
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - chrome-devtools-mcp@latest
+  token_required: false
+  status: stable
+
+- slug: n8n
+  sort_order: 30
+  name_i18n:
+    zh-TW: n8n
+    en: n8n
+  description_i18n:
+    zh-TW: 連到自架或雲端 n8n 工作流引擎,讓代理觸發既有自動化流程、把資料平台的查詢結果接到下游通知 / 報表系統。
+    en: Connects to a self-hosted or cloud n8n workflow engine — lets agents trigger existing automations and pipe data-hub query results into downstream notifications and reports.
+  install_instructions_i18n:
+    zh-TW: 需要 n8n 實例的 URL 與一組 API 金鑰(從 n8n 後台 Settings → API 建立)。安裝後在 env 區塊填入 N8N_HOST 與 N8N_API_KEY。
+    en: Requires an n8n instance URL and an API key (create one under Settings → API in your n8n admin). Fill `N8N_HOST` and `N8N_API_KEY` in the env block after install.
+  homepage_url: https://github.com/leonardsellem/n8n-mcp-server
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@leonardsellem/n8n-mcp-server"
+    env:
+      N8N_HOST: <N8N_HOST>
+      N8N_API_KEY: <N8N_API_KEY>
+  token_required: true
+  status: beta
+
+- slug: notion
+  sort_order: 40
+  name_i18n:
+    zh-TW: Notion
+    en: Notion
+  description_i18n:
+    zh-TW: 官方 Notion MCP 伺服器,讓代理讀寫資料庫與頁面,把 Taiwan Data Hub 的查詢結果直接寫進知識庫。
+    en: The official Notion MCP server — lets agents read and write databases and pages, so Taiwan Data Hub query results can land directly in your knowledge base.
+  install_instructions_i18n:
+    zh-TW: 在 Notion → Settings → Integrations 建立 Internal Integration,複製 `ntn_` 開頭的金鑰填入 NOTION_API_KEY。記得把整合加入要存取的資料庫。
+    en: Create an Internal Integration under Notion → Settings → Integrations, copy the `ntn_…` secret into `NOTION_API_KEY`, then share each target database with the integration.
+  homepage_url: https://github.com/makenotion/notion-mcp-server
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@notionhq/notion-mcp-server"
+    env:
+      NOTION_API_KEY: <NOTION_API_KEY>
+  token_required: true
+  status: stable
+
+- slug: sentry
+  sort_order: 50
+  name_i18n:
+    zh-TW: Sentry
+    en: Sentry
+  description_i18n:
+    zh-TW: 官方 Sentry MCP 伺服器,讓代理查詢 issue、stack trace、release 資訊;搭配資料平台適合做"異常 vs. 流量"型診斷。
+    en: The official Sentry MCP server — lets agents query issues, stack traces, and release info. Great alongside data tools for "anomalies vs. traffic" diagnostics.
+  install_instructions_i18n:
+    zh-TW: 到 Sentry 帳號 Settings → Auth Tokens 建立一組 `org:read` + `project:read` 權限的 token,填入 SENTRY_AUTH_TOKEN。另需提供 SENTRY_ORG 與選擇性的 SENTRY_PROJECT。
+    en: Create an auth token with `org:read` + `project:read` scopes under Sentry Settings → Auth Tokens, then set `SENTRY_AUTH_TOKEN`. Also provide `SENTRY_ORG` and optionally `SENTRY_PROJECT`.
+  homepage_url: https://github.com/getsentry/sentry-mcp
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@sentry/mcp-server"
+    env:
+      SENTRY_AUTH_TOKEN: <SENTRY_AUTH_TOKEN>
+      SENTRY_ORG: <SENTRY_ORG>
+  token_required: true
+  status: stable
+
+- slug: google
+  sort_order: 60
+  name_i18n:
+    zh-TW: Google Workspace
+    en: Google Workspace
+  description_i18n:
+    zh-TW: Google Workspace MCP 伺服器,讓代理讀寫 Gmail、Drive、Calendar、Docs。和 Taiwan Data Hub 結合時可把資料結論寄成郵件或存進共享雲端硬碟。
+    en: A Google Workspace MCP server giving agents read/write access to Gmail, Drive, Calendar, and Docs. Pairs with Taiwan Data Hub by emailing findings or archiving them to a shared drive.
+  install_instructions_i18n:
+    zh-TW: 在 Google Cloud Console 建立 OAuth 2.0 用戶端 ID(類型:Desktop),下載 `client_secret.json`,把路徑填到 GOOGLE_OAUTH_CREDENTIALS。首次連線會開瀏覽器走 OAuth 同意流程。
+    en: Create an OAuth 2.0 Client ID (type Desktop) in Google Cloud Console, download `client_secret.json`, and point `GOOGLE_OAUTH_CREDENTIALS` at it. First run opens a browser for the OAuth consent flow.
+  homepage_url: https://github.com/taylorwilsdon/google_workspace_mcp
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - google-workspace-mcp
+    env:
+      GOOGLE_OAUTH_CREDENTIALS: <GOOGLE_OAUTH_CREDENTIALS>
+  token_required: true
+  status: beta
+
+- slug: sequential-thinking
+  sort_order: 70
+  name_i18n:
+    zh-TW: Sequential Thinking
+    en: Sequential Thinking
+  description_i18n:
+    zh-TW: 官方參考伺服器,提供"逐步推理"工具讓代理把長思路拆成可審計的步驟。和資料查詢搭配時可逼模型先規劃再執行 SQL。
+    en: The official reference server that exposes a "think step by step" tool — lets agents break long reasoning into auditable steps. Pairs with data queries to force planning before SQL execution.
+  install_instructions_i18n:
+    zh-TW: 純 stdio 伺服器,不需金鑰也不存任何狀態,直接以 `npx` 啟動即可。
+    en: Pure stdio server, no token, no state — just launch with `npx`.
+  homepage_url: https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@modelcontextprotocol/server-sequential-thinking"
+  token_required: false
+  status: stable
+
+- slug: context7
+  sort_order: 80
+  name_i18n:
+    zh-TW: Context7
+    en: Context7
+  description_i18n:
+    zh-TW: Upstash 維護的"即時文件抓取"MCP 伺服器,讓代理在回答前先讀最新版函式庫文件,搭配資料平台時可避免代理用過時 API 寫查詢。
+    en: Upstash's "fetch live docs" MCP server — lets agents read the current version of a library's docs before answering, so they don't generate queries against stale APIs.
+  install_instructions_i18n:
+    zh-TW: 免費等級不需金鑰即可使用;若需要更高的速率上限,到 https://context7.com/dashboard 申請後填入 CONTEXT7_API_KEY。
+    en: The free tier needs no key; for higher rate limits, request one at https://context7.com/dashboard and set `CONTEXT7_API_KEY`.
+  homepage_url: https://github.com/upstash/context7
+  mcp_config_template:
+    command: npx
+    args:
+      - "-y"
+      - "@upstash/context7-mcp"
+  token_required: false
+  status: stable

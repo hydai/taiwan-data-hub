@@ -15,7 +15,8 @@ const STATIC_ROUTES: readonly { path: string; priority: number; changefreq: stri
 	{ path: '/', priority: 1.0, changefreq: 'weekly' },
 	{ path: '/domains', priority: 0.9, changefreq: 'weekly' },
 	{ path: '/datasets', priority: 0.9, changefreq: 'daily' },
-	{ path: '/collections', priority: 0.8, changefreq: 'weekly' }
+	{ path: '/collections', priority: 0.8, changefreq: 'weekly' },
+	{ path: '/connectors', priority: 0.8, changefreq: 'weekly' }
 ];
 
 /**
