@@ -18,7 +18,7 @@
 	import { cn } from '$lib/utils';
 	import type { MeUser } from '$lib/gateway/config';
 	import type { GatewayMode } from '$lib/gateway/types';
-
+	import { m } from '$lib/paraglide/messages';
 	import { deLocalizeUrl, type Locale as ParaglideLocale } from '$lib/paraglide/runtime';
 
 	/**
@@ -64,13 +64,13 @@
 	<div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
 		<a
 			href={resolve('/')}
-			class="text-lg font-bold tracking-tight text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
-			aria-label="Taiwan Data Hub — home"
+			class="text-lg font-bold tracking-tight text-primary-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+			aria-label={m.aria_brand_home()}
 		>
-			<span class="text-primary-700">Taiwan</span> Data Hub
+			{m.app_name()}
 		</a>
 
-		<nav aria-label="Main" class="hidden md:flex md:items-center md:gap-6">
+		<nav aria-label={m.aria_nav_main()} class="hidden md:flex md:items-center md:gap-6">
 			{#each navLinks as link (link.href)}
 				<!--
 				Active-link check has to compare against the
@@ -90,13 +90,13 @@
 					)}
 					aria-current={active ? 'page' : undefined}
 				>
-					{link.label}
+					{link.label()}
 				</a>
 			{/each}
 		</nav>
 
 		<div class="hidden md:flex md:items-center md:gap-4">
-			<label class="sr-only" for="locale">Language</label>
+			<label class="sr-only" for="locale">{m.locale_switcher_label()}</label>
 			<select
 				id="locale"
 				value={locale}
@@ -121,9 +121,9 @@
 				     by the missing sign-in button. -->
 				<span
 					class="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600"
-					title="Set MODE=multi-user on the gateway to enable auth"
+					title={m.badge_personal_mode_tooltip()}
 				>
-					Personal mode
+					{m.badge_personal_mode()}
 				</span>
 			{:else if user}
 				<!-- Multi-user, signed in: user-id chip + Account
@@ -184,7 +184,7 @@
 		<button
 			type="button"
 			onclick={onToggleMenu}
-			aria-label={isMenuOpen ? 'Close menu' : 'Open menu'}
+			aria-label={isMenuOpen ? m.aria_close_menu() : m.aria_open_menu()}
 			aria-expanded={isMenuOpen}
 			aria-haspopup="dialog"
 			class="inline-flex h-10 w-10 items-center justify-center rounded-md text-neutral-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none md:hidden"

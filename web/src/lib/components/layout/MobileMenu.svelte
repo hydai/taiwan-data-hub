@@ -26,6 +26,7 @@
 	import { navLinks } from '$lib/components/layout/nav-links';
 	import type { Locale } from '$lib/components/layout/Header.svelte';
 	import { cn } from '$lib/utils';
+	import { m } from '$lib/paraglide/messages';
 	import { deLocalizeUrl } from '$lib/paraglide/runtime';
 	import { fade, fly } from 'svelte/transition';
 
@@ -92,7 +93,7 @@
 		id="mobile-menu"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Mobile navigation"
+		aria-label={m.aria_mobile_navigation_dialog()}
 		class="fixed inset-0 z-50 md:hidden"
 	>
 		<!-- Backdrop is mouse-only dismissal — keyboard users have ESC
@@ -113,11 +114,11 @@
 			class="absolute inset-y-0 right-0 flex w-72 max-w-[80%] flex-col bg-neutral-50 shadow-xl"
 		>
 			<div class="flex items-center justify-between border-b border-neutral-200 px-5 py-4">
-				<span class="text-sm font-medium text-neutral-700">Menu</span>
+				<span class="text-sm font-medium text-neutral-700">{m.mobile_menu_label()}</span>
 				<button
 					type="button"
 					onclick={onClose}
-					aria-label="Close menu"
+					aria-label={m.aria_close_menu()}
 					class="inline-flex h-10 w-10 items-center justify-center rounded-md text-neutral-700 hover:bg-neutral-100 focus:ring-2 focus:ring-primary-500 focus:outline-none"
 				>
 					<svg
@@ -133,7 +134,7 @@
 				</button>
 			</div>
 
-			<nav aria-label="Mobile" class="flex-1 space-y-1 px-3 py-4">
+			<nav aria-label={m.aria_nav_mobile()} class="flex-1 space-y-1 px-3 py-4">
 				{#each navLinks as link (link.href)}
 					<!-- Same `deLocalizeUrl` rationale as Header.svelte. -->
 					{@const active = deLocalizeUrl(page.url).pathname.startsWith(link.href)}
@@ -146,14 +147,16 @@
 						)}
 						aria-current={active ? 'page' : undefined}
 					>
-						{link.label}
+						{link.label()}
 					</a>
 				{/each}
 			</nav>
 
 			<div class="space-y-3 border-t border-neutral-200 p-5">
 				<div class="flex items-center justify-between">
-					<label class="text-sm font-medium text-neutral-700" for="locale-mobile">Language</label>
+					<label class="text-sm font-medium text-neutral-700" for="locale-mobile"
+						>{m.locale_switcher_label()}</label
+					>
 					<select
 						id="locale-mobile"
 						value={locale}
@@ -167,7 +170,6 @@
 						<option value="fr">Français</option>
 					</select>
 				</div>
-				<p class="text-xs text-neutral-500">Auth UI lands in M4.</p>
 			</div>
 		</div>
 	</div>
