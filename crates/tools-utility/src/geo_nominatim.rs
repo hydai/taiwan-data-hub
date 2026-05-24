@@ -112,12 +112,16 @@ pub enum NominatimError {
 pub async fn search(query: &str, limit: u32) -> Result<Vec<NominatimSearchHit>, NominatimError> {
     await_slot().await;
     let url = format!("{}/search", base_url());
+    // Bind the limit string first so the slice literal below doesn't
+    // borrow from a temporary; cleaner than relying on temporary-
+    // lifetime extension, and refactor-safe.
+    let limit_s = limit.to_string();
     let resp = client()
         .get(&url)
         .query(&[
             ("q", query),
             ("format", "jsonv2"),
-            ("limit", &limit.to_string()),
+            ("limit", limit_s.as_str()),
             ("addressdetails", "1"),
         ])
         // `without_url()` strips the request URL from the error chain
