@@ -84,6 +84,18 @@ pub struct ManifestMeta {
     /// advertises `oauth2` plus a forward-reference to
     /// `/.well-known/oauth-protected-resource` (which #7.4 lands).
     pub mode: Mode,
+    /// Provider organization name advertised in the Google A2A
+    /// agent card (#7.3). Defaults to "Taiwan Data Hub
+    /// Contributors"; downstream forks can override.
+    pub provider_organization: String,
+    /// Provider URL advertised in the agent card. Defaults to the
+    /// upstream GitHub repo URL — operators almost certainly want
+    /// to override for branded deployments.
+    pub provider_url: String,
+    /// Documentation URL advertised in the agent card. Defaults
+    /// to the upstream repo README; downstream forks point at
+    /// their own docs.
+    pub documentation_url: String,
 }
 
 impl ManifestMeta {
@@ -100,6 +112,9 @@ impl ManifestMeta {
             server_version,
             license: "Apache-2.0",
             mode,
+            provider_organization: "Taiwan Data Hub Contributors".to_string(),
+            provider_url: "https://github.com/hydai/taiwan-data-hub".to_string(),
+            documentation_url: "https://github.com/hydai/taiwan-data-hub#readme".to_string(),
         }
     }
 }
@@ -114,25 +129,59 @@ struct ManifestState {
     etag: String,
 }
 
-/// Build the `/.well-known/mcp.json` subrouter. Renders the body
-/// once from the supplied [`Dispatcher`] snapshot + [`ManifestMeta`]
-/// at construction time — the registry is fixed for the process
+/// Build the well-known subrouter that mounts all three M7
+/// agent-discovery surfaces (#7.2 + #7.3): `/.well-known/mcp.json`
+/// (MCP manifest), `/.well-known/agent-card.json` (Google A2A
+/// agent card), and `/.well-known/agent-skills.json` (skill →
+/// MCP tool id index). Each body is rendered once from the
+/// supplied [`Dispatcher`] snapshot + [`ManifestMeta`] at
+/// construction time — the registry is fixed for the process
 /// lifetime so a per-request rebuild would be wasted work.
 pub fn router(dispatcher: &Dispatcher, meta: &ManifestMeta) -> Router {
-    let manifest = build_manifest(dispatcher, meta);
-    let body_json = serde_json::to_string_pretty(&manifest).expect("manifest serialises to JSON");
-    let etag = etag_for(&body_json);
-    let state = Arc::new(ManifestState {
-        body: Bytes::from(body_json),
-        etag,
-    });
+    let mcp_state = build_state(&build_manifest(dispatcher, meta));
+    let card_state = build_state(&build_agent_card(dispatcher, meta));
+    let skills_state = build_state(&build_skills_index(dispatcher));
     Router::new()
-        .route("/.well-known/mcp.json", get(handler))
-        .with_state(state)
+        .route(
+            "/.well-known/mcp.json",
+            get(mcp_handler).with_state(mcp_state),
+        )
+        .route(
+            "/.well-known/agent-card.json",
+            get(card_handler).with_state(card_state),
+        )
+        .route(
+            "/.well-known/agent-skills.json",
+            get(skills_handler).with_state(skills_state),
+        )
 }
 
-async fn handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
-    if let Some(resp) = not_modified_if_match(&headers, &state.etag) {
+/// Pre-render a serialisable manifest into the cached
+/// `body + etag` pair every handler serves. Pulled out so all
+/// three routes share the same allocation + caching path.
+fn build_state<T: Serialize>(payload: &T) -> Arc<ManifestState> {
+    let body_json = serde_json::to_string_pretty(payload).expect("manifest serialises to JSON");
+    let etag = etag_for(&body_json);
+    Arc::new(ManifestState {
+        body: Bytes::from(body_json),
+        etag,
+    })
+}
+
+async fn mcp_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
+    serve_state(&state, &headers)
+}
+
+async fn card_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
+    serve_state(&state, &headers)
+}
+
+async fn skills_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
+    serve_state(&state, &headers)
+}
+
+fn serve_state(state: &ManifestState, headers: &HeaderMap) -> Response {
+    if let Some(resp) = not_modified_if_match(headers, &state.etag) {
         return resp;
     }
     success_response(state.body.clone(), &state.etag)
@@ -306,6 +355,135 @@ pub struct ToolSummary {
     pub description: String,
 }
 
+// -------- Google A2A agent card (#7.3) ---------------------------------
+
+/// Pure builder for the Google A2A agent card. Every MCP tool is
+/// surfaced as a skill — the A2A "skill" abstraction maps 1:1 onto
+/// our tool registry, so the catalogue stays unified between the
+/// `/mcp.json` manifest and this card.
+fn build_agent_card(dispatcher: &Dispatcher, meta: &ManifestMeta) -> AgentCard {
+    let base = meta.public_base_url.trim_end_matches('/');
+    let skills = dispatcher
+        .list_tools()
+        .into_iter()
+        .map(|td| AgentSkill {
+            id: td.name.clone(),
+            name: td.name,
+            description: td.description,
+            // Tag every skill as MCP so an A2A client can filter
+            // for the bridged surface; richer per-tool tags can
+            // land later when the tool descriptors carry them.
+            tags: vec!["mcp".to_string()],
+            examples: Vec::new(),
+        })
+        .collect();
+    AgentCard {
+        name: meta.server_name.clone(),
+        description: meta.description.clone(),
+        url: base.to_string(),
+        version: meta.server_version.to_string(),
+        provider: AgentProvider {
+            organization: meta.provider_organization.clone(),
+            url: meta.provider_url.clone(),
+        },
+        documentation_url: meta.documentation_url.clone(),
+        // Stream + push-notifications + state-transition history
+        // are all `false` because the gateway speaks one-shot
+        // request/response over Streamable HTTP MCP. Flipping
+        // them to `true` would falsely advertise capabilities
+        // the runtime doesn't actually implement.
+        capabilities: AgentCapabilities {
+            streaming: false,
+            push_notifications: false,
+            state_transition_history: false,
+        },
+        // Plain text in / structured JSON out matches what the
+        // MCP `tools/call` JSON-RPC method actually accepts and
+        // returns; per the A2A spec, additional modes can be
+        // listed per-skill if a tool ever takes binary input.
+        default_input_modes: vec!["text/plain".to_string()],
+        default_output_modes: vec!["application/json".to_string(), "text/plain".to_string()],
+        skills,
+    }
+}
+
+/// Google A2A agent card (per
+/// <https://google-a2a.github.io/A2A/specification/#agent-card>).
+/// Field names serialise as `camelCase` to match the A2A schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCard {
+    pub name: String,
+    pub description: String,
+    pub url: String,
+    pub version: String,
+    pub provider: AgentProvider,
+    pub documentation_url: String,
+    pub capabilities: AgentCapabilities,
+    pub default_input_modes: Vec<String>,
+    pub default_output_modes: Vec<String>,
+    pub skills: Vec<AgentSkill>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentProvider {
+    pub organization: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCapabilities {
+    pub streaming: bool,
+    pub push_notifications: bool,
+    pub state_transition_history: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentSkill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub examples: Vec<String>,
+}
+
+// -------- Skill index (#7.3) -------------------------------------------
+
+/// Pure builder for the `/.well-known/agent-skills.json` document.
+/// Indexes A2A "skill" names → MCP tool ids; today every skill maps
+/// 1:1 onto the same-named MCP tool, but the indirection means a
+/// future refactor can rename or group skills without forcing
+/// agents to update their wiring.
+fn build_skills_index(dispatcher: &Dispatcher) -> SkillsIndex {
+    let skills = dispatcher
+        .list_tools()
+        .into_iter()
+        .map(|td| (td.name.clone(), td.name))
+        .collect();
+    SkillsIndex {
+        version: SKILLS_INDEX_VERSION,
+        skills,
+    }
+}
+
+/// Schema version of the skills index document. Bumped only when
+/// the JSON shape changes in a way that requires consumer code
+/// updates — additive changes (e.g. adding optional fields per
+/// skill) stay on the current version.
+const SKILLS_INDEX_VERSION: u32 = 1;
+
+/// `/.well-known/agent-skills.json` body. `skills` keys are A2A
+/// skill ids, values are MCP tool names that implement them.
+/// `BTreeMap` keeps the serialisation order deterministic across
+/// snapshots so the strong `ETag` only moves on a real registry
+/// change.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SkillsIndex {
+    pub version: u32,
+    pub skills: std::collections::BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +530,9 @@ mod tests {
             server_version: "0.0.1",
             license: "Apache-2.0",
             mode,
+            provider_organization: "Test Org".to_string(),
+            provider_url: "https://example.test/org".to_string(),
+            documentation_url: "https://example.test/docs".to_string(),
         }
     }
 
@@ -501,5 +682,163 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 304);
+    }
+
+    // -------- agent-card / agent-skills (#7.3) -------------------------
+
+    #[test]
+    fn agent_card_contains_all_skills_with_mcp_tag() {
+        let d = dispatcher_with(vec![
+            ("gamma", "gamma desc"),
+            ("alpha", "alpha desc"),
+            ("beta", "beta desc"),
+        ]);
+        let card = build_agent_card(&d, &meta(Mode::Personal));
+        assert_eq!(card.name, "Test Hub");
+        // `url` strips the trailing slash on the public_base_url
+        // so the rendered URL is canonical.
+        assert_eq!(card.url, "https://hub.example");
+        // Skills come from the dispatcher in alphabetical order
+        // (BTreeMap), independent of registration order.
+        assert_eq!(
+            card.skills
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta", "gamma"],
+        );
+        for skill in &card.skills {
+            // Every skill is tagged `mcp` so an A2A client can
+            // filter for the bridged surface.
+            assert!(skill.tags.contains(&"mcp".to_string()));
+            // We don't fabricate examples — empty array per A2A
+            // schema is preferable to lying about runtime output.
+            assert!(skill.examples.is_empty());
+            // id == name in this 1:1 mapping; the indirection
+            // is preserved for future renames.
+            assert_eq!(skill.id, skill.name);
+        }
+        // Capabilities all false — the gateway speaks one-shot
+        // request/response, no streaming or push.
+        assert!(!card.capabilities.streaming);
+        assert!(!card.capabilities.push_notifications);
+        assert!(!card.capabilities.state_transition_history);
+    }
+
+    #[test]
+    fn agent_card_serialises_with_camelcase_keys() {
+        let d = dispatcher_with(vec![("only", "only tool")]);
+        let card = build_agent_card(&d, &meta(Mode::Personal));
+        let v: Value = serde_json::to_value(&card).unwrap();
+        let obj = v.as_object().unwrap();
+        // A2A spec requires camelCase — pin the keys we
+        // serde-renamed.
+        assert!(obj.contains_key("documentationUrl"));
+        assert!(obj.contains_key("defaultInputModes"));
+        assert!(obj.contains_key("defaultOutputModes"));
+        let caps = obj["capabilities"].as_object().unwrap();
+        assert!(caps.contains_key("pushNotifications"));
+        assert!(caps.contains_key("stateTransitionHistory"));
+        // Common-case `name`/`url`/`version` stay as-is.
+        assert!(obj.contains_key("name"));
+        assert!(obj.contains_key("url"));
+    }
+
+    #[test]
+    fn skills_index_maps_each_tool_to_itself_and_is_sorted() {
+        let d = dispatcher_with(vec![
+            ("gamma", "gamma desc"),
+            ("alpha", "alpha desc"),
+            ("beta", "beta desc"),
+        ]);
+        let idx = build_skills_index(&d);
+        assert_eq!(idx.version, 1);
+        let keys: Vec<&str> = idx.skills.keys().map(String::as_str).collect();
+        // BTreeMap guarantees sorted iteration; the JSON output
+        // therefore also sorts deterministically, which keeps the
+        // strong ETag stable across registry-order shuffles.
+        assert_eq!(keys, vec!["alpha", "beta", "gamma"]);
+        for (k, v) in &idx.skills {
+            assert_eq!(k, v, "skill id should map 1:1 onto the tool name");
+        }
+    }
+
+    #[tokio::test]
+    async fn router_serves_all_three_well_known_routes() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let d = dispatcher_with(vec![("only", "only tool")]);
+        let app = router(&d, &meta(Mode::Personal));
+
+        for path in [
+            "/.well-known/mcp.json",
+            "/.well-known/agent-card.json",
+            "/.well-known/agent-skills.json",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200, "expected 200 for {path}");
+            // Each response carries its own ETag — the bodies
+            // are distinct so the validators must be too,
+            // otherwise a conditional GET on one route would
+            // wrongly 304 against another route's body.
+            let etag = resp
+                .headers()
+                .get(axum::http::header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            assert!(!etag.is_empty(), "{path} missing ETag");
+            let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+            let _v: Value = serde_json::from_slice(&body)
+                .unwrap_or_else(|e| panic!("{path} body is not JSON: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn each_well_known_route_has_a_distinct_etag() {
+        // Per-representation validators — a conditional GET on
+        // one route MUST NOT return 304 for another route's body.
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let d = dispatcher_with(vec![("only", "only tool")]);
+        let app = router(&d, &meta(Mode::Personal));
+
+        let mut etags = Vec::new();
+        for path in [
+            "/.well-known/mcp.json",
+            "/.well-known/agent-card.json",
+            "/.well-known/agent-skills.json",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            etags.push(
+                resp.headers()
+                    .get(axum::http::header::ETAG)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        for i in 0..etags.len() {
+            for j in (i + 1)..etags.len() {
+                assert_ne!(
+                    etags[i], etags[j],
+                    "ETag collision between distinct well-known representations",
+                );
+            }
+        }
     }
 }

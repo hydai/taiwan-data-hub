@@ -76,12 +76,14 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
     "/healthz",
     "/readyz",
     "/mcp",
-    // #7.2 — `/.well-known/mcp.json` is generated from the
-    // in-process dispatcher + env config, so it mounts in every
-    // mode without any DB dependency. Always-on so agents that
-    // probe well-known URLs never see a phantom 404 in
-    // personal-mode boots.
+    // M7 well-known surfaces (#7.2 + #7.3) — generated from
+    // the in-process dispatcher + env config, so all three
+    // mount in every mode without any DB dependency. Always-on
+    // so agents that probe well-known URLs never see a phantom
+    // 404 in personal-mode boots.
     "/.well-known/mcp.json",
+    "/.well-known/agent-card.json",
+    "/.well-known/agent-skills.json",
 ];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
@@ -548,7 +550,7 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     }
     tracing::info!(
         mode = mode.as_str(),
-        "/.well-known/mcp.json manifest mounted"
+        "well-known surfaces mounted: /.well-known/mcp.json, agent-card.json, agent-skills.json"
     );
     well_known::router(dispatcher, &meta)
 }
@@ -1567,15 +1569,13 @@ mod tests {
         let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
-        // Always-on now includes /.well-known/mcp.json (#7.2) since
-        // the manifest derives from in-process state with no DB
-        // dependency. /llms.txt routes still don't appear without
-        // DATABASE_URL set.
-        assert!(
-            entry
-                .detail
-                .contains("public: /healthz,/readyz,/mcp,/.well-known/mcp.json")
-        );
+        // Always-on now includes all three M7 well-known
+        // surfaces (#7.2 + #7.3) since each derives from
+        // in-process state with no DB dependency. /llms.txt
+        // routes still don't appear without DATABASE_URL set.
+        assert!(entry.detail.contains(
+            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json"
+        ));
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
         assert!(entry.detail.contains("gated: <none>"));
@@ -1625,16 +1625,26 @@ mod tests {
     #[test]
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
-        // Always-on set is /healthz, /readyz, /mcp, and (since
-        // #7.2) /.well-known/mcp.json. The llms.txt routes must
-        // NOT appear without the storage flag set.
+        // Always-on set is /healthz, /readyz, /mcp, plus all
+        // three M7 well-known surfaces (#7.2 + #7.3). The
+        // llms.txt routes must NOT appear without the storage
+        // flag set.
         assert_eq!(
             without,
-            vec!["/healthz", "/readyz", "/mcp", "/.well-known/mcp.json"],
+            vec![
+                "/healthz",
+                "/readyz",
+                "/mcp",
+                "/.well-known/mcp.json",
+                "/.well-known/agent-card.json",
+                "/.well-known/agent-skills.json",
+            ],
         );
         let with = resolved_public_routes(true);
         assert!(with.contains(&"/healthz"));
         assert!(with.contains(&"/.well-known/mcp.json"));
+        assert!(with.contains(&"/.well-known/agent-card.json"));
+        assert!(with.contains(&"/.well-known/agent-skills.json"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
     }
