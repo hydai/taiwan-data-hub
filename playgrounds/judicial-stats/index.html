@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>司法統計即時室</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>司法統計即時室 <span class="tag">展示用</span></h1>
+				<p class="muted">
+					選擇法院、案件類別、年份範圍,以折線圖呈現案件量逐年趨勢。示範
+					<code>aggregate_dataset(group_by=...)</code> MCP 工具的群組/聚合查詢模式。
+				</p>
+				<p class="caveat">
+					本面板數字皆為遵循合理量級的合成樣本,並非真實司法院統計;面板配置與互動行為可用於評估正式版 UX。
+				</p>
+			</header>
+
+			<form id="filters" aria-label="Filters">
+				<fieldset>
+					<legend>法院</legend>
+					<select id="court" aria-label="Court">
+						<option value="">(全部)</option>
+					</select>
+				</fieldset>
+				<fieldset>
+					<legend>案件類別</legend>
+					<select id="case-type" aria-label="Case type">
+						<option value="">(全部)</option>
+					</select>
+				</fieldset>
+				<fieldset>
+					<legend>年份</legend>
+					<label>
+						自
+						<select id="year-from" aria-label="From year"></select>
+					</label>
+					<label>
+						至
+						<select id="year-to" aria-label="To year"></select>
+					</label>
+				</fieldset>
+				<fieldset>
+					<legend>分組</legend>
+					<label>
+						<input type="radio" name="group-by" value="total" checked />
+						合計
+					</label>
+					<label>
+						<input type="radio" name="group-by" value="case_type" />
+						依案件類別
+					</label>
+					<label>
+						<input type="radio" name="group-by" value="court" />
+						依法院
+					</label>
+				</fieldset>
+			</form>
+
+			<section id="summary" class="summary" aria-live="polite"></section>
+
+			<figure>
+				<svg id="chart" aria-label="案件量趨勢折線圖" role="img"></svg>
+				<figcaption id="chart-caption"></figcaption>
+			</figure>
+
+			<details class="data-table">
+				<summary>原始聚合資料表 (aggregated rows)</summary>
+				<div id="table-host"></div>
+			</details>
+
+			<footer>
+				<p class="muted">
+					iframe 沙箱 + 嚴格 CSP 下執行;本 playground 不發起任何網路呼叫,所有資料來自同目錄下的
+					<code>sample-data.js</code>。
+				</p>
+			</footer>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./sample-data.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>

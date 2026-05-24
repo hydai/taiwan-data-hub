@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "司法統計即時室",
+    "en": "Judicial stats — real-time room"
+  },
+  "description_i18n": {
+    "zh-TW": "依法院、案件類別、年份篩選後,以折線圖呈現案件量逐年趨勢,示範 aggregate_dataset MCP 工具的群組/聚合查詢模式。內建 2020–2024 共五年示範資料,正式版需連線到載入司法院統計資料的後端。",
+    "en": "Filter by court, case type, and year range; an SVG line chart shows case-count trends per year — the aggregate_dataset MCP-tool group-by pattern visualised. Ships with five years (2020–2024) of illustrative data; production needs a Judicial Yuan statistics dataset loaded server-side."
+  },
+  "tags": ["judicial", "stats", "time-series", "aggregate"],
+  "status": "beta"
+}
