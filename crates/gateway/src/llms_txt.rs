@@ -2,7 +2,7 @@
 //!
 //! Renders the dataset catalog as a markdown document agents can read
 //! to discover what's available. When the rendered body exceeds 5 MB
-//! it splits into `/llms-index.txt` + numbered `/llms-page-N.txt`
+//! it splits into `/llms-index.txt` + numbered `/llms-page/N`
 //! pages with cross-links so an agent can still consume the catalog
 //! without buffering arbitrarily large bodies. Per the llms.txt
 //! convention (<https://llmstxt.org>), the file is markdown but
@@ -312,41 +312,53 @@ impl std::fmt::Debug for LlmsTxtCache {
 /// Pure rendering: build the full snapshot from already-fetched hits.
 /// Lifted out of [`LlmsTxtCache`] so unit tests can drive the
 /// pagination + cross-link logic without any tokio runtime.
+///
+/// Single-page rendering stops as soon as the running byte count
+/// exceeds `single_page_cap` so a 50 MB catalog doesn't burn 50 MB
+/// of allocation just to learn we'll be paginating anyway; that
+/// partial render is then discarded and `paginate_hits` does the
+/// real work.
 fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> Snapshot {
-    let single_page = render_single_page(meta, hits);
-    if single_page.len() <= limits.single_page_cap {
+    if let Some(single_page) = try_render_single_page(meta, hits, limits.single_page_cap) {
         let etag = etag_for(&[&single_page]);
-        return Snapshot {
+        Snapshot {
             pages: vec![single_page],
             index: None,
             etag,
             generated_at: Utc::now(),
-        };
-    }
-    let pages = paginate_hits(meta, hits, limits);
-    let index = render_index(meta, pages.len());
-    let mut all = vec![index.clone()];
-    all.extend(pages.iter().cloned());
-    let etag = etag_for(&all.iter().map(String::as_str).collect::<Vec<_>>());
-    Snapshot {
-        pages,
-        index: Some(index),
-        etag,
-        generated_at: Utc::now(),
+        }
+    } else {
+        let pages = paginate_hits(meta, hits, limits);
+        let index = render_index(meta, pages.len());
+        let mut all = vec![index.clone()];
+        all.extend(pages.iter().cloned());
+        let etag = etag_for(&all.iter().map(String::as_str).collect::<Vec<_>>());
+        Snapshot {
+            pages,
+            index: Some(index),
+            etag,
+            generated_at: Utc::now(),
+        }
     }
 }
 
-/// Render the whole catalog into a single markdown document. Used in
-/// the common case (catalog ≤ 5 MB) and as the building block the
-/// paginated path slices.
-fn render_single_page(meta: &LlmsTxtMeta, hits: &[SearchHit]) -> String {
-    let mut out = String::with_capacity(estimate_bytes(hits.len()));
+/// Attempt to render the whole catalog into a single markdown
+/// document. Returns `Some(body)` when it fits under `cap`, `None`
+/// once the running byte count exceeds the cap (signalling the
+/// caller to paginate). Aborting early bounds the allocation cost
+/// of measurement at `cap + one hit's worth of overshoot` instead
+/// of the whole catalog.
+fn try_render_single_page(meta: &LlmsTxtMeta, hits: &[SearchHit], cap: usize) -> Option<String> {
+    let mut out = String::with_capacity(estimate_bytes(hits.len()).min(cap));
     write_header(&mut out, meta);
     out.push_str("\n## Datasets\n\n");
     for hit in hits {
         write_hit(&mut out, meta, hit);
+        if out.len() > cap {
+            return None;
+        }
     }
-    out
+    Some(out)
 }
 
 /// Split the catalog across pages capped at [`Limits::page_budget`].
@@ -403,12 +415,12 @@ fn finalise_page(out: &mut String, meta: &LlmsTxtMeta, page_number: usize) {
     let _ = write!(out, "Catalog index: <{base}/llms-index.txt>. ");
     if page_number > 1 {
         let prev = page_number - 1;
-        let _ = write!(out, "Previous page: <{base}/llms-page-{prev}.txt>. ");
+        let _ = write!(out, "Previous page: <{base}/llms-page/{prev}>. ");
     }
     let next = page_number + 1;
     let _ = writeln!(
         out,
-        "Next page: <{base}/llms-page-{next}.txt> (404 marks the end).",
+        "Next page: <{base}/llms-page/{next}> (404 marks the end).",
     );
 }
 
@@ -421,10 +433,7 @@ fn render_index(meta: &LlmsTxtMeta, page_count: usize) -> String {
         "\nThe full catalog is paginated across **{page_count}** pages because the rendered document exceeds 5 MB.\n\n## Pages\n\n",
     );
     for n in 1..=page_count {
-        let _ = writeln!(
-            out,
-            "- [Page {n}](/llms-page-{n}.txt) — <{base}/llms-page-{n}.txt>",
-        );
+        let _ = writeln!(out, "- [Page {n}](/llms-page/{n}) — <{base}/llms-page/{n}>",);
     }
     out
 }
@@ -442,12 +451,17 @@ fn write_hit(out: &mut String, meta: &LlmsTxtMeta, hit: &SearchHit) {
     let title = escape_markdown_inline(&hit.title);
     let domain = &hit.domain_slug;
     let tier = &hit.tier;
-    let license = &hit.license;
+    // `license` and `publisher` are free-form TEXT in the schema —
+    // they can contain newlines/backticks/pipes the same as a title.
+    // Run them through the same escape pass so a quirky upstream
+    // entry can't break list rendering or inject unintended markdown.
+    let license = escape_markdown_inline(&hit.license);
     let _ = write!(
         out,
         "- [{title}]({base}/datasets/{slug}) — `{domain}` · `{tier}` · {license}",
     );
     if let Some(publisher) = &hit.publisher {
+        let publisher = escape_markdown_inline(publisher);
         let _ = write!(out, " · {publisher}");
     }
     out.push('\n');
@@ -478,15 +492,33 @@ fn truncate_description(s: &str) -> String {
 
 /// Escape characters that would otherwise break the markdown shape
 /// of the rendered list — pipes and backticks land inside code spans
-/// and titles. Newlines collapse to spaces so a description with hard
-/// breaks doesn't split a single bullet across multiple list items.
+/// and titles; `[`, `]`, `(`, `)`, `\` would terminate or escape the
+/// `[text](url)` link syntax `write_hit` uses for every entry.
+/// Newlines collapse to spaces so a description with hard breaks
+/// doesn't split a single bullet across multiple list items.
 fn escape_markdown_inline(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\n' | '\r' => out.push(' '),
             '`' => out.push('\''),
-            '|' => out.push('/'),
+            // Pipes break tables; a trailing backslash inside
+            // `[text]` would escape the closing `]`. Both rewrite
+            // to a forward slash — visually similar, no markdown
+            // semantics.
+            '|' | '\\' => out.push('/'),
+            // The link-syntax breakers swap to visually similar
+            // safe ASCII so the rendered output stays human-
+            // readable (rather than the `\[` backslash-escape
+            // shape, which most CLI tools render literally).
+            '[' => out.push('('),
+            ']' => out.push(')'),
+            // Parens get rewritten to U+27E8/U+27E9 mathematical
+            // brackets — they carry the visual shape without
+            // colliding with markdown link syntax, so a literal
+            // `(` inside a link-text body can never close it.
+            '(' => out.push('⟨'),
+            ')' => out.push('⟩'),
             _ => out.push(c),
         }
     }
@@ -527,14 +559,23 @@ pub fn router(cache: Arc<LlmsTxtCache>) -> Router {
     Router::new()
         .route("/llms.txt", get(handler_root))
         .route("/llms-index.txt", get(handler_index))
-        .route("/llms-page-{n}.txt", get(handler_page))
+        // axum 0.8's matchit allows only one parameter per path
+        // segment — `/llms-page-{n}.txt` would panic at startup
+        // because the segment mixes the literal `llms-page-` /
+        // `.txt` chunks with the `{n}` capture. Splitting the
+        // path so `{n}` is the entire trailing segment keeps the
+        // route registrable; the content type is communicated
+        // via `Content-Type: text/markdown; charset=utf-8` so the
+        // missing `.txt` suffix doesn't change how agents handle
+        // the body.
+        .route("/llms-page/{n}", get(handler_page))
         .with_state(cache)
 }
 
 async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap) -> Response {
     match cache.get_or_build().await {
         Ok(snap) => {
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag) {
+            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
                 return resp;
             }
             let body = if snap.is_paginated() {
@@ -551,7 +592,7 @@ async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap
 async fn handler_index(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap) -> Response {
     match cache.get_or_build().await {
         Ok(snap) => {
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag) {
+            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
                 return resp;
             }
             // Even when the catalog fits in one page we serve a
@@ -578,7 +619,7 @@ async fn handler_page(
     }
     match cache.get_or_build().await {
         Ok(snap) => {
-            if let Some(resp) = not_modified_if_match(&headers, &snap.etag) {
+            if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
                 return resp;
             }
             match snap.pages.get(n - 1) {
@@ -590,19 +631,41 @@ async fn handler_page(
     }
 }
 
-fn not_modified_if_match(headers: &HeaderMap, etag: &str) -> Option<Response> {
+fn not_modified_if_match(
+    headers: &HeaderMap,
+    etag: &str,
+    generated_at: DateTime<Utc>,
+) -> Option<Response> {
     let inm = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?;
     if !if_none_match_matches(inm, etag) {
         return None;
     }
     let mut resp = StatusCode::NOT_MODIFIED.into_response();
-    resp.headers_mut()
-        .insert(header::ETAG, HeaderValue::from_str(etag).ok()?);
-    resp.headers_mut().insert(
+    let h = resp.headers_mut();
+    h.insert(header::ETAG, HeaderValue::from_str(etag).ok()?);
+    h.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_CONTROL),
     );
+    // Mirror the same `Last-Modified` value the 200 response
+    // carries so a client that revalidates with `If-Modified-Since`
+    // on the next request gets the same coarse timestamp signal
+    // it would have got on the original response — without the
+    // 304 path, clients that drop ETag and fall back to date-
+    // based revalidation would re-fetch unnecessarily.
+    if let Some(v) = imf_fixdate_header(generated_at) {
+        h.insert(header::LAST_MODIFIED, v);
+    }
     Some(resp)
+}
+
+/// Render `generated_at` as the RFC 9110 `IMF-fixdate` shape
+/// (`Sun, 06 Nov 1994 08:49:37 GMT`). chrono's `to_rfc2822` differs
+/// only in the zone suffix (`+0000` vs `GMT`), so we substitute.
+fn imf_fixdate_header(generated_at: DateTime<Utc>) -> Option<HeaderValue> {
+    let rfc2822 = generated_at.to_rfc2822();
+    let imf_fixdate = rfc2822.replace("+0000", "GMT");
+    HeaderValue::from_str(&imf_fixdate).ok()
 }
 
 /// RFC 9110 §13.1.2-compliant `If-None-Match` comparison.
@@ -644,14 +707,8 @@ fn success_response(body: String, etag: &str, generated_at: DateTime<Utc>) -> Re
     }
     // RFC 7232 `Last-Modified` complements the strong ETag: clients
     // that can't process the opaque ETag still get a coarse
-    // freshness signal they can use for `If-Modified-Since`. RFC
-    // 9110 prescribes the "IMF-fixdate" format (`%a, %d %b %Y %T GMT`),
-    // which is what `chrono::DateTime::to_rfc2822` emits with the
-    // exception that the latter uses `+0000` instead of `GMT`.
-    // Substitute the zone suffix so the header is spec-correct.
-    let rfc2822 = generated_at.to_rfc2822();
-    let imf_fixdate = rfc2822.replace("+0000", "GMT");
-    if let Ok(v) = HeaderValue::from_str(&imf_fixdate) {
+    // freshness signal they can use for `If-Modified-Since`.
+    if let Some(v) = imf_fixdate_header(generated_at) {
         h.insert(header::LAST_MODIFIED, v);
     }
     resp
@@ -811,6 +868,49 @@ mod tests {
     }
 
     #[test]
+    fn escape_inline_handles_link_syntax_breakers() {
+        // `[`, `]` swap to parens; `(`, `)` swap to U+27E8/U+27E9
+        // so they can't accidentally close the `[text](url)` link.
+        let escaped = escape_markdown_inline("title [v2](2026) \\back");
+        assert_eq!(escaped, "title (v2)⟨2026⟩ /back");
+    }
+
+    #[test]
+    fn write_hit_escapes_license_and_publisher() {
+        // License + publisher are free-form TEXT and could contain
+        // any of the markdown-breaking characters. Verify both go
+        // through the same escape pass as `title` / `description`.
+        let hit = SearchHit {
+            id: Uuid::nil(),
+            slug: "edge".to_owned(),
+            title: "edge title".to_owned(),
+            description: None,
+            domain_slug: "environment".to_owned(),
+            tier: "bronze".to_owned(),
+            license: "CC-BY (4.0) | open".to_owned(),
+            publisher: Some("Dept. of `Foo` [stats]".to_owned()),
+        };
+        let mut out = String::new();
+        write_hit(&mut out, &meta(), &hit);
+        // License: parens collapse to U+27E8/U+27E9 brackets, pipe
+        // becomes `/`. We can't check "no ` chars" globally because
+        // the format wraps domain/tier in literal backticks, so we
+        // check the specific publisher substring instead.
+        assert!(
+            out.contains("CC-BY ⟨4.0⟩ / open"),
+            "license should be escaped: {out}"
+        );
+        assert!(
+            out.contains("Dept. of 'Foo' (stats)"),
+            "publisher should be escaped: {out}"
+        );
+        assert!(
+            !out.contains("[stats]"),
+            "raw `[stats]` must not survive the escape pass"
+        );
+    }
+
+    #[test]
     fn if_none_match_wildcard_matches_any_etag() {
         assert!(if_none_match_matches("*", "\"abc123\""));
         assert!(if_none_match_matches(" * ", "\"abc123\""));
@@ -912,6 +1012,127 @@ mod tests {
         assert!(body.contains("https://example.test/llms.txt"));
     }
 
+    /// Round-trip the `/llms-page/{n}` route through axum's
+    /// matcher so a future axum upgrade or pattern typo can't
+    /// silently strand the cross-links the index emits. Three
+    /// shapes are exercised: the single-page catalog (returns the
+    /// full body at `/llms.txt`), an in-range page, and an
+    /// out-of-range page (404).
+    #[tokio::test]
+    async fn router_serves_all_three_paths() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        // Catalog big enough to force pagination so we can assert
+        // `/llms-page/1` returns a body and `/llms-page/99`
+        // 404s. Reuse the small-limits fixture so we don't render
+        // megabytes inside the test.
+        let mut hits = Vec::new();
+        for i in 0..30 {
+            hits.push(fixture_hit(
+                &format!("ds-{i:04}"),
+                Some("sensor reading description that survives truncation"),
+            ));
+        }
+        let source: DatasetSource = Arc::new(StubSearcher::with_pages(vec![SearchPage {
+            hits,
+            next_offset: None,
+        }]));
+        let cache = Arc::new(LlmsTxtCache::new(source, meta()));
+        // Pre-seed the cache with a paginated snapshot built under
+        // the small fixture limits so the route handlers serve
+        // multiple pages without depending on the production
+        // 5 MB threshold.
+        let snap = {
+            let limits = small_limits();
+            let hits = cache.fetch_all_hits().await.unwrap();
+            render_snapshot(&cache.meta, &hits, &limits)
+        };
+        *cache.snapshot.write().await = Some(Arc::new(snap));
+
+        let app = router(cache);
+
+        // /llms.txt → index body when paginated.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/llms.txt").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // /llms-index.txt → index body.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/llms-index.txt").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        assert!(std::str::from_utf8(&bytes).unwrap().contains("## Pages"));
+
+        // /llms-page/1 → first page, 200.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/llms-page/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "in-range page must serve a 200 — guards against axum route-pattern regressions"
+        );
+
+        // /llms-page/99 → 404 (only ~2 pages exist).
+        let resp = app
+            .oneshot(Request::get("/llms-page/99").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn router_emits_last_modified_on_304() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt as _;
+
+        let source: DatasetSource = Arc::new(StubSearcher::with_pages(vec![SearchPage {
+            hits: vec![fixture_hit("a", None)],
+            next_offset: None,
+        }]));
+        let cache = Arc::new(LlmsTxtCache::new(source, meta()));
+        // Prime the snapshot so we know the ETag.
+        let snap = cache.get_or_build().await.unwrap();
+        let etag = snap.etag.clone();
+
+        let app = router(cache);
+
+        let resp = app
+            .oneshot(
+                Request::get("/llms.txt")
+                    .header(axum::http::header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 304);
+        // 304 must carry both Last-Modified (so date-based
+        // revalidation continues to work) and Cache-Control (so
+        // intermediate proxies update their TTL). Content-Type is
+        // legitimately omitted on 304 per RFC 9110 § 15.4.5.
+        assert!(
+            resp.headers()
+                .contains_key(axum::http::header::LAST_MODIFIED),
+            "304 response missing Last-Modified",
+        );
+        assert!(
+            resp.headers()
+                .contains_key(axum::http::header::CACHE_CONTROL),
+            "304 response missing Cache-Control",
+        );
+    }
+
     #[test]
     fn paginate_emits_cross_links_per_page() {
         let limits = small_limits();
@@ -926,7 +1147,7 @@ mod tests {
         assert!(pages.len() >= 2);
         // First page references the next, not the previous.
         assert!(!pages[0].contains("Previous page"));
-        assert!(pages[0].contains("Next page: <https://example.test/llms-page-2.txt>"));
+        assert!(pages[0].contains("Next page: <https://example.test/llms-page/2>"));
         // Last page still emits a forward link; 404 marks the end
         // is the documented contract.
         let last = pages.last().unwrap();

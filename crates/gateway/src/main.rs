@@ -76,7 +76,7 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
 /// available. Kept as a separate constant so both the boot log and
 /// `doctor` can show "mounted" vs "skipped" without re-encoding
 /// the list.
-const LLMS_TXT_PUBLIC_ROUTES: &[&str] = &["/llms.txt", "/llms-index.txt", "/llms-page-{n}.txt"];
+const LLMS_TXT_PUBLIC_ROUTES: &[&str] = &["/llms.txt", "/llms-index.txt", "/llms-page/{n}"];
 
 /// Render the public-route list the boot log + doctor display.
 /// Conditionally folds in optional subrouters so an operator
@@ -480,9 +480,7 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     // background tasks today. `drop(_)` defeats clippy's
     // `let_underscore_future` lint without us pretending to await it.
     drop(cache.clone().spawn_refresh_task());
-    tracing::info!(
-        "llms.txt subrouter enabled at /llms.txt + /llms-index.txt + /llms-page-{{n}}.txt"
-    );
+    tracing::info!("llms.txt subrouter enabled at /llms.txt + /llms-index.txt + /llms-page/{{n}}");
     Some(llms_txt::router(cache))
 }
 
@@ -1404,7 +1402,7 @@ mod tests {
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.contains("/llms.txt"));
         assert!(entry.detail.contains("/llms-index.txt"));
-        assert!(entry.detail.contains("/llms-page-{n}.txt"));
+        assert!(entry.detail.contains("/llms-page/{n}"));
     }
 
     #[test]
@@ -1431,7 +1429,7 @@ mod tests {
         let with = resolved_public_routes(true);
         assert!(with.contains(&"/healthz"));
         assert!(with.contains(&"/llms.txt"));
-        assert!(with.contains(&"/llms-page-{n}.txt"));
+        assert!(with.contains(&"/llms-page/{n}"));
     }
 
     #[test]
