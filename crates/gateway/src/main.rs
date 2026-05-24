@@ -340,9 +340,10 @@ async fn serve() -> anyhow::Result<()> {
     let tool_count = dispatcher.len();
     // Build the `/.well-known/mcp.json` router BEFORE the
     // dispatcher gets moved into `McpServer`. The manifest is
-    // rendered once at boot from a dispatcher snapshot — cloning
-    // the registry here is cheap (it's `Arc`-backed) and means
-    // the well-known surface and `/mcp` see identical tool lists.
+    // rendered once at boot from the dispatcher (borrowed here;
+    // `Dispatcher::list_tools` reads through the `Arc`-backed
+    // inner map without cloning the registry) so the well-known
+    // surface and `/mcp` see identical tool lists.
     let well_known_router = build_well_known_router(&dispatcher, mode);
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");

@@ -383,15 +383,20 @@ mod tests {
 
     #[test]
     fn manifest_tools_summary_contains_descriptors_in_registry_order() {
+        // Deliberately register out of sorted order so this test
+        // actually catches a regression to insertion-order
+        // iteration. With sorted registration the assertion would
+        // pass even if `Dispatcher::list_tools` switched away from
+        // `BTreeMap`.
         let d = dispatcher_with(vec![
+            ("gamma", "gamma desc"),
             ("alpha", "alpha desc"),
             ("beta", "beta desc"),
-            ("gamma", "gamma desc"),
         ]);
         let m = build_manifest(&d, &meta(Mode::Personal));
         // `Dispatcher::list_tools` iterates the inner `BTreeMap` by
-        // name, so the manifest's `tools` list is deterministically
-        // sorted regardless of registration order.
+        // name, so the manifest's `tools` list is alphabetically
+        // sorted regardless of the order we registered them above.
         assert_eq!(
             m.tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             vec!["alpha", "beta", "gamma"],
