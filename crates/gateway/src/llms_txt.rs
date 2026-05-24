@@ -103,16 +103,23 @@ const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// response bodies with a refcount bump instead of cloning the
 /// underlying byte buffer — important because a single page can be
 /// several megabytes.
+///
+/// `index` is **always** populated (single-page case carries the
+/// "everything fits at /llms.txt" stand-in) so the `etag` field
+/// hashes exactly the bytes every handler serves — no
+/// representation-vs-validator drift on `/llms-index.txt`.
 #[derive(Debug, Clone)]
 struct Snapshot {
     pages: Vec<Bytes>,
-    /// Index page rendered alongside the data pages so the index
-    /// route serves a precomputed body rather than re-building on
-    /// each request. `None` only in the single-page case.
-    index: Option<Bytes>,
-    /// `SHA-256` of every page concatenated. Distinct `ETag`s between
-    /// snapshots even when only one page changed because any
-    /// content change shifts the digest.
+    /// Index body served at `/llms-index.txt`. Always populated —
+    /// paginated path stores the full multi-page index; single-page
+    /// path stores the small "everything fits at /llms.txt" doc.
+    index: Bytes,
+    /// `SHA-256` of every page concatenated with the index body.
+    /// Distinct `ETag`s between snapshots even when only one page
+    /// changed because any content change shifts the digest. The
+    /// index is folded in so the validator and the served body
+    /// for `/llms-index.txt` always come from the same snapshot.
     etag: String,
     generated_at: DateTime<Utc>,
 }
@@ -326,10 +333,17 @@ impl std::fmt::Debug for LlmsTxtCache {
 /// real work.
 fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> Snapshot {
     if let Some(single_page) = try_render_single_page(meta, hits, limits.single_page_cap) {
-        let etag = etag_for(std::iter::once(single_page.as_str()));
+        // Always store an index body — single-page case uses the
+        // small "everything fits at /llms.txt" stand-in so the
+        // `etag` field covers exactly the bytes `/llms-index.txt`
+        // will serve. Without this, clients revalidating that
+        // route would see 304 churn whenever the catalog page
+        // changed even though the rendered index body didn't.
+        let index = render_single_page_index(meta);
+        let etag = etag_for([single_page.as_str(), index.as_str()]);
         Snapshot {
             pages: vec![Bytes::from(single_page)],
-            index: None,
+            index: Bytes::from(index),
             etag,
             generated_at: Utc::now(),
         }
@@ -340,7 +354,7 @@ fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> S
             etag_for(std::iter::once(index.as_str()).chain(pages.iter().map(String::as_str)));
         Snapshot {
             pages: pages.into_iter().map(Bytes::from).collect(),
-            index: Some(Bytes::from(index)),
+            index: Bytes::from(index),
             etag,
             generated_at: Utc::now(),
         }
@@ -600,7 +614,7 @@ async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap
             // can be several MB. The shared buffer flows directly
             // into the response body.
             let body = if snap.is_paginated() {
-                snap.index.clone().unwrap_or_default()
+                snap.index.clone()
             } else {
                 snap.pages.first().cloned().unwrap_or_default()
             };
@@ -617,16 +631,12 @@ async fn handler_index(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMa
                 return resp;
             }
             // Even when the catalog fits in one page we serve a
-            // minimal index that points back at /llms.txt. That
-            // keeps the URL discoverable for clients that always
-            // try the index first.
-            let body = snap.index.clone().unwrap_or_else(|| {
-                // Single-page case: rendered on demand because
-                // the snapshot doesn't carry one. Cheap (a
-                // handful of bytes) so we don't bother caching.
-                Bytes::from(render_single_page_index(&cache.meta))
-            });
-            success_response(body, &snap.etag, snap.generated_at)
+            // minimal index that points back at /llms.txt. The
+            // snapshot always carries an index body (single-page
+            // case renders the small "everything fits" stand-in
+            // at build time) so the validator in `snap.etag`
+            // matches the bytes we hand back here.
+            success_response(snap.index.clone(), &snap.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
     }
@@ -642,13 +652,20 @@ async fn handler_page(
     }
     match cache.get_or_build().await {
         Ok(snap) => {
+            // Look up the page BEFORE the conditional-GET check so
+            // an out-of-range request still gets the 404 sentinel
+            // (with `Cache-Control: no-store`) even when the client
+            // sends a matching `If-None-Match`. Returning a 304 in
+            // that case would break the "404 marks the end of
+            // pagination" contract and let agents loop on a stale
+            // cache entry past a freshly-added trailing page.
+            let Some(body) = snap.pages.get(n - 1) else {
+                return page_not_found_response("no such page");
+            };
             if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
                 return resp;
             }
-            match snap.pages.get(n - 1) {
-                Some(body) => success_response(body.clone(), &snap.etag, snap.generated_at),
-                None => page_not_found_response("no such page"),
-            }
+            success_response(body.clone(), &snap.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
     }
@@ -887,7 +904,11 @@ mod tests {
         ];
         let snap = render_snapshot(&meta(), &hits, &Limits::default());
         assert_eq!(snap.pages.len(), 1, "small catalog stays single-page");
-        assert!(snap.index.is_none());
+        // Single-page case still carries an index body — the
+        // "everything fits at /llms.txt" stand-in so the etag
+        // covers the bytes /llms-index.txt actually serves.
+        let index = std::str::from_utf8(&snap.index).unwrap();
+        assert!(index.contains("https://example.test/llms.txt"));
         // Pages are stored as `Bytes`; decode to `&str` for the
         // substring assertions. UTF-8 is mandatory in the renderer.
         let body = std::str::from_utf8(&snap.pages[0]).unwrap();
@@ -917,9 +938,7 @@ mod tests {
             "expected pagination, got {} pages",
             snap.pages.len()
         );
-        assert!(snap.index.is_some());
-        let index_bytes = snap.index.unwrap();
-        let index = std::str::from_utf8(&index_bytes).unwrap();
+        let index = std::str::from_utf8(&snap.index).unwrap();
         assert!(index.contains(&format!("Page {}", snap.pages.len())));
         for page in &snap.pages {
             assert!(
@@ -1200,6 +1219,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn router_returns_404_on_out_of_range_even_with_matching_if_none_match() {
+        // Guards the "404 marks end of pagination" contract:
+        // even when the client sends a matching `If-None-Match`,
+        // an out-of-range page must still 404 (with no-store)
+        // so the agent's pagination walk can detect the end.
+        // Returning 304 in this case would let an agent miss a
+        // freshly-added trailing page until its cache expired.
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let source: DatasetSource = Arc::new(StubSearcher::with_pages(vec![SearchPage {
+            hits: vec![fixture_hit("a", None)],
+            next_offset: None,
+        }]));
+        let cache = Arc::new(LlmsTxtCache::new(source, meta()));
+        let snap = cache.get_or_build().await.unwrap();
+        let etag = snap.etag.clone();
+        let app = router(cache);
+
+        let resp = app
+            .oneshot(
+                Request::get("/llms-page/99")
+                    .header(axum::http::header::IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store",
+        );
     }
 
     #[tokio::test]
