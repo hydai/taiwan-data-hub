@@ -36,8 +36,8 @@ use crate::api_routes;
 #[openapi(
     info(
         title = "Taiwan Data Hub Gateway",
-        description = "REST control-plane endpoints exposed alongside the MCP server. The MCP \
-                       protocol surface itself is documented separately at /.well-known/mcp.json.",
+        description = "REST control-plane endpoints exposed alongside the MCP server. \
+The MCP protocol surface itself is documented separately at /.well-known/mcp.json.",
         license(name = "Apache-2.0", identifier = "Apache-2.0"),
     ),
     paths(api_routes::get_config),
@@ -133,13 +133,15 @@ mod tests {
 
     #[tokio::test]
     async fn swagger_ui_root_serves_html() {
-        // Swagger UI mounts its index at `/api/docs/` (trailing
-        // slash) and serves redirects + static assets under
-        // that prefix. Hitting the index should return HTML so
-        // a developer browsing to the URL sees the UI shell.
+        // Swagger UI mounts its index at `{SWAGGER_UI_PATH}/`
+        // (trailing slash) and serves redirects + static assets
+        // under that prefix. Build the request URL from the
+        // shared constant so a rename of `SWAGGER_UI_PATH`
+        // automatically reaches the test.
         let app = router();
+        let path = format!("{SWAGGER_UI_PATH}/");
         let resp = app
-            .oneshot(Request::get("/api/docs/").body(Body::empty()).unwrap())
+            .oneshot(Request::get(&path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
