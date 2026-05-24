@@ -104,6 +104,18 @@
 	function renderAnomalies(year, divisor, suffix) {
 		anomalyList.textContent = '';
 		var prevYear = year - 1;
+		// If `prevYear` is before the dataset's earliest year there
+		// is no YoY baseline at all — distinguish that from "we
+		// checked and found nothing" so the user knows the panel
+		// isn't silently failing.
+		if (prevYear < YEARS[0]) {
+			var firstYearLi = document.createElement('li');
+			firstYearLi.className = 'muted';
+			firstYearLi.textContent =
+				year + ' 年為資料集最早年份,無前一年基準可比;請選擇 ' + YEARS[1] + ' 年(含)以後';
+			anomalyList.appendChild(firstYearLi);
+			return;
+		}
 		// Compute current vs previous vendor totals.
 		var curr = sumBy(
 			contracts.filter(function (r) { return r.year === year; }),
