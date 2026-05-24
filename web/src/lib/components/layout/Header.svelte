@@ -64,14 +64,13 @@
 	<div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
 		<a
 			href={resolve('/')}
-			class="text-lg font-bold tracking-tight text-neutral-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
-			aria-label="Taiwan Data Hub — home"
+			class="text-lg font-bold tracking-tight text-primary-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+			aria-label={m.aria_brand_home()}
 		>
-			<span class="text-primary-700">{m.app_name_taiwan()}</span>
-			{m.app_name_data_hub()}
+			{m.app_name()}
 		</a>
 
-		<nav aria-label="Main" class="hidden md:flex md:items-center md:gap-6">
+		<nav aria-label={m.aria_nav_main()} class="hidden md:flex md:items-center md:gap-6">
 			{#each navLinks as link (link.href)}
 				<!--
 				Active-link check has to compare against the

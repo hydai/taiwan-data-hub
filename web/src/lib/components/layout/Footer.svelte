@@ -31,7 +31,7 @@
 					<a
 						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/blob/main/LICENSE">Apache-2.0</a
-					>.
+					>{m.footer_license_suffix()}
 				</p>
 			</section>
 
@@ -56,7 +56,7 @@
 					<a
 						class="text-primary-700 underline underline-offset-2 hover:text-primary-800"
 						href="https://github.com/hydai/taiwan-data-hub/issues">GitHub Issues</a
-					>.
+					>{m.footer_contact_suffix()}
 				</p>
 			</section>
 		</div>

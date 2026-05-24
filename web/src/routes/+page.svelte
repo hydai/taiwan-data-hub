@@ -38,23 +38,20 @@
 		<p class="text-sm font-medium tracking-wide text-primary-700 uppercase">
 			{m.home_pre_alpha_badge()}
 		</p>
-		<h1 class="text-4xl font-bold tracking-tight">
-			{m.app_name_taiwan()}
-			{m.app_name_data_hub()}
-		</h1>
+		<h1 class="text-4xl font-bold tracking-tight">{m.app_name()}</h1>
 		<p class="text-lg text-neutral-600">{m.app_tagline_short()}</p>
 	</header>
 
 	<section class="mt-10 rounded-lg border border-neutral-200 bg-primary-50 p-5">
 		<h2 class="text-base font-semibold">{m.home_scaffold_heading()}</h2>
 		<p class="mt-1 text-sm text-neutral-700">
-			{m.home_scaffold_body_prefix()}
+			{m.home_scaffold_prefix()}
 			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/milestone/3">M2</a
-			>{m.home_scaffold_body_middle()}
+			>{m.home_scaffold_middle()}
 			<a class="underline" href="https://github.com/hydai/taiwan-data-hub/blob/main/docs/DESIGN.md"
 				>docs/DESIGN.md</a
 			>
-			{m.home_scaffold_body_suffix()}
+			{m.home_scaffold_suffix()}
 		</p>
 	</section>
 
