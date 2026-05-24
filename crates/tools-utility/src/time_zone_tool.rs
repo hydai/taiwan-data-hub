@@ -171,6 +171,14 @@ fn parse_optional_string(args: &Value, key: &str) -> Result<Option<String>, Tool
 }
 
 fn input_schema() -> Map<String, Value> {
+    // Schema mirrors the actual parser:
+    //   - `datetime` + `to_tz`: required strings with at least one
+    //     non-whitespace char (`pattern: "\\S"`) to match
+    //     `parse_string`'s trim-then-reject-empty rule.
+    //   - `from_tz`: nullable string (also optional); a JSON
+    //     `null` or a whitespace-only string both round-trip to
+    //     `None` in `parse_optional_string`, so the schema lists
+    //     both legitimate input shapes.
     json!({
         "type": "object",
         "required": ["datetime", "to_tz"],
@@ -178,15 +186,17 @@ fn input_schema() -> Map<String, Value> {
             "datetime": {
                 "type": "string",
                 "minLength": 1,
+                "pattern": "\\S",
                 "description": "RFC-3339 string (with offset) or `YYYY-MM-DDTHH:MM:SS` + from_tz"
             },
             "from_tz": {
-                "type": "string",
-                "description": "IANA tz name (e.g. Asia/Taipei). Required when datetime has no offset."
+                "type": ["string", "null"],
+                "description": "IANA tz name (e.g. Asia/Taipei). Required when datetime has no offset; supply null / omit otherwise."
             },
             "to_tz": {
                 "type": "string",
                 "minLength": 1,
+                "pattern": "\\S",
                 "description": "Target IANA tz name (e.g. UTC, America/New_York)"
             }
         },
