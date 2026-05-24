@@ -10,6 +10,15 @@ use crate::json_helpers::kind_of;
 
 pub const TOOL_NAME: &str = "geo_point_in_polygon";
 
+/// Maximum vertex count accepted by the MCP wrapper. Matches the
+/// 100 k cap the stats tools use for their `values` arrays — the
+/// ray-cast loop is O(n) and we want a hard upper bound so an
+/// adversarial caller can't push the dispatcher into the seconds-
+/// to-allocate-Vec regime. Re-enforced both in the JSON schema
+/// (`maxItems`) and at parse time in case a future caller bypasses
+/// schema validation.
+const MAX_POLYGON_VERTICES: usize = 100_000;
+
 #[derive(Debug, Default, Clone)]
 pub struct PointInPolygonTool;
 
@@ -32,8 +41,11 @@ impl ToolHandler for PointInPolygonTool {
                           city boundaries). Polygon may be open or \
                           closed; the loop wraps around implicitly. \
                           Returns false for degenerate polygons \
-                          (< 3 vertices) and for on-boundary points \
-                          (floating-point thresholds are not stable)."
+                          (< 3 vertices). On-boundary points are NOT \
+                          handled specially — the ray-cast decision \
+                          is sensitive to floating-point thresholds, \
+                          so callers needing on-boundary detection \
+                          should test for that separately."
                 .to_string(),
             input_schema: input_schema(),
             output_schema: Some(output_schema()),
@@ -67,6 +79,17 @@ fn parse_vertices(args: &Value) -> Result<Vec<(f64, f64)>, ToolError> {
         .ok_or_else(|| {
             ToolError::InvalidArguments("`polygon` must be an array of {lat, lon} vertices".into())
         })?;
+    // Defence-in-depth vertex cap: the JSON schema also declares
+    // `maxItems`, but enforcing the bound at parse time means
+    // direct Rust callers (or any path that skips schema
+    // validation) still get a structured error instead of an
+    // OOM / multi-second allocation.
+    if arr.len() > MAX_POLYGON_VERTICES {
+        return Err(ToolError::InvalidArguments(format!(
+            "`polygon` has {} vertices; maximum is {MAX_POLYGON_VERTICES}",
+            arr.len()
+        )));
+    }
     let mut out = Vec::with_capacity(arr.len());
     for (idx, v) in arr.iter().enumerate() {
         let map = v.as_object().ok_or_else(|| {
@@ -123,6 +146,7 @@ fn input_schema() -> Map<String, Value> {
             },
             "polygon": {
                 "type": "array",
+                "maxItems": MAX_POLYGON_VERTICES,
                 "items": {
                     "type": "object",
                     "required": ["lat", "lon"],

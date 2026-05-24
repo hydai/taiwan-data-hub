@@ -1,14 +1,14 @@
-//! MCP tool wrappers for the seven `stats_*` + two `series_*` tools.
+//! MCP tool wrappers for the 5 `stats_*` + 3 `series_*` + 1
+//! `anomaly_*` tools — 9 tools, mechanically similar (parse an
+//! array, dispatch to a pure-math helper, wrap the result):
 //!
-//! Each wrapper is a thin facade over a pure function in `crate::stats`:
-//!
-//!   - `stats_summary`          → [`stats::summary`]
-//!   - `stats_percentile`       → [`stats::percentile`]
-//!   - `stats_histogram`        → [`stats::histogram`]
-//!   - `stats_correlation`      → [`stats::pearson_correlation`]
-//!   - `stats_linear_regression`→ [`stats::linear_regression`]
-//!   - `series_moving_average`  → [`stats::moving_average`]
-//!   - `series_autocorrelation` → [`stats::autocorrelation`]
+//!   - `stats_summary`             → [`stats::summary`]
+//!   - `stats_percentile`          → [`stats::percentile`]
+//!   - `stats_histogram`           → [`stats::histogram`]
+//!   - `stats_correlation`         → [`stats::pearson_correlation`]
+//!   - `stats_linear_regression`   → [`stats::linear_regression`]
+//!   - `series_moving_average`     → [`stats::moving_average`]
+//!   - `series_autocorrelation`    → [`stats::autocorrelation`]
 //!   - `series_decompose_seasonal` → [`stats::decompose_seasonal_additive`]
 //!   - `anomaly_isolation_score`   → [`anomaly::isolation_scores`]
 //!
@@ -800,10 +800,15 @@ mod tests {
     }
 
     #[test]
-    fn summary_rejects_nan_values() {
-        // NaN can't appear via the standard JSON serializer (it's not
-        // valid JSON), but a caller using extended JSON might try; we
-        // reject finite-check violations at the array boundary.
+    fn summary_rejects_non_number_values() {
+        // NaN can't appear via the standard JSON serializer at all
+        // (it's not valid JSON), so a NaN-input test would have to
+        // hand-craft a `serde_json::Value` — instead we cover the
+        // adjacent failure mode: any non-number element in the
+        // array is rejected at the array boundary by
+        // `parse_values_array`. (The NaN-poisoning path inside
+        // `stats::summary` is already covered by direct Rust tests
+        // in `stats.rs`.)
         let err = run(
             &SummaryStatisticsTool::new(),
             json!({"values":[1, "oops", 3]}),

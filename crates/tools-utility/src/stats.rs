@@ -1,7 +1,8 @@
-//! Pure-math statistics shared by the seven `stats_*` MCP tool
-//! wrappers and the two `series_*` tools. No async, no I/O —
-//! plain functions over `&[f64]` so Rust callers can use them
-//! directly without the MCP serde round-trip.
+//! Pure-math statistics shared by the five `stats_*` MCP tool
+//! wrappers, the three `series_*` tools, and the
+//! `anomaly_isolation_score` tool (via `crate::anomaly`). No
+//! async, no I/O — plain functions over `&[f64]` so Rust callers
+//! can use them directly without the MCP serde round-trip.
 //!
 //! Algorithmic choices favour the textbook "do the obvious thing"
 //! over micro-optimisation: each helper is read once during a tool
@@ -276,10 +277,19 @@ pub struct LinearFit {
 }
 
 /// Centered or trailing moving average over `window` points. With
-/// `center=false` the result has `n - window + 1` points starting at
-/// index `window - 1`. With `center=true` the result has the same
-/// length as `values` with NaN padding for the endpoints where the
-/// window doesn't fit.
+/// `center=false` the result has `n - window + 1` trailing means
+/// (each one indexed at the right edge of the window).
+///
+/// With `center=true` the result has the same length as `values`
+/// padded with NaN at both ends. The padding is asymmetric for
+/// even windows: `floor(window / 2)` NaNs at the front and
+/// `ceil(window / 2) - 1` at the back. This keeps every computed
+/// mean (`n - window + 1` of them) in the output rather than
+/// losing the last one to make the padding symmetric — the price
+/// is that the trend produced by `decompose_seasonal_additive`
+/// is technically half-step-shifted to the right when `period`
+/// is even. For the utility-tool use cases that matters less
+/// than losing a data point.
 pub fn moving_average(values: &[f64], window: usize, center: bool) -> Option<Vec<f64>> {
     if window == 0 || window > values.len() {
         return None;
@@ -338,11 +348,18 @@ pub fn autocorrelation(values: &[f64], max_lag: usize) -> Option<Vec<f64>> {
 /// Classical additive seasonal decomposition. Returns the trend
 /// (centered moving average of size `period`), the seasonal
 /// component (mean of detrended values at each phase, replicated),
-/// and the residual. Trend endpoints (the first and last
-/// `period / 2` points) are returned as NaN because the moving
-/// average doesn't have enough data to fill them; the seasonal +
-/// residual for those points are still produced (using the per-
-/// phase seasonal mean) so the lengths all match the input.
+/// and the residual.
+///
+/// **Endpoint handling**: the moving-average window can't fit at
+/// the edges, so `trend` is NaN for the first and last `period /
+/// 2` indices (asymmetric for even `period` — see
+/// [`moving_average`]). Wherever `trend` is NaN we set the
+/// matching `residual` to NaN too, because there's no defensible
+/// way to attribute the deviation between observation and the
+/// (non-existent) trend value. `seasonal` is always defined at
+/// every index — it's the per-phase mean of the detrended series,
+/// which uses the global mean as a stand-in trend at the
+/// endpoints when computing each phase's mean.
 ///
 /// `period` must be at least 2 and at most `values.len() / 2` —
 /// otherwise the trend smooth has no signal to recover.
