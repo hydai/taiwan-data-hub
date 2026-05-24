@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "Company 360 — 公司全景查詢",
+    "en": "Company 360 — three-database company lookup"
+  },
+  "description_i18n": {
+    "zh-TW": "輸入統一編號(統編)後同時呈現經濟部商業登記、司法院案件紀錄、政府電子採購得標紀錄三個來源,示範 join_datasets MCP 工具的單一面板查詢模式。展示用樣本資料,正式部署需連線至載入相關資料集的 Taiwan Data Hub 後端。",
+    "en": "Type a 統一編號 (Taiwan tax ID) and see MOEA business registry + Judicial Yuan case records + Public-Construction Commission procurement awards in one view — the join_datasets MCP-tool pattern visualised. Ships with sample data for four well-known public companies; production deployments need a Taiwan Data Hub backend with the matching datasets loaded."
+  },
+  "tags": ["company", "judicial", "procurement", "join"],
+  "status": "beta"
+}
