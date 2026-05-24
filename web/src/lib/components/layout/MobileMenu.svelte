@@ -26,6 +26,7 @@
 	import { navLinks } from '$lib/components/layout/nav-links';
 	import type { Locale } from '$lib/components/layout/Header.svelte';
 	import { cn } from '$lib/utils';
+	import { deLocalizeUrl } from '$lib/paraglide/runtime';
 	import { fade, fly } from 'svelte/transition';
 
 	type Props = {
@@ -134,7 +135,8 @@
 
 			<nav aria-label="Mobile" class="flex-1 space-y-1 px-3 py-4">
 				{#each navLinks as link (link.href)}
-					{@const active = page.url.pathname.startsWith(link.href)}
+					<!-- Same `deLocalizeUrl` rationale as Header.svelte. -->
+					{@const active = deLocalizeUrl(page.url).pathname.startsWith(link.href)}
 					<a
 						href={resolve(link.href)}
 						onclick={onClose}
@@ -160,6 +162,9 @@
 					>
 						<option value="zh-TW">繁中</option>
 						<option value="en">EN</option>
+						<option value="ja">日本語</option>
+						<option value="ko">한국어</option>
+						<option value="fr">Français</option>
 					</select>
 				</div>
 				<p class="text-xs text-neutral-500">Auth UI lands in M4.</p>

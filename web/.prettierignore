@@ -7,3 +7,14 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Paraglide v2 (#7.6): inlang owns `project.inlang/.meta.json`
+# (regenerated on every paraglide compile) and
+# `project.inlang/README.md` (vendored from the tool).
+# Formatting either would just fight the next compile. Our
+# hand-edited `project.inlang/settings.json` is also touched by
+# the tool occasionally, so it stays ignored too.
+/project.inlang/
+
+# Auto-generated Paraglide runtime (also `.gitignore`d).
+/src/lib/paraglide/

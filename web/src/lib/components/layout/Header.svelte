@@ -19,7 +19,16 @@
 	import type { MeUser } from '$lib/gateway/config';
 	import type { GatewayMode } from '$lib/gateway/types';
 
-	export type Locale = 'zh-TW' | 'en';
+	import { deLocalizeUrl, type Locale as ParaglideLocale } from '$lib/paraglide/runtime';
+
+	/**
+	 * Re-export so call sites that imported `Locale` from this module
+	 * before #7.6 keep compiling. The set of valid locales is now
+	 * sourced from `project.inlang/settings.json` via Paraglide v2's
+	 * compiled runtime — adding a locale there automatically updates
+	 * this union.
+	 */
+	export type Locale = ParaglideLocale;
 
 	type Props = {
 		/** Whether the mobile-menu overlay is currently open. */
@@ -63,7 +72,16 @@
 
 		<nav aria-label="Main" class="hidden md:flex md:items-center md:gap-6">
 			{#each navLinks as link (link.href)}
-				{@const active = page.url.pathname.startsWith(link.href)}
+				<!--
+				Active-link check has to compare against the
+				DE-localised URL — `page.url.pathname` keeps
+				the locale prefix (e.g. `/en/datasets`) so a
+				naive `startsWith('/datasets')` would miss
+				every link on non-base-locale pages.
+				`deLocalizeUrl()` strips the prefix so the
+				comparison works for all five locales.
+				-->
+				{@const active = deLocalizeUrl(page.url).pathname.startsWith(link.href)}
 				<a
 					href={resolve(link.href)}
 					class={cn(
@@ -85,8 +103,14 @@
 				onchange={(e) => onLocaleChange(e.currentTarget.value as Locale)}
 				class="rounded-md border border-neutral-200 bg-neutral-50 px-2 py-1 text-sm text-neutral-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
 			>
+				<!-- Labels are the locale's native endonym so a speaker
+				     of that language recognises it without translation —
+				     the same convention every multilingual site uses. -->
 				<option value="zh-TW">繁中</option>
 				<option value="en">EN</option>
+				<option value="ja">日本語</option>
+				<option value="ko">한국어</option>
+				<option value="fr">Français</option>
 			</select>
 
 			{#if mode === 'personal'}

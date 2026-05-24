@@ -8,6 +8,20 @@ node_modules
 /.svelte-kit
 /build
 
+# Paraglide v2 generated runtime (#7.6). Regenerated on every
+# `vite dev` / `vite build` from `project.inlang/settings.json`
+# + `messages/*.json`; checking it in would just produce noisy
+# diffs and stale-runtime confusion when somebody edits a
+# message without re-running compile.
+/src/lib/paraglide
+
+# inlang-managed files inside `project.inlang/`. `settings.json`
+# is hand-edited and tracked; `.meta.json` + `README.md` are
+# vendored by the tool on every paraglide compile and would
+# otherwise leave a dirty tree after each run.
+/project.inlang/.meta.json
+/project.inlang/README.md
+
 # OS
 .DS_Store
 Thumbs.db

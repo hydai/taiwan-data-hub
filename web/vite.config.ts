@@ -1,5 +1,6 @@
 import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
+import { paraglideVitePlugin } from '@inlang/paraglide-js';
 import { defineConfig, loadEnv } from 'vite';
 
 export default defineConfig(({ mode }) => {
@@ -16,7 +17,20 @@ export default defineConfig(({ mode }) => {
 		'/v1/api-keys': { target: gatewayTarget, changeOrigin: false }
 	};
 	return {
-		plugins: [tailwindcss(), sveltekit()],
+		plugins: [
+			tailwindcss(),
+			sveltekit(),
+			// Paraglide v2 i18n (#7.6). Reads `project.inlang/settings.json`
+			// + `messages/*.json`, generates `src/lib/paraglide/` on every
+			// build, and watches for message-file changes in `vite dev`.
+			// `strategy` controls how the active locale is resolved at
+			// request time — order matters because the first hit wins.
+			paraglideVitePlugin({
+				project: './project.inlang',
+				outdir: './src/lib/paraglide',
+				strategy: ['url', 'cookie', 'preferredLanguage', 'baseLocale']
+			})
+		],
 		server: {
 			port: 3000,
 			strictPort: true,
