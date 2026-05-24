@@ -57,13 +57,27 @@ impl ToolHandler for TimezoneConvertTool {
         let (utc_instant, effective_from_tz) = if let Ok(fixed) =
             DateTime::<FixedOffset>::parse_from_rfc3339(&datetime_str)
         {
-            let label = from_tz_opt.clone().unwrap_or_else(|| {
-                if datetime_str.ends_with('Z') {
-                    "UTC".to_string()
-                } else {
-                    "(from offset)".to_string()
-                }
-            });
+            // If both an offset (via RFC-3339) AND `from_tz` were
+            // supplied, reject — silently echoing back a `from_tz`
+            // that doesn't correspond to the parsed offset would
+            // mislead callers about what the tool actually did.
+            // (Strict validation that the named zone's offset
+            // matches the literal offset at that instant would be
+            // even better, but requires resolving DST for the
+            // instant — the simpler rule "don't mix the two" is
+            // less surprising.)
+            if from_tz_opt.is_some() {
+                return Err(ToolError::InvalidArguments(
+                    "`from_tz` must not be supplied when `datetime` includes its own offset \
+                     — the offset already encodes the source timezone unambiguously"
+                        .into(),
+                ));
+            }
+            let label = if datetime_str.ends_with('Z') {
+                "UTC".to_string()
+            } else {
+                "(from offset)".to_string()
+            };
             (fixed.with_timezone(&chrono::Utc), label)
         } else {
             let from_tz_name = from_tz_opt.clone().ok_or_else(|| {
@@ -253,6 +267,55 @@ mod tests {
     fn naive_datetime_without_from_tz_is_error() {
         let err = run(json!({
             "datetime": "2024-06-01T12:00:00",
+            "to_tz": "UTC",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    /// Spring-forward DST gap: 2024-03-10 02:30 doesn't exist in
+    /// `America/New_York` (clocks jumped from 02:00 to 03:00). The
+    /// tool should reject this rather than silently fabricate an
+    /// instant.
+    #[test]
+    fn dst_spring_forward_gap_is_error() {
+        let err = run(json!({
+            "datetime": "2024-03-10T02:30:00",
+            "from_tz": "America/New_York",
+            "to_tz": "UTC",
+        }))
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(matches!(err, ToolError::InvalidArguments(_)));
+        assert!(
+            msg.contains("DST gap"),
+            "error should mention DST gap, got {msg}"
+        );
+    }
+
+    /// Fall-back DST fold: 2024-11-03 01:30 in `America/New_York`
+    /// exists TWICE (clocks went 02:00 → 01:00). `.earliest()`
+    /// resolves to the first (EDT) instant, which converts to
+    /// 05:30 UTC. The later (EST) instant would be 06:30 UTC.
+    #[test]
+    fn dst_fall_back_fold_resolves_to_earlier_instant() {
+        let out = run(json!({
+            "datetime": "2024-11-03T01:30:00",
+            "from_tz": "America/New_York",
+            "to_tz": "UTC",
+        }))
+        .unwrap();
+        // Earlier (EDT, UTC-4) representation: local 01:30 → 05:30 UTC.
+        assert_eq!(out["utc"], "2024-11-03T05:30:00+00:00");
+    }
+
+    /// Supplying both an RFC-3339 offset AND `from_tz` is rejected
+    /// — silently ignoring `from_tz` would be misleading.
+    #[test]
+    fn rfc3339_with_explicit_from_tz_is_error() {
+        let err = run(json!({
+            "datetime": "2024-06-01T12:00:00+08:00",
+            "from_tz": "America/New_York",
             "to_tz": "UTC",
         }))
         .unwrap_err();

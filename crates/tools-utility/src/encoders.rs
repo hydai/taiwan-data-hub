@@ -1,4 +1,5 @@
-//! Pure encoding helpers shared by the `encoder_*` MCP tools.
+//! Pure encoding helpers shared by the `encode_*` / `decode_*` MCP
+//! tools (base64, url-component, hex, jwt-decode).
 //!
 //! Each function returns a `Result<String, String>` — Ok with the
 //! encoded/decoded text, Err with a human-readable reason the input
@@ -128,6 +129,18 @@ pub fn jwt_decode_unverified(token: &str) -> Result<JwtParts, String> {
     }
     let header = decode_jwt_segment(header_b64)?;
     let payload = decode_jwt_segment(payload_b64)?;
+    // JWT spec (RFC 7519) requires header and payload to be JSON
+    // objects (the header has the registered "typ"/"alg" claims;
+    // the payload is the "JOSE claims" set). Anything else is a
+    // malformed token; surfacing it cleanly here is better than
+    // letting it through and producing an output that violates
+    // our own declared schema.
+    if !header.is_object() {
+        return Err("JWT header must be a JSON object".into());
+    }
+    if !payload.is_object() {
+        return Err("JWT payload must be a JSON object".into());
+    }
     Ok(JwtParts {
         header,
         payload,

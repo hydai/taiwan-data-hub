@@ -10,6 +10,11 @@ use crate::json_helpers::kind_of;
 
 const MAX_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_HTML_BYTES: usize = 4 * 1024 * 1024;
+/// Cap on `text_regex_test` match count so a pathological pattern
+/// like `.` over a 1 MiB input doesn't return ~1 M JSON objects.
+/// 1 k matches is plenty for the "tell me what this regex hits"
+/// use case; beyond that callers want streaming, not MCP.
+const MAX_REGEX_MATCHES: usize = 1024;
 
 fn parse_text(args: &Value, key: &str, max: usize) -> Result<String, ToolError> {
     match args.get(key) {
@@ -52,11 +57,11 @@ impl ToolHandler for SlugifyTool {
             name: TOOL_SLUGIFY.to_string(),
             description: "Convert a UTF-8 string to an ASCII-only, \
                           lower-case, hyphen-separated slug suitable for \
-                          URLs, filenames, and DB keys. Non-ASCII \
-                          characters (CJK, emoji, etc.) are dropped \
-                          rather than transliterated — the resulting \
-                          slug is then a best-effort romanisation only \
-                          if the input was already mostly ASCII."
+                          URLs, filenames, and DB keys. Latin-extended \
+                          chars are best-effort transliterated (café → \
+                          cafe, naïve → naive); characters without an \
+                          ASCII mapping (most CJK, emoji, etc.) are \
+                          dropped."
                 .to_string(),
             // No `maxLength` in the schema (it counts code points;
             // the runtime cap is bytes — they disagree for multi-
@@ -112,14 +117,16 @@ impl ToolHandler for RegexTestTool {
         ToolDescriptor {
             name: TOOL_REGEX_TEST.to_string(),
             description: "Test whether a Rust-flavour regex matches the \
-                          input text, and return every match (start \
-                          byte offset, length, matched substring). \
-                          Uses the `regex` crate's syntax (no \
-                          look-around, guaranteed linear-time \
-                          matching). Returns `match_count: 0` for no \
-                          match — never an error from `is_match` — but \
-                          a malformed pattern is reported as \
-                          `InvalidArguments`."
+                          input text, and return up to 1024 matches \
+                          (start byte offset, length, matched \
+                          substring). Uses the `regex` crate's syntax \
+                          (no look-around, guaranteed linear-time \
+                          matching). When the pattern matches more \
+                          than 1024 times the response carries \
+                          `truncated: true` and the first 1024 matches \
+                          only; `match_count` reflects what was \
+                          returned, not the true count. A malformed \
+                          pattern is reported as `InvalidArguments`."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -137,9 +144,10 @@ impl ToolHandler for RegexTestTool {
             output_schema: Some(
                 json!({
                     "type": "object",
-                    "required": ["match_count", "matches"],
+                    "required": ["match_count", "matches", "truncated"],
                     "properties": {
                         "match_count": {"type": "integer"},
+                        "truncated": {"type": "boolean"},
                         "matches": {
                             "type": "array",
                             "items": {
@@ -166,8 +174,16 @@ impl ToolHandler for RegexTestTool {
         let text = parse_text(&args, "text", MAX_TEXT_BYTES)?;
         let re = Regex::new(&pattern)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid regex: {e}")))?;
-        let matches: Vec<Value> = re
-            .find_iter(&text)
+        // Cap the iteration explicitly so a pathological pattern
+        // (e.g. `.` over a 1 MiB input → ~1 M matches) can't blow
+        // up the response size. We `take(MAX_REGEX_MATCHES + 1)`
+        // and then check the length: if we got MAX+1 there were
+        // strictly more matches than we kept.
+        let collected: Vec<_> = re.find_iter(&text).take(MAX_REGEX_MATCHES + 1).collect();
+        let truncated = collected.len() > MAX_REGEX_MATCHES;
+        let matches: Vec<Value> = collected
+            .into_iter()
+            .take(MAX_REGEX_MATCHES)
             .map(|m| {
                 json!({
                     "start": m.start(),
@@ -178,6 +194,7 @@ impl ToolHandler for RegexTestTool {
             .collect();
         Ok(json!({
             "match_count": matches.len(),
+            "truncated": truncated,
             "matches": matches,
         }))
     }
