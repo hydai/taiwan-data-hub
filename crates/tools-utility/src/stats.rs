@@ -1,4 +1,4 @@
-//! Pure-math statistics shared by the five `stats_*` MCP tool
+//! Pure-math statistics shared by the five `stats_*` MCP tools'
 //! wrappers, the three `series_*` tools, and the
 //! `anomaly_isolation_score` tool (via `crate::anomaly`). No
 //! async, no I/O — plain functions over `&[f64]` so Rust callers

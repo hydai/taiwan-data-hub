@@ -179,6 +179,12 @@ pub struct NominatimSearchHit {
     pub addresstype: Option<String>,
     #[serde(default)]
     pub importance: Option<f64>,
+    /// Structured address parts (city / county / postcode / etc.)
+    /// when the upstream provides them. Surfaced because we already
+    /// request `addressdetails=1` on the search call — without
+    /// this field the extra payload was bandwidth wasted.
+    #[serde(default)]
+    pub address: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]

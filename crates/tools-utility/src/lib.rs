@@ -85,7 +85,7 @@ pub use stats::{
 pub use stats_tools::{
     AnomalyIsolationTool, AutocorrelationTool, CorrelationTool, DecomposeSeasonalTool,
     HistogramTool, LinearRegressionTool, MovingAverageTool, PercentileTool, SummaryStatisticsTool,
-    TOOL_ANOMALY as STATS_ANOMALY_ISOLATION_TOOL_NAME,
+    TOOL_ANOMALY as ANOMALY_ISOLATION_SCORE_TOOL_NAME,
     TOOL_AUTOCORRELATION as SERIES_AUTOCORRELATION_TOOL_NAME,
     TOOL_CORRELATION as STATS_CORRELATION_TOOL_NAME,
     TOOL_DECOMPOSE_SEASONAL as SERIES_DECOMPOSE_SEASONAL_TOOL_NAME,

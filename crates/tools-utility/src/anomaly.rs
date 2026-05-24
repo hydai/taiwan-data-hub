@@ -66,7 +66,13 @@ pub fn isolation_scores(values: &[f64]) -> Option<Vec<f64>> {
     let max_depth = *raw_depths.iter().max().unwrap();
     let min_depth = *raw_depths.iter().min().unwrap();
     if max_depth == min_depth {
-        return Some(vec![0.0; n]);
+        // Every point landed at the same depth — for `n == 2` this
+        // means both points are simultaneously at the edges (rank 0
+        // and rank 1, both dist_from_edge = 0). The module docs say
+        // the most-isolated points normalise to 1.0; with everyone
+        // equally maximally isolated, that's `[1.0; n]`, not the
+        // zeros the earlier code returned.
+        return Some(vec![1.0; n]);
     }
     let range = (max_depth - min_depth) as f64;
     let scores: Vec<f64> = raw_depths
