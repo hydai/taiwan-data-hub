@@ -63,7 +63,7 @@ export const CONNECTOR_CLIENTS: readonly ConnectorClient[] = [
 		uiSteps: [
 			'Open the Cline panel in VS Code (Activity Bar → Cline icon).',
 			'Click the MCP Servers tab → "Edit MCP Settings".',
-			'Paste the snippet below into the `mcpServers` object of the opened JSON file and save.'
+			'If the opened file is empty, paste the snippet below as-is. Otherwise merge just the new server entry into the existing `mcpServers` object (do not nest the snippet inside another `mcpServers` key). Save the file.'
 		],
 		reloadHint:
 			'Cline reloads the MCP config on save — no window reload needed; the server shows up under "MCP Servers" within a few seconds.'

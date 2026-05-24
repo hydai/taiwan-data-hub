@@ -181,9 +181,18 @@
 					</ol>
 				{/if}
 
-				<p class="mt-4 text-sm font-semibold text-neutral-800">
-					Paste this under the existing
+				<p class="mt-4 text-sm font-semibold text-neutral-800">Snippet</p>
+				<p class="mt-1 text-sm text-neutral-600">
+					If the config file is empty or has no
+					<code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-xs">mcpServers</code>
+					block yet, paste this whole snippet as the file contents. If you already have other MCP servers
+					configured, merge just the
+					<code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-xs"
+						>"{connector.slug}"</code
+					>
+					entry into your existing
 					<code class="rounded bg-neutral-100 px-1 py-0.5 font-mono text-xs">mcpServers</code> object
+					instead of overwriting the file.
 				</p>
 				<pre
 					class="mt-2 overflow-x-auto rounded-md bg-neutral-900 px-4 py-3 text-xs leading-relaxed text-neutral-100"><code
