@@ -168,12 +168,13 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(DecomposeSeasonalTool::new())
         .register(AnomalyIsolationTool::new())
         // #6.10 batch B — 10 of the 20 misc tools the DoD lists.
-        // Remaining 10 (pdf_extract, url_to_markdown, json_path,
-        // json_schema_validate, language_detect, big5_utf8_transcode,
-        // tw_traditional_simplified, holiday_between_dates) are
-        // deferred to a follow-up because each needs a heavy new
-        // crate (pdf-extract, html2md, jsonschema, whatlang,
-        // encoding_rs, opencc-rs); see the issue thread.
+        // Remaining 8 DoD bullets (pdf_extract, url_to_markdown,
+        // json_path, json_schema_validate, language_detect,
+        // big5_utf8_transcode, tw_traditional_simplified,
+        // holiday_between_dates) are deferred to a follow-up
+        // because each needs a heavy new crate (e.g. pdf-extract,
+        // html2md, jsonpath_lib, jsonschema, whatlang,
+        // encoding_rs, opencc-rs). See the #70 thread.
         .register(Base64EncodeTool::new())
         .register(Base64DecodeTool::new())
         .register(UrlEncodeTool::new())

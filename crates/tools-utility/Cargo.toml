@@ -20,9 +20,13 @@ workspace = true
 # avoids unused-dep noise in clippy.
 async-trait = { workspace = true }
 # #6.10 batch B — encoders, hashers, IDs, text. Workspace already
-# carries sha2 / hex / base64 / jsonwebtoken / chrono / uuid /
-# ammonia (via auth + gateway). We add blake3 / ulid / slug as
-# the new small focused deps the batch needs.
+# carries sha2 / hex / base64 / chrono / uuid / ammonia (via auth
+# + gateway / storage). We add blake3 / ulid / slug / chrono-tz
+# as the new small focused deps the batch needs. (`jsonwebtoken`
+# lives in workspace deps too but is intentionally NOT pulled
+# into this crate — `decode_jwt_unverified` decodes the segments
+# using base64 + serde directly because the tool's contract is
+# explicitly "no signature verification".)
 ammonia = { workspace = true }
 base64 = { workspace = true }
 blake3 = "1"

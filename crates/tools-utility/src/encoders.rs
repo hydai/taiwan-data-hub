@@ -1,10 +1,12 @@
 //! Pure encoding helpers shared by the `encode_*` / `decode_*` MCP
 //! tools (base64, url-component, hex, jwt-decode).
 //!
-//! Each function returns a `Result<String, String>` — Ok with the
-//! encoded/decoded text, Err with a human-readable reason the input
-//! was rejected (the tool wrapper surfaces it as
-//! `InvalidArguments`).
+//! Encoders (`base64_encode`, `url_component_encode`,
+//! `hex_encode`) return plain `String` — they cannot fail. The
+//! decoders + `jwt_decode_unverified` return
+//! `Result<_, String>` where Err carries a human-readable reason
+//! the input was rejected; the tool wrapper surfaces it as
+//! `InvalidArguments`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE as BASE64_URL_SAFE};

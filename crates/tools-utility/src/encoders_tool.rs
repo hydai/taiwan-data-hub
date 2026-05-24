@@ -1,6 +1,8 @@
-//! MCP wrappers for the four encoder tools: base64 / url / hex /
-//! `jwt_decode`. Each is a thin facade over a pure function in
-//! [`crate::encoders`].
+//! MCP wrappers for the seven encoder tools shipped in #6.10
+//! batch B: `encode_base64` / `decode_base64`,
+//! `encode_url_component` / `decode_url_component`, `encode_hex`
+//! / `decode_hex`, plus `decode_jwt_unverified`. Each is a thin
+//! facade over a pure function in [`crate::encoders`].
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
