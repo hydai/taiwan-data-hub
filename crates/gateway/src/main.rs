@@ -512,6 +512,19 @@ fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err("missing host component".into());
     }
+    // The renderer concatenates `{base}` with literal path
+    // suffixes (`/llms-page/{n}`, `/datasets/{slug}`), so a
+    // base carrying query (`?…`) or fragment (`#…`) components
+    // would emit URLs like `https://host?x=1/llms-page/1`
+    // that break path resolution. Reject both so the operator
+    // sees a `warn!` at boot instead of broken cross-links
+    // in production.
+    if url.query().is_some() {
+        return Err("must not carry a query string".into());
+    }
+    if url.fragment().is_some() {
+        return Err("must not carry a fragment".into());
+    }
     Ok(trimmed.to_owned())
 }
 
@@ -1510,6 +1523,18 @@ mod tests {
         // host-presence check so cross-link rendering can't
         // silently produce `file:///llms-page/...` links.
         assert!(normalise_llms_txt_base_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_query_or_fragment() {
+        // String concatenation with query strings or fragments
+        // produces malformed cross-links (e.g.
+        // `https://host?x=1/llms-page/1`). Both shapes must
+        // fail loud at boot.
+        let err = normalise_llms_txt_base_url("https://example.com?x=1").unwrap_err();
+        assert!(err.contains("query"), "unexpected error: {err}");
+        let err = normalise_llms_txt_base_url("https://example.com/#frag").unwrap_err();
+        assert!(err.contains("fragment"), "unexpected error: {err}");
     }
 
     #[test]
