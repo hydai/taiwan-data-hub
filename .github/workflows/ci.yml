@@ -79,6 +79,10 @@ jobs:
           cache: pnpm
       - name: pnpm install --frozen-lockfile
         run: pnpm install --frozen-lockfile
+      # #7.10 — block PRs that ship en gaps or orphaned keys;
+      # ja/ko/fr gaps print a warning but do not fail the job.
+      - name: pnpm i18n:check (en MUST be 100%; ja/ko/fr advisory)
+        run: pnpm --filter web run i18n:check
       - name: pnpm check (svelte-check)
         run: pnpm check
       - name: pnpm lint (prettier + eslint)

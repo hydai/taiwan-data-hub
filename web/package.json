@@ -9,6 +9,7 @@
 		"preview": "vite preview",
 		"paraglide:compile": "paraglide-js compile --project ./project.inlang --outdir ./src/lib/paraglide",
 		"i18n:extract": "pnpm run paraglide:compile && node -e \"console.log('i18n: source-of-truth = messages/zh-TW.json. Edit it directly, mirror keys in the other locales, then re-run this script.\\nInlang Sherlock VSCode extension (https://inlang.com/m/r7kp499g/app-inlang-ideExtension) provides interactive extract-from-selection if you prefer a GUI.')\"",
+		"i18n:check": "node ./scripts/i18n-coverage.mjs",
 		"prepare": "pnpm run paraglide:compile && svelte-kit sync",
 		"check": "pnpm run paraglide:compile && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "pnpm run paraglide:compile && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
