@@ -44,8 +44,12 @@ UPDATE datasets SET fetched_at = now() WHERE fetched_at IS NULL;
 ALTER TABLE datasets ALTER COLUMN fetched_at SET NOT NULL;
 
 -- Both URLs (when present) must be syntactically reasonable. The
--- connectors fully validate before insertion, but a CHECK keeps a
--- bad migration / manual UPDATE from corrupting the column.
+-- connectors today don't run an explicit URL validator on the
+-- value they pass to `Storage::upsert_dataset` — they construct
+-- strings directly from per-connector constants or upstream
+-- responses — so this CHECK is the PRIMARY enforcement boundary,
+-- not a redundant belt-and-suspenders. It also guards against a
+-- bad migration / manual `UPDATE` corrupting the column.
 ALTER TABLE datasets
     ADD CONSTRAINT datasets_source_url_scheme
         CHECK (source_url IS NULL
