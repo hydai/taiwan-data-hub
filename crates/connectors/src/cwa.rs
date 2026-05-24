@@ -425,6 +425,8 @@ fn observations_metadata() -> DatasetMetadata {
         publisher: Some("中央氣象署".into()),
         update_frequency: Some("hourly".into()),
         original_url: Some("https://opendata.cwa.gov.tw/dataset/observation/O-A0001-001".into()),
+        source_url: Some("https://opendata.cwa.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         // CWA's native categories (氣象 / 天氣) don't
         // substring-match any of the 20 shipped domain names;
@@ -460,6 +462,8 @@ fn township_forecast_metadata() -> DatasetMetadata {
         publisher: Some("中央氣象署".into()),
         update_frequency: Some("6h".into()),
         original_url: Some("https://opendata.cwa.gov.tw/dataset/forecast/F-C0032-001".into()),
+        source_url: Some("https://opendata.cwa.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["環境".into()],
     }
@@ -489,6 +493,8 @@ fn typhoon_track_metadata() -> DatasetMetadata {
         publisher: Some("中央氣象署".into()),
         update_frequency: Some("as published".into()),
         original_url: Some("https://opendata.cwa.gov.tw/dataset/warning/W-C0034-005".into()),
+        source_url: Some("https://opendata.cwa.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["環境".into()],
     }

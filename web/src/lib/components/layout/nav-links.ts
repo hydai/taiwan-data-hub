@@ -9,7 +9,8 @@
 export const navLinks = [
 	{ href: '/domains', label: 'Domains' },
 	{ href: '/datasets', label: 'Datasets' },
-	{ href: '/collections', label: 'Collections' }
+	{ href: '/collections', label: 'Collections' },
+	{ href: '/licenses', label: 'Licenses' }
 ] as const;
 
 export type NavLink = (typeof navLinks)[number];

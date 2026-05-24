@@ -38,6 +38,19 @@ export interface DatasetI18n {
 export interface DatasetSource {
 	publisher: string;
 	url: string;
+	/**
+	 * Canonical URL for the license document declared in
+	 * `Dataset.license`. Optional — not every license has a
+	 * stable web home, and some upstream sources omit it.
+	 * Added in #5b.6 so the dataset detail page can render a
+	 * clickable license link and the /licenses page can group
+	 * datasets by shared license URL.
+	 *
+	 * Snake-case to match the other config/*.yaml keys
+	 * (`domain_slug`, `sort_order`, `anchor_datasets`) and
+	 * the SQL column name (`datasets.license_url`).
+	 */
+	license_url?: string;
 }
 
 export interface DatasetResource {

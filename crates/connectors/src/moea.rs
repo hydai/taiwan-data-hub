@@ -314,6 +314,8 @@ fn company_registry_metadata() -> DatasetMetadata {
             "https://data.gcis.nat.gov.tw/od/detail?oid=5F64D864-61CB-4D0D-8AD9-492047CC1EA6"
                 .into(),
         ),
+        source_url: Some("https://data.gcis.nat.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         // The domain mapper's substring match routes "經濟"
         // into the "economy-business" domain (zh_tw name
@@ -347,6 +349,8 @@ fn business_registry_metadata() -> DatasetMetadata {
             "https://data.gcis.nat.gov.tw/od/detail?oid=236EE382-4942-41A9-BD03-CA0709025A7C"
                 .into(),
         ),
+        source_url: Some("https://data.gcis.nat.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["經濟".into()],
     }
@@ -378,6 +382,8 @@ fn factory_registry_metadata() -> DatasetMetadata {
             "https://data.gcis.nat.gov.tw/od/detail?oid=52BA9930-F3FA-4D5E-9E18-A0AC909B05D7"
                 .into(),
         ),
+        source_url: Some("https://data.gcis.nat.gov.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["經濟".into()],
     }

@@ -369,6 +369,8 @@ fn daily_trades_metadata() -> DatasetMetadata {
         original_url: Some(
             "https://www.twse.com.tw/zh/page/trading/exchange/STOCK_DAY.html".into(),
         ),
+        source_url: Some("https://www.twse.com.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         // The domain mapper's substring match (in either
         // direction) routes "經濟" into the "economy-business"
@@ -400,6 +402,12 @@ fn monthly_revenue_metadata() -> DatasetMetadata {
         publisher: Some("臺灣證券交易所".into()),
         update_frequency: Some("monthly".into()),
         original_url: Some("https://mops.twse.com.tw/mops/web/t05st10_ifrs".into()),
+        // MOPS is a separate subdomain (origin) from the TWSE
+        // root; surface the actual host the dataset lives on so
+        // the marketplace's "View source" link goes somewhere
+        // useful.
+        source_url: Some("https://mops.twse.com.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["經濟".into()],
     }
@@ -427,6 +435,8 @@ fn major_news_metadata() -> DatasetMetadata {
         publisher: Some("臺灣證券交易所".into()),
         update_frequency: Some("as published".into()),
         original_url: Some("https://mops.twse.com.tw/mops/web/t05st02".into()),
+        source_url: Some("https://mops.twse.com.tw".into()),
+        license_url: Some(crate::OGDL_TAIWAN_LICENSE_URL.into()),
         last_modified_at: None,
         upstream_categories: vec!["經濟".into()],
     }

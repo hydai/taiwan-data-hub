@@ -744,6 +744,7 @@ mod tests {
             original_url: None,
             last_modified_at: None,
             upstream_categories: vec![category.to_owned()],
+            ..Default::default()
         }
     }
 

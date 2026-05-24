@@ -16,6 +16,14 @@ pub mod fishery_moa;
 pub mod moea;
 pub mod twse;
 
+/// Canonical URL for Taiwan's national open-data license (OGDL
+/// Taiwan 1.0 / 政府資料開放授權條款 1.0). All Taiwan public-data
+/// sources we wrap declare a compatible license; reusing one
+/// constant avoids drift across the per-connector dataset
+/// metadata. Added in #5b.6 so the `datasets.license_url`
+/// column has a single source of truth.
+pub const OGDL_TAIWAN_LICENSE_URL: &str = "https://data.gov.tw/license";
+
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -74,7 +82,7 @@ impl std::fmt::Display for SourceId {
 ///   This struct exposes `Option<DateTime<Utc>>` because upstream may
 ///   not carry it; the ETL layer is responsible for falling back to
 ///   `now()` (or the column default) when the option is `None`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatasetMetadata {
     /// Upstream identifier — unique within the source. Used together
     /// with `source` to form the natural key in the `datasets` table.
@@ -96,9 +104,25 @@ pub struct DatasetMetadata {
     /// `"每月更新"`). Unstructured by design — upstream catalogs vary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_frequency: Option<String>,
-    /// Canonical upstream landing URL.
+    /// Canonical upstream landing URL — the page for this specific
+    /// dataset (e.g. `https://opendata.cwa.gov.tw/dataset/observation/O-A0001-001`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_url: Option<String>,
+    /// URL of the upstream open-data hub itself (e.g.
+    /// `https://opendata.cwa.gov.tw`). Distinct from
+    /// [`Self::original_url`]: this is the hub's root, useful for
+    /// linking back from a dataset detail page to the provider's
+    /// catalog. Added in #5b.6 alongside the `datasets.source_url`
+    /// SQL column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    /// URL of the license document for [`Self::license`] (e.g.
+    /// `https://data.gov.tw/license`). Lets the marketplace surface
+    /// a clickable link for the declared license rather than just an
+    /// SPDX-ish string. Added in #5b.6 alongside the
+    /// `datasets.license_url` SQL column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license_url: Option<String>,
     /// Last modification time reported by upstream. `None` if upstream
     /// doesn't carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

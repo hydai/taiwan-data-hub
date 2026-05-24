@@ -356,6 +356,16 @@ fn into_metadata(raw: CkanDataset) -> DatasetMetadata {
             .and_then(|o| non_empty(o.title).or_else(|| non_empty(Some(o.name)))),
         update_frequency: non_empty(raw.frequency),
         original_url,
+        // data.gov.tw is the canonical national open-data hub —
+        // every row links back to its root.
+        source_url: Some("https://data.gov.tw".into()),
+        // data.gov.tw's per-dataset license varies (sometimes
+        // OGDL Taiwan, sometimes CC-BY, occasionally upstream-
+        // specific). The CKAN payload doesn't include a
+        // license_url field, and inferring one from
+        // `license_id` would risk pointing at the wrong doc.
+        // Leave `None` rather than guess.
+        license_url: None,
         last_modified_at: raw
             .metadata_modified
             .as_deref()

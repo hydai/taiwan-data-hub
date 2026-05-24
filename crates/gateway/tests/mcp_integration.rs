@@ -234,6 +234,7 @@ fn sample_metadata(source_id: &str, slug: &str) -> DatasetMetadata {
             .ok()
             .map(|d| d.with_timezone(&chrono::Utc)),
         upstream_categories: vec!["不動產與土地".to_owned()],
+        ..Default::default()
     }
 }
 
