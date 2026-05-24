@@ -92,11 +92,15 @@ impl ToolHandler for TimezoneConvertTool {
                         "`from_tz` is not a valid IANA timezone name: {e}"
                     ))
                 })?;
+            // Accept both `T`-separated and space-separated naive
+            // forms — the space variant is common in SQL dumps /
+            // logs. Mention both in the error so callers know
+            // what's supported.
             let naive = NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%dT%H:%M:%S")
                 .or_else(|_| NaiveDateTime::parse_from_str(&datetime_str, "%Y-%m-%d %H:%M:%S"))
                 .map_err(|e| {
                     ToolError::InvalidArguments(format!(
-                        "`datetime` could not be parsed as RFC 3339 or as `YYYY-MM-DDTHH:MM:SS`: {e}"
+                        "`datetime` could not be parsed as RFC 3339, `YYYY-MM-DDTHH:MM:SS`, or `YYYY-MM-DD HH:MM:SS`: {e}"
                     ))
                 })?;
             // `from_local_datetime` returns `MappedLocalTime` to

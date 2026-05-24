@@ -11,7 +11,20 @@ use uuid::Uuid;
 use crate::json_helpers::kind_of;
 
 fn parse_optional_count(args: &Value) -> Result<usize, ToolError> {
-    match args.get("count") {
+    // The schema declares `type: "object"` but these ID-generator
+    // tools have no required fields, so a caller could submit
+    // a non-object value (string / array / null) and `args.get`
+    // would just return None — silently succeeding with the
+    // default count of 1, contradicting the schema. Reject non-
+    // objects up front so the runtime contract matches the
+    // declared input shape.
+    let obj = args.as_object().ok_or_else(|| {
+        ToolError::InvalidArguments(format!(
+            "arguments must be a JSON object, got {}",
+            kind_of(args)
+        ))
+    })?;
+    match obj.get("count") {
         None | Some(Value::Null) => Ok(1),
         Some(Value::Number(n)) => {
             let v = n.as_u64().ok_or_else(|| {
