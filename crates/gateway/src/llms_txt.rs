@@ -452,14 +452,15 @@ fn render_index(meta: &LlmsTxtMeta, page_count: usize) -> String {
         "\nThe full catalog is paginated across **{page_count}** pages because the rendered document exceeds 5 MB.\n\n## Pages\n\n",
     );
     for n in 1..=page_count {
-        // Both the markdown link href and the angle-bracket URL use
-        // `meta.public_base_url` so the rendered document works
-        // behind a reverse proxy that mounts the gateway on a
-        // subpath. A bare `/llms-page/{n}` would resolve to the
-        // domain root and 404.
+        // CommonMark's `[text](<url>)` form lets the URL carry
+        // characters (notably `)`) that would otherwise terminate
+        // a bare-parens destination. Use it for the link href so
+        // a quirky `LLMS_TXT_BASE_URL` value (already validated
+        // at boot, but defence-in-depth here costs nothing) can't
+        // produce malformed markdown.
         let _ = writeln!(
             out,
-            "- [Page {n}]({base}/llms-page/{n}) — <{base}/llms-page/{n}>"
+            "- [Page {n}](<{base}/llms-page/{n}>) — <{base}/llms-page/{n}>"
         );
     }
     out
@@ -483,9 +484,15 @@ fn write_hit(out: &mut String, meta: &LlmsTxtMeta, hit: &SearchHit) {
     // Run them through the same escape pass so a quirky upstream
     // entry can't break list rendering or inject unintended markdown.
     let license = escape_markdown_inline(&hit.license);
+    // CommonMark angle-bracket link destination — robust to a
+    // slug or base URL that happens to contain `)`, which would
+    // terminate a bare-parens destination early and break the
+    // bullet's markdown shape. Slugs in our schema are
+    // lowercase-alphanum-with-dashes, but defending the renderer
+    // against future schema relaxations costs us nothing.
     let _ = write!(
         out,
-        "- [{title}]({base}/datasets/{slug}) — `{domain}` · `{tier}` · {license}",
+        "- [{title}](<{base}/datasets/{slug}>) — `{domain}` · `{tier}` · {license}",
     );
     if let Some(publisher) = &hit.publisher {
         let publisher = escape_markdown_inline(publisher);
@@ -913,8 +920,8 @@ mod tests {
         // substring assertions. UTF-8 is mandatory in the renderer.
         let body = std::str::from_utf8(&snap.pages[0]).unwrap();
         assert!(body.starts_with("# Test Hub"));
-        assert!(body.contains("[air-quality title](https://example.test/datasets/air-quality)"));
-        assert!(body.contains("[forest-land title](https://example.test/datasets/forest-land)"));
+        assert!(body.contains("[air-quality title](<https://example.test/datasets/air-quality>)"));
+        assert!(body.contains("[forest-land title](<https://example.test/datasets/forest-land>)"));
         assert!(body.contains("sensor PM2.5 readings"));
     }
 
