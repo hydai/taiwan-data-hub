@@ -5370,7 +5370,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hex",
- "jsonwebtoken",
  "mcp-core",
  "regex",
  "reqwest",
@@ -5381,7 +5380,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "ulid",
- "url",
  "uuid",
 ]
 

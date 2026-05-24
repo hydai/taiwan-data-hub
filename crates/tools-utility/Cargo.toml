@@ -31,7 +31,6 @@ chrono = { workspace = true, features = ["clock", "std"] }
 # the workspace dep graph via the existing date_tools utilities.
 chrono-tz = "0.10"
 hex = { workspace = true }
-jsonwebtoken = { workspace = true }
 mcp-core = { path = "../mcp-core" }
 regex = { workspace = true }
 sha2 = { workspace = true }
@@ -41,7 +40,6 @@ slug = "0.1"
 # manually. We're fine with the std assumption — `cargo test` and
 # `tokio::runtime` already require std elsewhere in the crate.
 ulid = "1"
-url = { workspace = true }
 uuid = { workspace = true }
 # Added in #6.9 batch A — geo helpers call OSM/Nominatim over HTTPS
 # (json + rustls-tls + gzip inherited from the workspace pin are

@@ -85,12 +85,17 @@ impl ToolHandler for TimezoneConvertTool {
                     ))
                 })?;
             // `from_local_datetime` returns `MappedLocalTime` to
-            // describe DST ambiguities (skip / fold). For the
-            // utility tool, we resolve gaps by picking the earlier
-            // representation; truly-ambiguous (fold) input is also
-            // resolved to the earlier instant. Callers needing
-            // disambiguation should pass an RFC-3339 string with
-            // the offset already chosen.
+            // describe DST ambiguities. Two cases:
+            //   - SPRING-FORWARD GAP (no local representation):
+            //     `.earliest()` returns `None`; we surface an
+            //     InvalidArguments rather than fabricating an
+            //     instant. The error message says "DST gap" so the
+            //     caller knows what happened.
+            //   - FALL-BACK FOLD (two local representations):
+            //     `.earliest()` returns the earlier (pre-fall-back)
+            //     UTC instant. Callers who need the later instant
+            //     should pass an RFC-3339 string with the desired
+            //     offset.
             let utc = from_tz
                 .from_local_datetime(&naive)
                 .earliest()

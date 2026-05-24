@@ -43,14 +43,20 @@ fn parse_optional_bool(args: &Value, key: &str, default: bool) -> Result<bool, T
 }
 
 fn input_schema_with_text() -> Map<String, Value> {
+    // No `maxLength` constraint in the schema: JSON Schema's
+    // `maxLength` counts Unicode code points but our runtime cap
+    // uses `String::len()` (UTF-8 bytes). For multi-byte input
+    // the two disagree, so we'd risk telling clients "valid" via
+    // the schema and then erroring server-side (or vice versa).
+    // Document the byte cap in the description instead and rely
+    // on the runtime check in `parse_input`.
     json!({
         "type": "object",
         "required": ["text"],
         "properties": {
             "text": {
                 "type": "string",
-                "maxLength": MAX_INPUT_BYTES,
-                "description": "Input string. Max 4 MiB."
+                "description": "Input string. Server caps at 4 MiB of UTF-8 bytes."
             }
         },
         "additionalProperties": false,
@@ -191,11 +197,15 @@ impl ToolHandler for UrlEncodeTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: TOOL_URL_ENCODE.to_string(),
-            description: "Percent-encode a string for use as a URL query- \
-                          component value (equivalent to JavaScript's \
-                          `encodeURIComponent`). Reserved chars + spaces \
-                          are escaped; ASCII alphanumerics and `-_.~` \
-                          pass through."
+            description: "Percent-encode a string for use as a URL \
+                          query-component value. Pass-through set is \
+                          the RFC 3986 *unreserved* characters \
+                          (alphanumerics + `-_.~`); everything else \
+                          (including `!*'()` which JavaScript's \
+                          encodeURIComponent leaves alone) is \
+                          %XX-escaped. The stricter behaviour is safer \
+                          when the result is concatenated into a URL \
+                          with no further escaping."
                 .to_string(),
             input_schema: input_schema_with_text(),
             output_schema: Some(
@@ -376,8 +386,7 @@ impl ToolHandler for JwtDecodeTool {
                         "token": {
                             "type": "string",
                             "minLength": 1,
-                            "maxLength": MAX_INPUT_BYTES,
-                            "description": "JWT in dot-separated form: header.payload.signature"
+                            "description": "JWT in dot-separated form: header.payload.signature. Server caps at 4 MiB of UTF-8 bytes."
                         }
                     }),
                 );

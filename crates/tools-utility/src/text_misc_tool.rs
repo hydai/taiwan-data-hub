@@ -58,11 +58,15 @@ impl ToolHandler for SlugifyTool {
                           slug is then a best-effort romanisation only \
                           if the input was already mostly ASCII."
                 .to_string(),
+            // No `maxLength` in the schema (it counts code points;
+            // the runtime cap is bytes — they disagree for multi-
+            // byte UTF-8). Server enforces 1 MiB byte cap in
+            // `parse_text`.
             input_schema: json!({
                 "type": "object",
                 "required": ["text"],
                 "properties": {
-                    "text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
+                    "text": {"type": "string", "description": "Input string; server caps at 1 MiB of UTF-8 bytes."}
                 },
                 "additionalProperties": false,
             })
@@ -121,9 +125,9 @@ impl ToolHandler for RegexTestTool {
                 "type": "object",
                 "required": ["pattern", "text"],
                 "properties": {
-                    "pattern": {"type": "string", "minLength": 1, "maxLength": 1024,
-                                "description": "Rust-regex pattern"},
-                    "text": {"type": "string", "maxLength": MAX_TEXT_BYTES}
+                    "pattern": {"type": "string", "minLength": 1,
+                                "description": "Rust-regex pattern; server caps at 1024 UTF-8 bytes."},
+                    "text": {"type": "string", "description": "Input text; server caps at 1 MiB of UTF-8 bytes."}
                 },
                 "additionalProperties": false,
             })
@@ -210,7 +214,7 @@ impl ToolHandler for HtmlSanitizeTool {
                 "type": "object",
                 "required": ["html"],
                 "properties": {
-                    "html": {"type": "string", "maxLength": MAX_HTML_BYTES}
+                    "html": {"type": "string", "description": "HTML fragment; server caps at 4 MiB of UTF-8 bytes."}
                 },
                 "additionalProperties": false,
             })

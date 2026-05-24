@@ -27,10 +27,12 @@ pub fn base64_decode(input: &str, url_safe: bool) -> Result<String, String> {
 }
 
 /// `percent-encode` the input for use as a URL query-component
-/// value: every byte except ASCII letters, digits, `-`, `_`, `.`,
-/// and `~` is `%XX`-escaped. Matches what
-/// `encodeURIComponent` does in JavaScript / what most server-
-/// side query libs expect.
+/// value. Pass-through set is the RFC 3986 *unreserved* characters:
+/// ASCII letters, digits, `-`, `_`, `.`, and `~`. Everything else
+/// (including `!`, `*`, `'`, `(`, `)` which JavaScript's
+/// `encodeURIComponent` happens to leave unescaped) is `%XX`-
+/// escaped. The stricter encoding is safer when the result is
+/// concatenated into a URL with no further escaping by middleware.
 pub fn url_component_encode(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for byte in input.bytes() {

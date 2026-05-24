@@ -197,22 +197,35 @@ mod tests {
     }
 
     #[test]
-    fn uuid_v7_ids_sort_lexicographically_by_time() {
+    fn uuid_v7_ids_share_recent_timestamp_prefix() {
+        // `Uuid::now_v7()` does NOT guarantee monotonicity within a
+        // single millisecond tick — the trailing 74 bits are random,
+        // so two v7 IDs generated in the same ms can sort in any
+        // order. We assert the time-encoded prefix only: each ID's
+        // unix-ms timestamp should land within a reasonable window
+        // around the test's wall clock.
         let out = run(&UuidV7Tool::new(), json!({"count": 5})).unwrap();
-        let ids: Vec<&str> = out["ids"]
-            .as_array()
+        // `as_millis()` returns u128; cast bound-checked: the
+        // current ms-since-epoch comfortably fits in u64.
+        #[allow(clippy::cast_possible_truncation)]
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        let mut sorted = ids.clone();
-        sorted.sort_unstable();
-        // The IDs are generated in time order; lexicographic sort
-        // should be a no-op (or near it modulo nanosecond ties).
-        // We assert "monotonic in some direction" rather than
-        // strict equality to dodge same-millisecond collisions.
-        let monotonic_asc = ids.windows(2).all(|w| w[0] <= w[1]);
-        assert!(monotonic_asc, "v7 IDs should be chronologically monotonic");
+            .as_millis() as u64;
+        for v in out["ids"].as_array().unwrap() {
+            let s = v.as_str().unwrap();
+            let id = Uuid::parse_str(s).unwrap();
+            let (ts_secs, ts_subsec_nanos) = id.get_timestamp().unwrap().to_unix();
+            let id_ms = ts_secs * 1_000 + u64::from(ts_subsec_nanos) / 1_000_000;
+            // ±60 s window — generous so a slow CI runner doesn't
+            // flake; the real assertion is "the high 48 bits encode
+            // a roughly-current timestamp".
+            let diff = id_ms.abs_diff(now_ms);
+            assert!(
+                diff < 60_000,
+                "v7 timestamp {id_ms} too far from now {now_ms}"
+            );
+        }
     }
 
     #[test]

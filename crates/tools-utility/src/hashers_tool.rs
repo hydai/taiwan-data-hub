@@ -37,14 +37,16 @@ fn parse_text(args: &Value) -> Result<String, ToolError> {
 }
 
 fn input_schema() -> Map<String, Value> {
+    // `maxLength` omitted on purpose — JSON Schema `maxLength`
+    // counts code points but the runtime cap is in UTF-8 bytes.
+    // See encoders_tool.rs for the same rationale.
     json!({
         "type": "object",
         "required": ["text"],
         "properties": {
             "text": {
                 "type": "string",
-                "maxLength": MAX_INPUT_BYTES,
-                "description": "Input string. Hash runs over the raw UTF-8 bytes."
+                "description": "Input string. Hash runs over the raw UTF-8 bytes. Server caps at 16 MiB."
             }
         },
         "additionalProperties": false,
