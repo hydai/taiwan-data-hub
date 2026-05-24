@@ -17,6 +17,7 @@ mod api_keys_routes;
 mod api_routes;
 mod bookmarks_routes;
 mod comments_routes;
+mod llms_txt;
 mod moderation_routes;
 mod rate_limit_middleware;
 mod ratings_routes;
@@ -63,7 +64,22 @@ const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// boot log prints this list so operators can sanity-check what is
 /// reachable; the `doctor` subcommand reuses the same source of truth
 /// so the two outputs cannot disagree.
-const PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+const PUBLIC_ROUTES: &[&str] = &[
+    "/healthz",
+    "/readyz",
+    "/mcp",
+    // #7.1 — llms.txt + paginated variants. Mounted only when
+    // `Storage` is available (catalog source needs a DB).
+    "/llms.txt",
+    "/llms-index.txt",
+    "/llms-page-{n}.txt",
+];
+
+/// Env var: optional override for the host embedded in cross-links
+/// the `/llms.txt` document renders (e.g. <https://hub.example/datasets/x>).
+/// Defaults to the placeholder in [`llms_txt::LlmsTxtMeta::defaults`] when
+/// unset so the route works without configuration.
+const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -186,6 +202,7 @@ fn gateway_implementation() -> Implementation {
 fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
+    llms_txt_router: Option<Router>,
     rate_limiter: Arc<dyn auth::RateLimiter>,
     mode: Mode,
     cancel: CancellationToken,
@@ -214,6 +231,9 @@ fn build_router(
         .merge(api_routes::config_router(mode));
     if let Some(auth) = auth_router {
         router = router.merge(auth);
+    }
+    if let Some(llms) = llms_txt_router {
+        router = router.merge(llms);
     }
     // IP rate-limit middleware wraps the WHOLE router so it
     // sees every route the gateway serves (`/mcp` and any
@@ -283,10 +303,18 @@ async fn serve() -> anyhow::Result<()> {
     let rate_limiter = build_rate_limiter(storage.clone());
 
     let cancel = CancellationToken::new();
+    // `/llms.txt` (#7.1) needs Storage to read the catalog. Build the
+    // cache + router before consuming `storage` into the auth helper
+    // so both surfaces share the same connection pool. The refresh
+    // task is detached: it lives for the process lifetime and the
+    // JoinHandle is intentionally dropped — the gateway has no
+    // shutdown drain for background tasks today.
+    let llms_txt_router = build_llms_txt_router_if_available(storage.clone());
     let auth_router = build_auth_router_if_available(storage, rate_limiter.clone());
     let app = build_router(
         server,
         auth_router,
+        llms_txt_router,
         rate_limiter,
         mode,
         cancel.child_token(),
@@ -410,6 +438,33 @@ fn wire_db_tools_if_available(
     };
     let router = build_object_store_router();
     tools_data::register_db_tools(builder, storage, router)
+}
+
+/// Build the `/llms.txt` + paginated variants (#7.1). Returns
+/// `None` when no `Storage` handle is available — the route would
+/// have nothing to enumerate without the catalog.
+///
+/// Spawns the nightly refresh task as a side effect because the
+/// task and the cache share a single `Arc` and the cache itself is
+/// the only consumer of the handle — there's nothing to gain by
+/// returning the join handle to the caller.
+fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router> {
+    let storage = storage?;
+    let mut meta = llms_txt::LlmsTxtMeta::defaults();
+    if let Some(base) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
+        meta.public_base_url = base;
+    }
+    let source: llms_txt::DatasetSource = Arc::new(storage);
+    let cache = Arc::new(llms_txt::LlmsTxtCache::new(source, meta));
+    // Discard the JoinHandle deliberately — the task lives for the
+    // process lifetime and the gateway has no shutdown drain for
+    // background tasks today. `drop(_)` defeats clippy's
+    // `let_underscore_future` lint without us pretending to await it.
+    drop(cache.clone().spawn_refresh_task());
+    tracing::info!(
+        "llms.txt subrouter enabled at /llms.txt + /llms-index.txt + /llms-page-{{n}}.txt"
+    );
+    Some(llms_txt::router(cache))
 }
 
 /// Build the `/v1/api-keys` subrouter (session-gated). Returns
@@ -1097,6 +1152,7 @@ mod tests {
         let app = build_router(
             test_server(),
             None,
+            None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1140,6 +1196,7 @@ mod tests {
     async fn cors_is_scoped_to_mcp_and_does_not_leak_to_healthz() {
         let app = build_router(
             test_server(),
+            None,
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
@@ -1195,6 +1252,7 @@ mod tests {
     async fn mcp_post_initialize_returns_2025_11_25_with_gateway_identity() {
         let app = build_router(
             test_server(),
+            None,
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
