@@ -29,10 +29,19 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use shared::Mode;
 
-/// `Content-Type` for the JSON manifest body. RFC 8259 registers
-/// `application/json`; the `/.well-known/` path itself follows
-/// RFC 8615's URI mechanism. Always served regardless of mode.
-const CONTENT_TYPE: &str = "application/json; charset=utf-8";
+/// Default `Content-Type` for well-known JSON bodies. RFC 8259
+/// registers `application/json`; the `/.well-known/` path itself
+/// follows RFC 8615's URI mechanism. Used for the MCP manifest,
+/// the A2A agent card, the skills index, and the OAuth
+/// protected-resource document (#7.4).
+const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+
+/// `Content-Type` for the RFC 9727 API catalog. The spec
+/// registers `application/linkset+json` as the media type for the
+/// linkset document; intermediaries that key off Content-Type
+/// (e.g. for content negotiation) need the specific value rather
+/// than the generic `application/json`.
+const LINKSET_CONTENT_TYPE: &str = "application/linkset+json";
 
 /// `Cache-Control` value applied to every response. The manifest
 /// only changes at gateway boot (tool registry is fixed for the
@@ -96,6 +105,12 @@ pub struct ManifestMeta {
     /// to the upstream repo README; downstream forks point at
     /// their own docs.
     pub documentation_url: String,
+    /// OAuth authorization server URLs the gateway delegates to
+    /// (#7.4). Per RFC 9728 the `authorization_servers` field is
+    /// an array; empty by default and populated via the
+    /// `OAUTH_AUTHORIZATION_SERVERS` env var (comma-separated)
+    /// for multi-user deployments that front an external `IdP`.
+    pub oauth_authorization_servers: Vec<String>,
 }
 
 impl ManifestMeta {
@@ -115,77 +130,101 @@ impl ManifestMeta {
             provider_organization: "Taiwan Data Hub Contributors".to_string(),
             provider_url: "https://github.com/hydai/taiwan-data-hub".to_string(),
             documentation_url: "https://github.com/hydai/taiwan-data-hub#readme".to_string(),
+            // Default to no auth servers — personal-mode boots
+            // and CI runs without OAUTH_AUTHORIZATION_SERVERS
+            // get a spec-compliant empty array. RFC 9728 says
+            // `authorization_servers` is OPTIONAL; emitting an
+            // empty array is the documented shape for a
+            // resource that doesn't delegate to any AS.
+            oauth_authorization_servers: Vec::new(),
         }
     }
 }
 
 /// Pre-rendered manifest body together with its strong `ETag`
-/// (the conditional-GET validator). Held behind `Arc` so every
-/// HTTP request is a refcount bump rather than re-serialising
-/// the JSON.
+/// (the conditional-GET validator) and the `Content-Type` the
+/// handler should set. Held behind `Arc` so every HTTP request
+/// is a refcount bump rather than re-serialising the JSON.
+///
+/// `content_type` is a `&'static str` because every consumer
+/// picks from one of the hand-curated module constants — a
+/// runtime-built string would mean dynamic allocation per
+/// response and an unnecessary `Cow<str>` shape.
 #[derive(Debug, Clone)]
 struct ManifestState {
     body: Bytes,
     etag: String,
+    content_type: &'static str,
 }
 
-/// Build the well-known subrouter that mounts all three M7
-/// agent-discovery surfaces (#7.2 + #7.3): `/.well-known/mcp.json`
-/// (MCP manifest), `/.well-known/agent-card.json` (Google A2A
-/// agent card), and `/.well-known/agent-skills.json` (skill →
-/// MCP tool id index). Each body is rendered once from the
+/// Build the well-known subrouter that mounts all five M7
+/// agent-discovery surfaces (#7.2 + #7.3 + #7.4):
+/// `/.well-known/mcp.json` (MCP manifest),
+/// `/.well-known/agent-card.json` (Google A2A agent card),
+/// `/.well-known/agent-skills.json` (skill → MCP tool id index),
+/// `/.well-known/api-catalog` (RFC 9727 linkset), and
+/// `/.well-known/oauth-protected-resource` (RFC 9728 metadata).
+/// Each body is rendered once from the
 /// supplied [`Dispatcher`] snapshot + [`ManifestMeta`] at
 /// construction time — the registry is fixed for the process
 /// lifetime so a per-request rebuild would be wasted work.
 pub fn router(dispatcher: &Dispatcher, meta: &ManifestMeta) -> Router {
-    let mcp_state = build_state(&build_manifest(dispatcher, meta));
-    let card_state = build_state(&build_agent_card(dispatcher, meta));
-    let skills_state = build_state(&build_skills_index(dispatcher));
+    let mcp_state = build_state(&build_manifest(dispatcher, meta), JSON_CONTENT_TYPE);
+    let card_state = build_state(&build_agent_card(dispatcher, meta), JSON_CONTENT_TYPE);
+    let skills_state = build_state(&build_skills_index(dispatcher), JSON_CONTENT_TYPE);
+    // #7.4 — RFC 9727 API catalog + RFC 9728 OAuth protected
+    // resource. Both always-on: the catalog only references our
+    // own endpoints, and the OAuth document is meaningful even in
+    // personal mode (advertises an empty `authorization_servers`
+    // array, which per RFC 9728 indicates a resource that doesn't
+    // delegate to any auth server).
+    let catalog_state = build_state(&build_api_catalog(meta), LINKSET_CONTENT_TYPE);
+    let oauth_state = build_state(&build_oauth_resource(meta), JSON_CONTENT_TYPE);
     Router::new()
         .route(
             "/.well-known/mcp.json",
-            get(mcp_handler).with_state(mcp_state),
+            get(generic_handler).with_state(mcp_state),
         )
         .route(
             "/.well-known/agent-card.json",
-            get(card_handler).with_state(card_state),
+            get(generic_handler).with_state(card_state),
         )
         .route(
             "/.well-known/agent-skills.json",
-            get(skills_handler).with_state(skills_state),
+            get(generic_handler).with_state(skills_state),
+        )
+        .route(
+            "/.well-known/api-catalog",
+            get(generic_handler).with_state(catalog_state),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(generic_handler).with_state(oauth_state),
         )
 }
 
 /// Pre-render a serialisable payload (MCP manifest, A2A agent
-/// card, or skills index) into the cached `body + etag` pair
-/// every handler serves. Pulled out so all three routes share
-/// the same allocation + caching path.
-fn build_state<T: Serialize>(payload: &T) -> Arc<ManifestState> {
-    // All three well-known payloads (MCP manifest, A2A agent
-    // card, skills index) are statically-typed structs whose
+/// card, skills index, API catalog, or OAuth resource doc) into
+/// the cached `body + etag + content-type` triple every handler
+/// serves. Pulled out so all routes share the same allocation +
+/// caching path.
+fn build_state<T: Serialize>(payload: &T, content_type: &'static str) -> Arc<ManifestState> {
+    // Every well-known payload is a statically-typed struct whose
     // field types are all `serde_json`-compatible — a panic here
     // would mean an upstream change introduced a non-serialisable
     // field, which is a programmer error, not a runtime input
-    // problem. The generic message reflects the shared
-    // contract across all three payload types.
+    // problem.
     let body_json =
         serde_json::to_string_pretty(payload).expect("well-known payload serialises to JSON");
     let etag = etag_for(&body_json);
     Arc::new(ManifestState {
         body: Bytes::from(body_json),
         etag,
+        content_type,
     })
 }
 
-async fn mcp_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
-    serve_state(&state, &headers)
-}
-
-async fn card_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
-    serve_state(&state, &headers)
-}
-
-async fn skills_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
+async fn generic_handler(State(state): State<Arc<ManifestState>>, headers: HeaderMap) -> Response {
     serve_state(&state, &headers)
 }
 
@@ -193,13 +232,13 @@ fn serve_state(state: &ManifestState, headers: &HeaderMap) -> Response {
     if let Some(resp) = not_modified_if_match(headers, &state.etag) {
         return resp;
     }
-    success_response(state.body.clone(), &state.etag)
+    success_response(state.body.clone(), &state.etag, state.content_type)
 }
 
-fn success_response(body: Bytes, etag: &str) -> Response {
+fn success_response(body: Bytes, etag: &str, content_type: &'static str) -> Response {
     let mut resp = (StatusCode::OK, body).into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE));
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_CONTROL),
@@ -493,6 +532,136 @@ pub struct SkillsIndex {
     pub skills: std::collections::BTreeMap<String, String>,
 }
 
+// -------- RFC 9727 api-catalog (#7.4) ----------------------------------
+
+/// Pure builder for the RFC 9727 API catalog document. Lists the
+/// two public service surfaces the gateway exposes (MCP over
+/// Streamable HTTP, and the REST API the `OpenAPI` doc at #7.5
+/// describes) with cross-links to their respective discovery
+/// payloads so an API-catalog-aware client can pivot from this
+/// single entry point to a concrete service description.
+fn build_api_catalog(meta: &ManifestMeta) -> ApiCatalog {
+    let base = meta.public_base_url.trim_end_matches('/');
+    ApiCatalog {
+        linkset: vec![
+            ApiCatalogEntry {
+                anchor: format!("{base}/mcp"),
+                service_desc: vec![LinkRef {
+                    href: format!("{base}/.well-known/mcp.json"),
+                    kind: "application/json".to_string(),
+                }],
+                service_doc: vec![LinkRef {
+                    href: meta.documentation_url.clone(),
+                    kind: "text/html".to_string(),
+                }],
+            },
+            ApiCatalogEntry {
+                anchor: format!("{base}/api"),
+                // #7.5 will land /api/docs (Swagger UI) + the
+                // OpenAPI JSON. Until then the cross-link 404s,
+                // which is the documented "advertise the
+                // pointer, let the resource 404 until it
+                // exists" forward-reference shape per RFC 9727.
+                service_desc: vec![LinkRef {
+                    href: format!("{base}/api/openapi.json"),
+                    kind: "application/json".to_string(),
+                }],
+                service_doc: vec![LinkRef {
+                    href: format!("{base}/api/docs"),
+                    kind: "text/html".to_string(),
+                }],
+            },
+        ],
+    }
+}
+
+/// RFC 9727 API catalog body. `linkset` is the array of API
+/// entries (one per service surface). Schema:
+/// <https://datatracker.ietf.org/doc/html/rfc9727>.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ApiCatalog {
+    pub linkset: Vec<ApiCatalogEntry>,
+}
+
+/// One API entry in the catalog. `anchor` is the API's base URL;
+/// the typed relation arrays (`service-desc`, `service-doc`) carry
+/// the relation-typed links per RFC 8288 + RFC 9727.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ApiCatalogEntry {
+    pub anchor: String,
+    /// `service-desc` relation per IANA registry — link to a
+    /// machine-readable service description (e.g. an `OpenAPI`
+    /// document or the MCP manifest).
+    #[serde(rename = "service-desc")]
+    pub service_desc: Vec<LinkRef>,
+    /// `service-doc` relation per IANA registry — link to a
+    /// human-readable description of the service.
+    #[serde(rename = "service-doc")]
+    pub service_doc: Vec<LinkRef>,
+}
+
+/// Typed link object per RFC 8288 §3.1. `kind` serialises as
+/// `type` to match the spec field name without shadowing Rust's
+/// keyword.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LinkRef {
+    pub href: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+// -------- RFC 9728 oauth-protected-resource (#7.4) ---------------------
+
+/// Pure builder for the RFC 9728 OAuth Protected Resource metadata
+/// document. Always emitted regardless of mode: in personal mode
+/// the document advertises an empty `authorization_servers` array
+/// (a spec-compliant signal that the resource doesn't delegate to
+/// any AS); in multi-user mode operators set
+/// `OAUTH_AUTHORIZATION_SERVERS` to the AS issuer URL(s).
+fn build_oauth_resource(meta: &ManifestMeta) -> OAuthProtectedResource {
+    let base = meta.public_base_url.trim_end_matches('/');
+    OAuthProtectedResource {
+        // The "resource identifier" per RFC 9728 §2 is the URL
+        // the access token's `aud` claim must match. We use the
+        // public base URL — `aud=https://hub.example` — which
+        // matches the convention an MCP client sees when calling
+        // `/mcp`.
+        resource: base.to_string(),
+        authorization_servers: meta.oauth_authorization_servers.clone(),
+        // Per RFC 6750 the gateway accepts bearer tokens via the
+        // `Authorization: Bearer …` header only — not via query
+        // string (insecure, logged everywhere) or form body
+        // (only meaningful for POST). One method is enough; if
+        // we ever add form-body support we'd add `"body"` here.
+        bearer_methods_supported: vec!["header".to_string()],
+        // Pointer back to our own human-readable docs.
+        resource_documentation: Some(meta.documentation_url.clone()),
+        // Scopes the gateway advertises — kept abstract so the
+        // multi-user OAuth integration can pick the actual
+        // scope names without breaking discovery clients that
+        // depend on this list.
+        scopes_supported: vec!["mcp:read".to_string(), "mcp:write".to_string()],
+    }
+}
+
+/// RFC 9728 OAuth Protected Resource Metadata body. Schema:
+/// <https://datatracker.ietf.org/doc/html/rfc9728>.
+///
+/// Field names mirror RFC 9728's `snake_case` convention exactly,
+/// so no serde rename annotations are needed. Optional fields
+/// use `Option` + `skip_serializing_if` so the JSON output only
+/// carries values the operator has actually set, matching the
+/// spec's "absence means default" convention.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OAuthProtectedResource {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    pub bearer_methods_supported: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_documentation: Option<String>,
+    pub scopes_supported: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +711,7 @@ mod tests {
             provider_organization: "Test Org".to_string(),
             provider_url: "https://example.test/org".to_string(),
             documentation_url: "https://example.test/docs".to_string(),
+            oauth_authorization_servers: Vec::new(),
         }
     }
 
@@ -772,8 +942,19 @@ mod tests {
         }
     }
 
+    /// All five well-known surfaces the gateway mounts as of
+    /// #7.4 — kept in one place so any future route addition
+    /// shows up as a single edit.
+    const ALL_WELL_KNOWN_PATHS: &[&str] = &[
+        "/.well-known/mcp.json",
+        "/.well-known/agent-card.json",
+        "/.well-known/agent-skills.json",
+        "/.well-known/api-catalog",
+        "/.well-known/oauth-protected-resource",
+    ];
+
     #[tokio::test]
-    async fn router_serves_all_three_well_known_routes() {
+    async fn router_serves_all_well_known_routes() {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -781,21 +962,13 @@ mod tests {
         let d = dispatcher_with(vec![("only", "only tool")]);
         let app = router(&d, &meta(Mode::Personal));
 
-        for path in [
-            "/.well-known/mcp.json",
-            "/.well-known/agent-card.json",
-            "/.well-known/agent-skills.json",
-        ] {
+        for path in ALL_WELL_KNOWN_PATHS {
             let resp = app
                 .clone()
-                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .oneshot(Request::get(*path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(resp.status(), 200, "expected 200 for {path}");
-            // Each response carries its own ETag — the bodies
-            // are distinct so the validators must be too,
-            // otherwise a conditional GET on one route would
-            // wrongly 304 against another route's body.
             let etag = resp
                 .headers()
                 .get(axum::http::header::ETAG)
@@ -822,14 +995,10 @@ mod tests {
         let app = router(&d, &meta(Mode::Personal));
 
         let mut etags = Vec::new();
-        for path in [
-            "/.well-known/mcp.json",
-            "/.well-known/agent-card.json",
-            "/.well-known/agent-skills.json",
-        ] {
+        for path in ALL_WELL_KNOWN_PATHS {
             let resp = app
                 .clone()
-                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .oneshot(Request::get(*path).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             etags.push(
@@ -849,5 +1018,120 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -------- RFC 9727 api-catalog (#7.4) ------------------------------
+
+    #[test]
+    fn api_catalog_lists_mcp_and_rest_entries() {
+        let d = dispatcher_with(vec![("only", "only tool")]);
+        let _ = d; // unused — catalog only depends on meta
+        let catalog = build_api_catalog(&meta(Mode::Personal));
+        assert_eq!(catalog.linkset.len(), 2, "expected MCP + REST entries");
+        // MCP entry first, with the cross-link to the mcp.json
+        // manifest as the service-desc.
+        assert_eq!(catalog.linkset[0].anchor, "https://hub.example/mcp");
+        assert_eq!(
+            catalog.linkset[0].service_desc[0].href,
+            "https://hub.example/.well-known/mcp.json",
+        );
+        // REST entry second, with forward-reference to #7.5
+        // OpenAPI artefacts.
+        assert_eq!(catalog.linkset[1].anchor, "https://hub.example/api");
+        assert_eq!(
+            catalog.linkset[1].service_desc[0].href,
+            "https://hub.example/api/openapi.json",
+        );
+    }
+
+    #[test]
+    fn api_catalog_serialises_with_hyphenated_relation_names() {
+        let catalog = build_api_catalog(&meta(Mode::Personal));
+        let v: Value = serde_json::to_value(&catalog).unwrap();
+        let linkset = v["linkset"].as_array().unwrap();
+        let first = linkset[0].as_object().unwrap();
+        // RFC 9727 / RFC 8288 use `service-desc` and
+        // `service-doc` (hyphenated), not snake_case.
+        assert!(first.contains_key("service-desc"));
+        assert!(first.contains_key("service-doc"));
+        // LinkRef `type` field — `kind` → `type` rename.
+        let link = first["service-desc"][0].as_object().unwrap();
+        assert!(link.contains_key("type"));
+        assert!(link.contains_key("href"));
+    }
+
+    #[tokio::test]
+    async fn api_catalog_response_uses_linkset_content_type() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let d = dispatcher_with(vec![("only", "only tool")]);
+        let app = router(&d, &meta(Mode::Personal));
+        let resp = app
+            .oneshot(
+                Request::get("/.well-known/api-catalog")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        // RFC 9727 §3 registers `application/linkset+json` as the
+        // media type. Generic `application/json` would let a
+        // content-negotiating intermediary mis-classify the
+        // document.
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "application/linkset+json",
+        );
+    }
+
+    // -------- RFC 9728 oauth-protected-resource (#7.4) -----------------
+
+    #[test]
+    fn oauth_resource_personal_mode_has_empty_authorization_servers() {
+        let resource = build_oauth_resource(&meta(Mode::Personal));
+        assert_eq!(resource.resource, "https://hub.example");
+        assert!(resource.authorization_servers.is_empty());
+        assert_eq!(resource.bearer_methods_supported, vec!["header"]);
+        assert!(resource.scopes_supported.contains(&"mcp:read".to_string()));
+        assert!(resource.scopes_supported.contains(&"mcp:write".to_string()));
+        assert!(resource.resource_documentation.is_some());
+    }
+
+    #[test]
+    fn oauth_resource_multiuser_mode_reflects_configured_auth_servers() {
+        let mut m = meta(Mode::MultiUser);
+        m.oauth_authorization_servers = vec!["https://auth.hub.example".to_string()];
+        let resource = build_oauth_resource(&m);
+        assert_eq!(
+            resource.authorization_servers,
+            vec!["https://auth.hub.example".to_string()],
+        );
+    }
+
+    #[test]
+    fn oauth_resource_serialises_to_expected_shape() {
+        let mut m = meta(Mode::MultiUser);
+        m.oauth_authorization_servers = vec!["https://as.example".to_string()];
+        let resource = build_oauth_resource(&m);
+        let v: Value = serde_json::to_value(&resource).unwrap();
+        let obj = v.as_object().unwrap();
+        // RFC 9728 §2 mandates these fields with these names —
+        // pin them so a future refactor can't accidentally rename
+        // them out from under consumers.
+        for key in [
+            "resource",
+            "authorization_servers",
+            "bearer_methods_supported",
+            "scopes_supported",
+            "resource_documentation",
+        ] {
+            assert!(obj.contains_key(key), "missing key {key}");
+        }
+        assert_eq!(obj["bearer_methods_supported"][0], "header");
     }
 }
