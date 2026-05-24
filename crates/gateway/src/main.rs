@@ -76,14 +76,16 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
     "/healthz",
     "/readyz",
     "/mcp",
-    // M7 well-known surfaces (#7.2 + #7.3) — generated from
-    // the in-process dispatcher + env config, so all three
+    // M7 well-known surfaces (#7.2 + #7.3 + #7.4) — generated
+    // from the in-process dispatcher + env config, so all five
     // mount in every mode without any DB dependency. Always-on
     // so agents that probe well-known URLs never see a phantom
     // 404 in personal-mode boots.
     "/.well-known/mcp.json",
     "/.well-known/agent-card.json",
     "/.well-known/agent-skills.json",
+    "/.well-known/api-catalog",
+    "/.well-known/oauth-protected-resource",
 ];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
@@ -119,6 +121,14 @@ const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
 /// means. Invalid values fall back to the placeholder in
 /// [`well_known::ManifestMeta::defaults`].
 const MCP_PUBLIC_URL_ENV: &str = "MCP_PUBLIC_URL";
+
+/// Env var: comma-separated list of OAuth authorization-server
+/// issuer URLs advertised in `/.well-known/oauth-protected-resource`
+/// (#7.4, per RFC 9728). Empty / unset → personal-mode-style
+/// empty array. Each entry validated by
+/// [`normalise_public_base_url`]; invalid entries are dropped
+/// with a `warn!`.
+const OAUTH_AUTHORIZATION_SERVERS_ENV: &str = "OAUTH_AUTHORIZATION_SERVERS";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -548,11 +558,41 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
             ),
         }
     }
+    if let Some(raw) = non_empty_env(OAUTH_AUTHORIZATION_SERVERS_ENV) {
+        meta.oauth_authorization_servers = parse_oauth_authorization_servers(&raw);
+    }
     tracing::info!(
         mode = mode.as_str(),
-        "well-known surfaces mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json"
+        "well-known surfaces mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json, /.well-known/api-catalog, /.well-known/oauth-protected-resource"
     );
     well_known::router(dispatcher, &meta)
+}
+
+/// Parse a comma-separated list of OAuth authorization-server URLs.
+/// Each entry is trimmed + validated via [`normalise_public_base_url`];
+/// invalid entries are dropped with a `warn!` so a misconfigured
+/// boot publishes only the well-formed AS issuers instead of
+/// poisoning the discovery document with broken URLs.
+fn parse_oauth_authorization_servers(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            match normalise_public_base_url(trimmed) {
+                Ok(url) => Some(url),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        value = %trimmed,
+                        "{OAUTH_AUTHORIZATION_SERVERS_ENV} entry rejected",
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Validate + normalise a public-facing base URL supplied via env
@@ -1569,12 +1609,12 @@ mod tests {
         let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
-        // Always-on now includes all three M7 well-known
-        // surfaces (#7.2 + #7.3) since each derives from
+        // Always-on now includes all five M7 well-known
+        // surfaces (#7.2 + #7.3 + #7.4) since each derives from
         // in-process state with no DB dependency. /llms.txt
         // routes still don't appear without DATABASE_URL set.
         assert!(entry.detail.contains(
-            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json"
+            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json,/.well-known/api-catalog,/.well-known/oauth-protected-resource"
         ));
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
@@ -1626,7 +1666,7 @@ mod tests {
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
         // Always-on set is /healthz, /readyz, /mcp, plus all
-        // three M7 well-known surfaces (#7.2 + #7.3). The
+        // five M7 well-known surfaces (#7.2 + #7.3 + #7.4). The
         // llms.txt routes must NOT appear without the storage
         // flag set.
         assert_eq!(
@@ -1638,6 +1678,8 @@ mod tests {
                 "/.well-known/mcp.json",
                 "/.well-known/agent-card.json",
                 "/.well-known/agent-skills.json",
+                "/.well-known/api-catalog",
+                "/.well-known/oauth-protected-resource",
             ],
         );
         let with = resolved_public_routes(true);
@@ -1645,8 +1687,32 @@ mod tests {
         assert!(with.contains(&"/.well-known/mcp.json"));
         assert!(with.contains(&"/.well-known/agent-card.json"));
         assert!(with.contains(&"/.well-known/agent-skills.json"));
+        assert!(with.contains(&"/.well-known/api-catalog"));
+        assert!(with.contains(&"/.well-known/oauth-protected-resource"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
+    }
+
+    #[test]
+    fn parse_oauth_authorization_servers_filters_and_normalises() {
+        // Empty input → empty list.
+        assert!(parse_oauth_authorization_servers("").is_empty());
+        // Single valid entry, trimmed + slash-stripped.
+        assert_eq!(
+            parse_oauth_authorization_servers("  https://as.example/  "),
+            vec!["https://as.example".to_string()],
+        );
+        // Comma-separated list with one valid + one invalid +
+        // one empty entry — only the valid one survives.
+        assert_eq!(
+            parse_oauth_authorization_servers(
+                "https://primary.example, not-a-url, , https://secondary.example/"
+            ),
+            vec![
+                "https://primary.example".to_string(),
+                "https://secondary.example".to_string(),
+            ],
+        );
     }
 
     #[test]
