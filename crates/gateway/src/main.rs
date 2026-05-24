@@ -126,8 +126,9 @@ const MCP_PUBLIC_URL_ENV: &str = "MCP_PUBLIC_URL";
 /// issuer URLs advertised in `/.well-known/oauth-protected-resource`
 /// (#7.4, per RFC 9728). Empty / unset → personal-mode-style
 /// empty array. Each entry validated by
-/// [`normalise_public_base_url`]; invalid entries are dropped
-/// with a `warn!`.
+/// [`validate_oauth_issuer_url`] (which preserves trailing
+/// slashes + paths verbatim per RFC 8414 §3 issuer-identity
+/// semantics); invalid entries are dropped with a `warn!`.
 const OAUTH_AUTHORIZATION_SERVERS_ENV: &str = "OAUTH_AUTHORIZATION_SERVERS";
 
 #[derive(Parser, Debug)]
