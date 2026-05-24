@@ -24,6 +24,12 @@ import {
 	type PlaygroundChildToParent
 } from './protocol';
 
+/**
+ * HTTP methods the playground proxy will forward. Read-only by
+ * design — see the comment in `proxyApiCall` for the threat model.
+ */
+const PLAYGROUND_ALLOWED_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);
+
 export interface PlaygroundHostOptions {
 	iframe: HTMLIFrameElement;
 	/** Optional state-update debounce (ms). Default 100. */
@@ -94,11 +100,43 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 			);
 			return;
 		}
+		// Method-allowlist defence. Playgrounds are user-untrusted
+		// code: even though the iframe is sandboxed, this parent-
+		// side proxy runs in the user's session. If we forwarded
+		// arbitrary methods + body the iframe could POST as the
+		// logged-in user — spamming ratings/comments/submissions,
+		// or hitting admin endpoints if the user is privileged.
+		// Pin to read-only methods so the gateway can only ever be
+		// queried, never mutated, via the playground proxy.
+		const requestedMethod = (init?.method ?? 'GET').toUpperCase();
+		if (!PLAYGROUND_ALLOWED_METHODS.has(requestedMethod)) {
+			iframe.contentWindow?.postMessage(
+				{
+					type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
+					id,
+					ok: false,
+					status: 0,
+					contentType: null,
+					body: '',
+					error: `Method "${requestedMethod}" rejected: playground proxy only forwards ${[
+						...PLAYGROUND_ALLOWED_METHODS
+					].join(' / ')}`
+				},
+				'*'
+			);
+			return;
+		}
 		try {
+			// `credentials: 'omit'` strips the user's session cookies
+			// from the proxied fetch. Combined with the GET-only
+			// method allowlist this means: the playground sees the
+			// gateway as an anonymous, read-only client. Defence
+			// against a hostile playground using the proxy to act as
+			// the logged-in user.
 			const res = await fetch(normalised, {
-				method: init?.method ?? 'GET',
+				method: requestedMethod,
 				headers: init?.headers,
-				body: init?.body
+				credentials: 'omit'
 			});
 			const body = await res.text();
 			iframe.contentWindow?.postMessage(

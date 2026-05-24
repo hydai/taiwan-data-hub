@@ -14,7 +14,7 @@
 	import { resolve } from '$app/paths';
 	import MetaTags from '$lib/seo/MetaTags.svelte';
 	import { attachPlaygroundHost } from '$lib/playgrounds/host';
-	import type { PlaygroundStatus } from '$lib/playgrounds/types';
+	import type { Playground, PlaygroundStatus } from '$lib/playgrounds/types';
 
 	let { data } = $props();
 	const playground = $derived(data.playground);
@@ -49,7 +49,20 @@
 	// inside the playground (./app.js, ./style.css) resolve one
 	// directory too high. Naming index.html keeps the resolution
 	// base under `/playgrounds/<slug>/app/`.
-	const appUrl = $derived(`/playgrounds/${playground.slug}/app/index.html`);
+	//
+	// `$app/paths.resolve` prefixes the configured `paths.base` so
+	// the iframe URL is correct under subpath deployments (e.g.
+	// `paths.base = '/data-hub'`). A bare root-relative string here
+	// would load the playground from the domain root and 404 in
+	// any subpath deploy.
+	const appUrl = $derived(resolveAppUrl(playground));
+
+	function resolveAppUrl(p: Playground): string {
+		return resolve('/playgrounds/[slug]/app/[...file]', {
+			slug: p.slug,
+			file: 'index.html'
+		});
+	}
 </script>
 
 <MetaTags
