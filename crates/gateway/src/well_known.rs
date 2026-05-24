@@ -24,7 +24,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use mcp_core::Dispatcher;
+use mcp_core::{Dispatcher, PROTOCOL_VERSION};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use shared::Mode;
@@ -40,11 +40,12 @@ const CONTENT_TYPE: &str = "application/json; charset=utf-8";
 /// CDN revalidate cheaply on a redeploy.
 const CACHE_CONTROL: &str = "public, max-age=3600";
 
-/// MCP protocol version the gateway speaks. Matches what the rmcp
-/// dispatcher advertises in the `initialize` response — pinned as
-/// a constant so the manifest and the live `/mcp` session can't
-/// disagree.
-const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+/// MCP protocol version the gateway speaks. Pulled from
+/// [`mcp_core::PROTOCOL_VERSION`] so the manifest and the live
+/// `/mcp` `initialize` response share a single source of truth —
+/// an SDK upgrade that bumps the version surfaces as a test
+/// failure in `mcp-core` rather than silent drift here.
+const MCP_PROTOCOL_VERSION: &str = PROTOCOL_VERSION;
 
 /// Streamable HTTP transport name per the MCP 2025-11-25 spec.
 const MCP_TRANSPORT: &str = "streamable_http";
