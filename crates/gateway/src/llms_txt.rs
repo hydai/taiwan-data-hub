@@ -21,6 +21,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::{
     Router,
     extract::{Path, State},
@@ -97,13 +98,18 @@ const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// the catalog fit under the size budget so `/llms.txt` serves that
 /// single page directly; `> 1` means we paginated and `/llms.txt`
 /// redirects callers to the index.
+///
+/// Page bodies are stored as `Bytes` so the HTTP handlers can build
+/// response bodies with a refcount bump instead of cloning the
+/// underlying byte buffer — important because a single page can be
+/// several megabytes.
 #[derive(Debug, Clone)]
 struct Snapshot {
-    pages: Vec<String>,
+    pages: Vec<Bytes>,
     /// Index page rendered alongside the data pages so the index
     /// route serves a precomputed body rather than re-building on
     /// each request. `None` only in the single-page case.
-    index: Option<String>,
+    index: Option<Bytes>,
     /// `SHA-256` of every page concatenated. Distinct `ETag`s between
     /// snapshots even when only one page changed because any
     /// content change shifts the digest.
@@ -279,7 +285,7 @@ impl LlmsTxtCache {
                 match self.build().await {
                     Ok(snap) => {
                         let pages = snap.pages.len();
-                        let bytes: usize = snap.pages.iter().map(String::len).sum();
+                        let bytes: usize = snap.pages.iter().map(Bytes::len).sum();
                         // Atomic swap: the new snapshot is fully
                         // built before we touch the cache slot, so
                         // concurrent HTTP requests during the
@@ -320,9 +326,9 @@ impl std::fmt::Debug for LlmsTxtCache {
 /// real work.
 fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> Snapshot {
     if let Some(single_page) = try_render_single_page(meta, hits, limits.single_page_cap) {
-        let etag = etag_for(&[&single_page]);
+        let etag = etag_for(std::iter::once(single_page.as_str()));
         Snapshot {
-            pages: vec![single_page],
+            pages: vec![Bytes::from(single_page)],
             index: None,
             etag,
             generated_at: Utc::now(),
@@ -330,12 +336,11 @@ fn render_snapshot(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> S
     } else {
         let pages = paginate_hits(meta, hits, limits);
         let index = render_index(meta, pages.len());
-        let mut all = vec![index.clone()];
-        all.extend(pages.iter().cloned());
-        let etag = etag_for(&all.iter().map(String::as_str).collect::<Vec<_>>());
+        let etag =
+            etag_for(std::iter::once(index.as_str()).chain(pages.iter().map(String::as_str)));
         Snapshot {
-            pages,
-            index: Some(index),
+            pages: pages.into_iter().map(Bytes::from).collect(),
+            index: Some(Bytes::from(index)),
             etag,
             generated_at: Utc::now(),
         }
@@ -536,7 +541,11 @@ fn estimate_bytes(hit_count: usize) -> usize {
 /// Strong `ETag` derived from every page's bytes. Truncated to 16 hex
 /// chars (64 bits) which keeps the header short while still leaving
 /// collision odds negligible at the scale of "one snapshot per day".
-fn etag_for(pages: &[&str]) -> String {
+///
+/// Takes an iterator of `&str` slices so the caller can stream
+/// pages straight from the source `String`s without first cloning
+/// them into a temporary `Vec<String>`.
+fn etag_for<'a, I: IntoIterator<Item = &'a str>>(pages: I) -> String {
     let mut hasher = Sha256::new();
     for page in pages {
         hasher.update(page.as_bytes());
@@ -578,6 +587,10 @@ async fn handler_root(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMap
             if let Some(resp) = not_modified_if_match(&headers, &snap.etag, snap.generated_at) {
                 return resp;
             }
+            // `Bytes::clone()` is a refcount bump, not a buffer
+            // copy — important on the hot path because page bodies
+            // can be several MB. The shared buffer flows directly
+            // into the response body.
             let body = if snap.is_paginated() {
                 snap.index.clone().unwrap_or_default()
             } else {
@@ -599,10 +612,12 @@ async fn handler_index(State(cache): State<Arc<LlmsTxtCache>>, headers: HeaderMa
             // minimal index that points back at /llms.txt. That
             // keeps the URL discoverable for clients that always
             // try the index first.
-            let body = snap
-                .index
-                .clone()
-                .unwrap_or_else(|| render_single_page_index(&cache.meta));
+            let body = snap.index.clone().unwrap_or_else(|| {
+                // Single-page case: rendered on demand because
+                // the snapshot doesn't carry one. Cheap (a
+                // handful of bytes) so we don't bother caching.
+                Bytes::from(render_single_page_index(&cache.meta))
+            });
             success_response(body, &snap.etag, snap.generated_at)
         }
         Err(e) => error_response(&e),
@@ -694,7 +709,7 @@ fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
     false
 }
 
-fn success_response(body: String, etag: &str, generated_at: DateTime<Utc>) -> Response {
+fn success_response(body: Bytes, etag: &str, generated_at: DateTime<Utc>) -> Response {
     let mut resp = (StatusCode::OK, body).into_response();
     let h = resp.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(CONTENT_TYPE));
@@ -814,7 +829,9 @@ mod tests {
         let snap = render_snapshot(&meta(), &hits, &Limits::default());
         assert_eq!(snap.pages.len(), 1, "small catalog stays single-page");
         assert!(snap.index.is_none());
-        let body = &snap.pages[0];
+        // Pages are stored as `Bytes`; decode to `&str` for the
+        // substring assertions. UTF-8 is mandatory in the renderer.
+        let body = std::str::from_utf8(&snap.pages[0]).unwrap();
         assert!(body.starts_with("# Test Hub"));
         assert!(body.contains("[air-quality title](https://example.test/datasets/air-quality)"));
         assert!(body.contains("[forest-land title](https://example.test/datasets/forest-land)"));
@@ -842,7 +859,8 @@ mod tests {
             snap.pages.len()
         );
         assert!(snap.index.is_some());
-        let index = snap.index.unwrap();
+        let index_bytes = snap.index.unwrap();
+        let index = std::str::from_utf8(&index_bytes).unwrap();
         assert!(index.contains(&format!("Page {}", snap.pages.len())));
         for page in &snap.pages {
             assert!(
@@ -938,9 +956,9 @@ mod tests {
 
     #[test]
     fn etag_changes_when_content_changes() {
-        let a = etag_for(&["page-1"]);
-        let b = etag_for(&["page-1", "page-2"]);
-        let c = etag_for(&["different"]);
+        let a = etag_for(["page-1"]);
+        let b = etag_for(["page-1", "page-2"]);
+        let c = etag_for(["different"]);
         assert_ne!(a, b);
         assert_ne!(a, c);
     }
@@ -963,7 +981,7 @@ mod tests {
         ]));
         let cache = LlmsTxtCache::new(source, meta());
         let snap = cache.build().await.unwrap();
-        let body = &snap.pages[0];
+        let body = std::str::from_utf8(&snap.pages[0]).unwrap();
         assert!(body.contains("[a title]"));
         assert!(body.contains("[b title]"));
         assert!(body.contains("[c title]"));
@@ -982,7 +1000,11 @@ mod tests {
         // empty page and the assertion would fail.
         let second = cache.get_or_build().await.unwrap();
         assert_eq!(first.etag, second.etag);
-        assert!(second.pages[0].contains("[a title]"));
+        assert!(
+            std::str::from_utf8(&second.pages[0])
+                .unwrap()
+                .contains("[a title]")
+        );
     }
 
     #[tokio::test]
@@ -999,10 +1021,18 @@ mod tests {
         ]));
         let cache = LlmsTxtCache::new(source, meta());
         let first = cache.get_or_build().await.unwrap();
-        assert!(first.pages[0].contains("[first title]"));
+        assert!(
+            std::str::from_utf8(&first.pages[0])
+                .unwrap()
+                .contains("[first title]")
+        );
         cache.invalidate().await;
         let second = cache.get_or_build().await.unwrap();
-        assert!(second.pages[0].contains("[second title]"));
+        assert!(
+            std::str::from_utf8(&second.pages[0])
+                .unwrap()
+                .contains("[second title]")
+        );
         assert_ne!(first.etag, second.etag);
     }
 

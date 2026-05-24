@@ -25,6 +25,7 @@ mod reports_routes;
 mod session_middleware;
 mod submissions_routes;
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 
 use anyhow::Context;
@@ -968,23 +969,30 @@ fn validate_mode(raw: &ModeRaw, database_url: Option<&str>) -> DoctorEntry {
         ModeRaw::Unset => Mode::from_env_value(None),
         ModeRaw::Set(s) => Mode::from_env_value(Some(s.as_str())),
     };
-    // `/llms.txt` mounts iff `Storage` is available; doctor can't
-    // probe the pool, so the next-best signal is "DATABASE_URL is
-    // set". This mirrors what `connect_storage_if_available` reads
-    // — if the URL is unset, no Storage means no llms.txt subrouter.
-    // Doctor still flags a malformed URL elsewhere
-    // (`validate_database_url`); here we only need the boolean.
-    let llms_txt_enabled = database_url.is_some();
+    // The MODE entry only lists ALWAYS-ON public routes — they are
+    // the only ones doctor can promise the binary will serve
+    // without a runtime connection probe. Optional surfaces (e.g.
+    // `/llms.txt`, which requires `Storage::connect` to succeed,
+    // not just `DATABASE_URL` to be set) are reported via a
+    // separate "would mount" line below so a doctor "DB-down but
+    // env-set" snapshot can't disagree with what `serve` actually
+    // wires up.
     match parsed {
-        Ok(mode) => doctor_entry(
-            "MODE",
-            DoctorStatus::Ok,
-            format!(
+        Ok(mode) => {
+            let mut detail = format!(
                 "{mode} (public: {}; gated: {})",
-                resolved_public_routes(llms_txt_enabled).join(","),
+                ALWAYS_ON_PUBLIC_ROUTES.join(","),
                 gated_route_list(mode),
-            ),
-        ),
+            );
+            if database_url.is_some() {
+                let conditional = LLMS_TXT_PUBLIC_ROUTES.join(",");
+                let _ = write!(
+                    detail,
+                    "; conditional (mounted iff Storage::connect succeeds): {conditional}",
+                );
+            }
+            doctor_entry("MODE", DoctorStatus::Ok, detail)
+        }
         Err(e) => doctor_entry("MODE", DoctorStatus::Error, e.to_string()),
     }
 }
@@ -1383,13 +1391,15 @@ mod tests {
 
     #[test]
     fn validate_mode_renders_resolved_routes() {
-        // No DATABASE_URL → /llms.txt won't mount → only always-on
-        // routes appear in the resolved list.
+        // No DATABASE_URL → only always-on routes; the `conditional:`
+        // suffix is omitted entirely so doctor never advertises a
+        // route the binary won't even try to mount.
         let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
         assert!(!entry.detail.contains("/llms.txt"));
+        assert!(!entry.detail.contains("conditional"));
         assert!(entry.detail.contains("gated: <none>"));
 
         let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()), None);
@@ -1397,9 +1407,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_mode_includes_llms_txt_when_database_url_set() {
+    fn validate_mode_marks_llms_txt_conditional_when_database_url_set() {
+        // DATABASE_URL set → llms.txt routes appear under
+        // `conditional:` since doctor can't actually probe
+        // `Storage::connect` (it deliberately avoids runtime
+        // probes). This keeps doctor and `serve`'s boot log
+        // in agreement even when the DB is unreachable.
         let entry = validate_mode(&ModeRaw::Unset, Some("postgres://stub/stub"));
         assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(
+            entry
+                .detail
+                .contains("conditional (mounted iff Storage::connect succeeds)"),
+            "doctor must mark /llms.txt routes as conditional, got: {}",
+            entry.detail,
+        );
         assert!(entry.detail.contains("/llms.txt"));
         assert!(entry.detail.contains("/llms-index.txt"));
         assert!(entry.detail.contains("/llms-page/{n}"));
