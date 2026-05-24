@@ -26,6 +26,15 @@
 	}
 
 	var counties = data.counties;
+	// Build a code → county lookup once instead of `counties.find`
+	// per tile per recolor. The map is tiny (22 entries) so the
+	// performance win is negligible, but it keeps `recolor` /
+	// `select` / initial-state parsing readable and O(1) per lookup.
+	var countyByCode = new Map();
+	for (var ci0 = 0; ci0 < counties.length; ci0 += 1) {
+		countyByCode.set(counties[ci0].code, counties[ci0]);
+	}
+
 	var mapEl = document.getElementById('map');
 	var detailEl = document.getElementById('detail');
 	var legendEl = document.getElementById('legend');
@@ -47,9 +56,8 @@
 		if (typeof initial.metric === 'string' && validMetrics.has(initial.metric)) {
 			setRadio('metric', initial.metric);
 		}
-		if (typeof initial.county === 'string') {
-			var match = counties.find(function (c) { return c.code === initial.county; });
-			if (match) selectedCounty = match.code;
+		if (typeof initial.county === 'string' && countyByCode.has(initial.county)) {
+			selectedCounty = initial.county;
 		}
 	}
 
@@ -90,6 +98,10 @@
 			var value = document.createElement('span');
 			value.className = 'tile-value';
 			btn.appendChild(value);
+			// Reflect selection state to assistive tech: aria-pressed
+			// gives screen-reader users the same "which county is
+			// active" signal the .selected class provides visually.
+			btn.setAttribute('aria-pressed', 'false');
 			btn.addEventListener('click', function (ev) {
 				var code = ev.currentTarget.dataset.code;
 				select(code);
@@ -119,7 +131,7 @@
 		var totalPop = 0;
 		for (var i = 0; i < tiles.length; i += 1) {
 			var tile = tiles[i];
-			var c = counties.find(function (cc) { return cc.code === tile.dataset.code; });
+			var c = countyByCode.get(tile.dataset.code);
 			if (!c) continue;
 			var v = metricValue(c, metric);
 			var idx = bucketIndex(v, ticks);
@@ -129,7 +141,9 @@
 			tile.classList.add('bin-' + idx);
 			var valEl = tile.querySelector('.tile-value');
 			valEl.textContent = formatMetric(v, metric);
-			tile.classList.toggle('selected', c.code === selectedCounty);
+			var isSelected = c.code === selectedCounty;
+			tile.classList.toggle('selected', isSelected);
+			tile.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
 			totalPop += c.pop;
 		}
 		renderLegend(ticks, metric);
@@ -142,18 +156,20 @@
 			PALETTE_LENGTH +
 			' 個分桶。';
 		if (selectedCounty) {
-			var sel = counties.find(function (cc) { return cc.code === selectedCounty; });
+			var sel = countyByCode.get(selectedCounty);
 			if (sel) renderDetail(sel);
 		}
 	}
 
 	function select(code) {
 		selectedCounty = code;
-		var sel = counties.find(function (cc) { return cc.code === code; });
+		var sel = countyByCode.get(code);
 		if (sel) renderDetail(sel);
 		var tiles = mapEl.querySelectorAll('.tile');
 		for (var i = 0; i < tiles.length; i += 1) {
-			tiles[i].classList.toggle('selected', tiles[i].dataset.code === code);
+			var isSelected = tiles[i].dataset.code === code;
+			tiles[i].classList.toggle('selected', isSelected);
+			tiles[i].setAttribute('aria-pressed', isSelected ? 'true' : 'false');
 		}
 	}
 
