@@ -428,7 +428,11 @@ mod tests {
                 .and_then(|i| self.rows.get(&i))
                 .map(|(full, title_i18n, description_i18n)| {
                     let mut out = full.clone();
-                    out.dataset.title = resolve_jsonb_locale(title_i18n, lang).unwrap_or_default();
+                    out.dataset.title = resolve_jsonb_locale(title_i18n, lang).expect(
+                        "title_i18n must yield a string for the requested locale or zh-TW \
+                         (enforced in production by the title_has_zh_tw CHECK constraint); \
+                         a missing value here means the test fixture is invalid",
+                    );
                     out.dataset.description = description_i18n
                         .as_ref()
                         .and_then(|v| resolve_jsonb_locale(v, lang));
@@ -437,12 +441,15 @@ mod tests {
         }
     }
 
-    /// Mirrors the SQL `COALESCE(col->>$lang, col->>'zh-TW')` pattern
-    /// in Rust so the stub's behavior matches production storage.
-    /// `->>` returns NULL only when the key is absent or its value is
-    /// JSON `null`; an explicit empty string passes through. The pick
-    /// here intentionally does NOT filter `""` so the stub stays in
-    /// lockstep with SQL semantics.
+    /// Mirrors `COALESCE(col->>$lang, col->>'zh-TW')` for the stub.
+    /// Scope limited to JSON string values: the production schema's
+    /// `*_i18n` CHECK constraints already require
+    /// `jsonb_typeof(col -> 'zh-TW') = 'string'`, so non-string values
+    /// (numbers / booleans / objects) cannot reach the read path —
+    /// matching SQL `->>`'s broader text coercion here would only
+    /// model states the DB rejects. Empty strings pass through
+    /// because `PostgreSQL` `->>` returns NULL only for absent keys
+    /// or JSON `null`, not for explicit `""`.
     fn resolve_jsonb_locale(value: &Value, locale: &str) -> Option<String> {
         let obj = value.as_object()?;
         let pick = |key: &str| obj.get(key).and_then(Value::as_str);
