@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>臺灣行政區地圖 — 人口熱區</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>臺灣行政區地圖 <span class="tag">展示用方塊圖</span></h1>
+				<p class="muted">
+					以 22 個縣市為單位呈現臺灣人口分布,展示
+					<code>geo_basemap</code> + 人口資料的兩源 join。
+				</p>
+				<p class="caveat">
+					本面板使用「方塊型示意圖」呈現位置,並非真實地理投影;人口/面積為 2024 內政部公開資料。正式版以
+					368 個鄉鎮區為單位需連線至載入完整邊界向量的後端 (MapLibre GL + geo_basemap MCP)。
+				</p>
+			</header>
+
+			<form id="metric-form">
+				<fieldset>
+					<legend>著色依據</legend>
+					<label>
+						<input type="radio" name="metric" value="density" checked />
+						人口密度 (人/km²)
+					</label>
+					<label>
+						<input type="radio" name="metric" value="population" />
+						人口數
+					</label>
+				</fieldset>
+			</form>
+
+			<section class="map-and-detail">
+				<div
+					id="map"
+					class="cartogram"
+					aria-label="臺灣 22 縣市方塊地圖,依選擇的著色依據呈現人口分布"
+					role="group"
+				></div>
+				<aside id="detail" class="detail" aria-live="polite">
+					<p class="muted">點擊任一縣市方塊以檢視詳細人口數據。</p>
+				</aside>
+			</section>
+
+			<section class="legend-row">
+				<div id="legend" class="legend"></div>
+				<p id="summary" class="muted summary"></p>
+			</section>
+
+			<footer>
+				<p class="muted">
+					iframe 沙箱 + 嚴格 CSP 下執行;本 playground 不發起任何網路呼叫,所有資料(包含方塊配置與人口/面積數字)皆來自同目錄下的
+					<code>sample-data.js</code>。
+				</p>
+			</footer>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./sample-data.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>

@@ -1,0 +1,281 @@
+/* Taiwan Map playground styles. CSP forbids inline <style>. */
+
+* {
+	box-sizing: border-box;
+}
+html,
+body {
+	margin: 0;
+	padding: 0;
+	font-family:
+		ui-sans-serif,
+		system-ui,
+		-apple-system,
+		'Segoe UI',
+		sans-serif;
+	color: #171717;
+	background: #fafafa;
+	font-size: 14px;
+	line-height: 1.5;
+}
+main {
+	max-width: 64rem;
+	margin: 0 auto;
+	padding: 1.5rem;
+}
+header h1 {
+	font-size: 1.5rem;
+	margin: 0 0 0.5rem 0;
+}
+.tag {
+	display: inline-block;
+	background: #fef3c7;
+	color: #92400e;
+	font-size: 0.75rem;
+	font-weight: 500;
+	border-radius: 0.25rem;
+	padding: 0.125rem 0.5rem;
+	margin-left: 0.5rem;
+	vertical-align: middle;
+}
+p.muted {
+	color: #525252;
+	font-size: 0.875rem;
+	margin: 0 0 0.5rem 0;
+}
+.caveat {
+	font-size: 0.8125rem;
+	color: #71717a;
+	background: #fafafa;
+	border-left: 3px solid #d4d4d8;
+	padding: 0.5rem 0.75rem;
+	margin: 0.75rem 0 1.25rem;
+}
+
+form#metric-form {
+	margin-bottom: 1rem;
+	padding: 0.75rem;
+	background: #ffffff;
+	border: 1px solid #e4e4e7;
+	border-radius: 0.5rem;
+}
+form#metric-form fieldset {
+	border: 0;
+	padding: 0;
+	margin: 0;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.875rem;
+	align-items: center;
+}
+form#metric-form legend {
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: #52525b;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+form#metric-form label {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+	font-size: 0.875rem;
+}
+
+.map-and-detail {
+	display: grid;
+	gap: 1rem;
+	grid-template-columns: 1fr;
+	margin-bottom: 1rem;
+}
+@media (min-width: 56rem) {
+	.map-and-detail {
+		grid-template-columns: 2fr 1fr;
+	}
+}
+
+.cartogram {
+	display: grid;
+	grid-template-columns: repeat(6, minmax(0, 1fr));
+	grid-template-rows: repeat(14, 3.25rem);
+	gap: 0.25rem;
+	padding: 0.75rem;
+	background: #ffffff;
+	border: 1px solid #e4e4e7;
+	border-radius: 0.5rem;
+}
+
+/* Tile grid placement + palette colors driven by data-attrs and
+   classes — NOT inline styles. The playground CSP is
+   `style-src 'self'` with no `unsafe-inline`, which blocks all
+   `element.style.foo = ...` DOM API mutations. Setting attributes
+   / classes from JS leaves the styles in the stylesheet where CSP
+   is happy. */
+.tile[data-col='1'] { grid-column: 1; }
+.tile[data-col='2'] { grid-column: 2; }
+.tile[data-col='3'] { grid-column: 3; }
+.tile[data-col='4'] { grid-column: 4; }
+.tile[data-col='5'] { grid-column: 5; }
+.tile[data-col='6'] { grid-column: 6; }
+
+.tile[data-row='1'] { grid-row: 1; }
+.tile[data-row='2'] { grid-row: 2; }
+.tile[data-row='3'] { grid-row: 3; }
+.tile[data-row='4'] { grid-row: 4; }
+.tile[data-row='5'] { grid-row: 5; }
+.tile[data-row='6'] { grid-row: 6; }
+.tile[data-row='7'] { grid-row: 7; }
+.tile[data-row='8'] { grid-row: 8; }
+.tile[data-row='9'] { grid-row: 9; }
+.tile[data-row='10'] { grid-row: 10; }
+.tile[data-row='11'] { grid-row: 11; }
+.tile[data-row='12'] { grid-row: 12; }
+.tile[data-row='13'] { grid-row: 13; }
+.tile[data-row='14'] { grid-row: 14; }
+
+/* 7-step palette as named bin classes. Tiles in bins 0-3 use dark
+   text on light backgrounds; bins 4-6 use light text on dark
+   backgrounds. Same classes are reused for legend swatches. */
+.bin-0 { background: #f1f5f9; }
+.bin-1 { background: #cbd5e1; }
+.bin-2 { background: #94a3b8; }
+.bin-3 { background: #64748b; }
+.bin-4 { background: #475569; }
+.bin-5 { background: #334155; }
+.bin-6 { background: #1e293b; }
+.tile.bin-0,
+.tile.bin-1,
+.tile.bin-2,
+.tile.bin-3 {
+	color: #0f172a;
+}
+.tile.bin-4,
+.tile.bin-5,
+.tile.bin-6 {
+	color: #fafafa;
+}
+
+.tile {
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	border-radius: 0.25rem;
+	font: inherit;
+	font-size: 0.75rem;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	cursor: pointer;
+	padding: 0.25rem;
+	transition:
+		transform 80ms ease,
+		box-shadow 80ms ease;
+}
+.tile:hover {
+	transform: scale(1.04);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+/* Keyboard focus: explicit ring so tab traversal is visible. No
+   transform here on purpose — focus moves rapidly during keyboard
+   nav and scaling tiles would cause layout jitter. */
+.tile:focus-visible {
+	outline: 3px solid #2563eb;
+	outline-offset: 2px;
+	z-index: 1;
+}
+.tile.selected {
+	outline: 2px solid #2563eb;
+	outline-offset: 1px;
+	z-index: 1;
+}
+.tile-label {
+	font-weight: 600;
+	white-space: nowrap;
+}
+.tile-value {
+	font-size: 0.6875rem;
+	opacity: 0.85;
+	margin-top: 0.125rem;
+}
+
+.detail {
+	padding: 0.875rem 1rem;
+	background: #ffffff;
+	border: 1px solid #e4e4e7;
+	border-radius: 0.5rem;
+}
+.detail h2 {
+	font-size: 1.125rem;
+	margin: 0 0 0.125rem 0;
+}
+.detail .sub {
+	font-size: 0.75rem;
+	color: #71717a;
+	margin: 0 0 0.5rem 0;
+}
+.detail dl {
+	margin: 0;
+	display: grid;
+	grid-template-columns: 4rem 1fr;
+	gap: 0.25rem 0.75rem;
+	font-size: 0.875rem;
+}
+.detail dt {
+	color: #52525b;
+}
+.detail dd {
+	margin: 0;
+	color: #171717;
+	font-variant-numeric: tabular-nums;
+}
+
+.legend-row {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.75rem;
+	background: #ffffff;
+	border: 1px solid #e4e4e7;
+	border-radius: 0.5rem;
+}
+.legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+	font-size: 0.75rem;
+	color: #3f3f46;
+}
+.legend-label {
+	font-weight: 600;
+	margin-right: 0.25rem;
+}
+.legend-bin {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.25rem;
+}
+.legend-swatch {
+	display: inline-block;
+	width: 0.875rem;
+	height: 0.875rem;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	border-radius: 0.125rem;
+}
+.summary {
+	font-size: 0.8125rem;
+	margin: 0;
+}
+
+footer {
+	margin-top: 2rem;
+	border-top: 1px solid #e4e4e7;
+	padding-top: 1rem;
+	font-size: 0.75rem;
+	color: #71717a;
+}
+code {
+	font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+	font-size: 0.8125rem;
+}

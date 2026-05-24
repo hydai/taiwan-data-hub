@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "臺灣行政區地圖 — 人口熱區",
+    "en": "Taiwan administrative map — population heatmap"
+  },
+  "description_i18n": {
+    "zh-TW": "以 22 個縣市為單位的方塊型示意圖 (tile cartogram) 呈現臺灣人口分布,將 geo_basemap MCP 工具與人口資料的兩來源結合視覺化。為了讓 playground 完全自包含、不額外載入地圖函式庫,刻意採用 CSS Grid 而非真實地理投影;正式版以 368 個鄉鎮區為單位需連線至載入完整邊界向量的後端 (MapLibre GL + geo_basemap MCP 工具)。",
+    "en": "Population choropleth of Taiwan's 22 counties as a CSS-grid tile cartogram (not a real geographic projection) — visualises the geo_basemap MCP tool joined with population data. The tile-cartogram approach keeps the playground fully self-contained without pulling in a mapping library; a real 368-township render needs a backend with MapLibre GL + full boundary vectors loaded."
+  },
+  "tags": ["geo", "map", "population", "choropleth"],
+  "status": "beta"
+}
