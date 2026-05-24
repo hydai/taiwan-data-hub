@@ -35,9 +35,10 @@
     clippy::explicit_iter_loop
 )]
 
-/// Population summary of a non-empty slice. Returns `None` for an
-/// empty slice so the caller decides how to surface "no data" (a
-/// tool wrapper typically returns `InvalidArguments`).
+/// Population summary of a non-empty slice. Returns `None` for any
+/// of: (a) empty slice, (b) any input is non-finite (NaN / ±∞).
+/// Tool wrappers turn `None` into an `InvalidArguments` response
+/// so callers learn which precondition failed.
 ///
 /// All values are population statistics (divisor `n`), not sample
 /// (divisor `n - 1`). That matches the textbook "describe what's in

@@ -143,18 +143,23 @@ impl ToolHandler for SummaryStatisticsTool {
                 .to_string(),
             input_schema: values_only_schema(),
             output_schema: Some(
+                // Numeric fields are declared nullable to honour
+                // the `finite_or_null` coercion: an overflow in
+                // sum / mean / variance / std_dev for extreme
+                // inputs surfaces as JSON null rather than silently
+                // emitting an invalid number.
                 json!({
                     "type": "object",
                     "required": ["count","mean","median","variance","std_dev","min","max","sum"],
                     "properties": {
                         "count":{"type":"integer"},
-                        "mean":{"type":"number"},
-                        "median":{"type":"number"},
-                        "variance":{"type":"number"},
-                        "std_dev":{"type":"number"},
-                        "min":{"type":"number"},
-                        "max":{"type":"number"},
-                        "sum":{"type":"number"}
+                        "mean":{"type":["number","null"]},
+                        "median":{"type":["number","null"]},
+                        "variance":{"type":["number","null"]},
+                        "std_dev":{"type":["number","null"]},
+                        "min":{"type":["number","null"]},
+                        "max":{"type":["number","null"]},
+                        "sum":{"type":["number","null"]}
                     },
                     "additionalProperties": false,
                 })
@@ -166,17 +171,18 @@ impl ToolHandler for SummaryStatisticsTool {
     }
     async fn call(&self, args: Value) -> Result<Value, ToolError> {
         let values = parse_values_array(&args, "values")?;
-        let s = stats::summary(&values)
-            .ok_or_else(|| ToolError::InvalidArguments("`values` was empty".into()))?;
+        let s = stats::summary(&values).ok_or_else(|| {
+            ToolError::InvalidArguments("`values` was empty or contained non-finite numbers".into())
+        })?;
         Ok(json!({
             "count": s.count,
-            "mean": s.mean,
-            "median": s.median,
-            "variance": s.variance,
-            "std_dev": s.std_dev,
-            "min": s.min,
-            "max": s.max,
-            "sum": s.sum,
+            "mean": finite_or_null(s.mean),
+            "median": finite_or_null(s.median),
+            "variance": finite_or_null(s.variance),
+            "std_dev": finite_or_null(s.std_dev),
+            "min": finite_or_null(s.min),
+            "max": finite_or_null(s.max),
+            "sum": finite_or_null(s.sum),
         }))
     }
 }
@@ -226,7 +232,10 @@ impl ToolHandler for PercentileTool {
                 json!({
                     "type":"object",
                     "required":["value","p"],
-                    "properties": {"value":{"type":"number"},"p":{"type":"number"}},
+                    "properties": {
+                        "value":{"type":["number","null"]},
+                        "p":{"type":"number"}
+                    },
                     "additionalProperties": false,
                 })
                 .as_object()
@@ -240,7 +249,7 @@ impl ToolHandler for PercentileTool {
         let p = parse_required_number(&args, "p", 0.0, 100.0)?;
         let v = stats::percentile(&values, p)
             .ok_or_else(|| ToolError::InvalidArguments("percentile not computable".into()))?;
-        Ok(json!({"value": v, "p": p}))
+        Ok(json!({"value": finite_or_null(v), "p": p}))
     }
 }
 
@@ -288,7 +297,7 @@ impl ToolHandler for HistogramTool {
                     "required":["counts","edges"],
                     "properties": {
                         "counts":{"type":"array","items":{"type":"integer"}},
-                        "edges":{"type":"array","items":{"type":"number"}},
+                        "edges":{"type":"array","items":{"type":["number","null"]}},
                     },
                     "additionalProperties": false,
                 })
@@ -306,7 +315,7 @@ impl ToolHandler for HistogramTool {
         };
         let h = stats::histogram(&values, bins)
             .ok_or_else(|| ToolError::InvalidArguments("histogram not computable".into()))?;
-        Ok(json!({"counts": h.counts, "edges": h.edges}))
+        Ok(json!({"counts": h.counts, "edges": finite_or_null_array(&h.edges)}))
     }
 }
 
@@ -356,7 +365,11 @@ impl ToolHandler for CorrelationTool {
                 "`xs` and `ys` must have the same length".into(),
             ));
         }
-        let r = stats::pearson_correlation(&xs, &ys);
+        // Pearson can theoretically produce non-finite results if
+        // intermediate sums overflow (e.g. inputs near f64::MAX);
+        // map any such case to JSON null so the response stays
+        // valid (`r: null`) instead of carrying an invalid number.
+        let r = stats::pearson_correlation(&xs, &ys).map(finite_or_null);
         Ok(json!({"r": r}))
     }
 }
@@ -390,9 +403,9 @@ impl ToolHandler for LinearRegressionTool {
                     "type":"object",
                     "required":["slope","intercept","r_squared"],
                     "properties":{
-                        "slope":{"type":"number"},
-                        "intercept":{"type":"number"},
-                        "r_squared":{"type":"number"},
+                        "slope":{"type":["number","null"]},
+                        "intercept":{"type":["number","null"]},
+                        "r_squared":{"type":["number","null"]},
                     },
                     "additionalProperties": false,
                 })
@@ -414,9 +427,9 @@ impl ToolHandler for LinearRegressionTool {
             ToolError::InvalidArguments("`xs` has zero variance — slope undefined".into())
         })?;
         Ok(json!({
-            "slope": fit.slope,
-            "intercept": fit.intercept,
-            "r_squared": fit.r_squared,
+            "slope": finite_or_null(fit.slope),
+            "intercept": finite_or_null(fit.intercept),
+            "r_squared": finite_or_null(fit.r_squared),
         }))
     }
 }
@@ -486,11 +499,7 @@ impl ToolHandler for MovingAverageTool {
         let center = parse_optional_bool(&args, "center", false)?;
         let means = stats::moving_average(&values, window, center)
             .ok_or_else(|| ToolError::InvalidArguments("moving_average inputs invalid".into()))?;
-        let json_means: Vec<Value> = means
-            .into_iter()
-            .map(|m| if m.is_nan() { Value::Null } else { json!(m) })
-            .collect();
-        Ok(json!({"means": json_means}))
+        Ok(json!({"means": finite_or_null_array(&means)}))
     }
 }
 
@@ -543,7 +552,7 @@ impl ToolHandler for AutocorrelationTool {
                     "type":"object",
                     "required":["acf"],
                     "properties":{
-                        "acf":{"type":"array","items":{"type":"number"}}
+                        "acf":{"type":"array","items":{"type":["number","null"]}}
                     },
                     "additionalProperties": false,
                 })
@@ -560,7 +569,7 @@ impl ToolHandler for AutocorrelationTool {
                 as usize;
         let acf = stats::autocorrelation(&values, max_lag)
             .ok_or_else(|| ToolError::InvalidArguments("`values` has zero variance".into()))?;
-        Ok(json!({"acf": acf}))
+        Ok(json!({"acf": finite_or_null_array(&acf)}))
     }
 }
 
@@ -611,7 +620,7 @@ impl ToolHandler for DecomposeSeasonalTool {
                     "required":["trend","seasonal","residual","period"],
                     "properties":{
                         "trend":{"type":"array","items":{"type":["number","null"]}},
-                        "seasonal":{"type":"array","items":{"type":"number"}},
+                        "seasonal":{"type":"array","items":{"type":["number","null"]}},
                         "residual":{"type":"array","items":{"type":["number","null"]}},
                         "period":{"type":"integer"},
                     },
@@ -636,9 +645,9 @@ impl ToolHandler for DecomposeSeasonalTool {
         let d = stats::decompose_seasonal_additive(&values, period)
             .ok_or_else(|| ToolError::InvalidArguments("decomposition inputs invalid".into()))?;
         Ok(json!({
-            "trend": nan_to_null(&d.trend),
-            "seasonal": d.seasonal,
-            "residual": nan_to_null(&d.residual),
+            "trend": finite_or_null_array(&d.trend),
+            "seasonal": finite_or_null_array(&d.seasonal),
+            "residual": finite_or_null_array(&d.residual),
             "period": d.period,
         }))
     }
@@ -743,11 +752,26 @@ fn two_series_schema() -> Map<String, Value> {
     .expect("hand-rolled schema must be an object")
 }
 
-fn nan_to_null(values: &[f64]) -> Vec<Value> {
-    values
-        .iter()
-        .map(|v| if v.is_nan() { Value::Null } else { json!(v) })
-        .collect()
+/// Convert an f64 to a JSON number, or `null` for non-finite values.
+///
+/// `serde_json::Value::from(f64)` already maps non-finite values to
+/// `Value::Null` (via `Number::from_f64` returning `None`) — so
+/// `json!(f64::INFINITY)` produces `null` rather than panicking.
+/// This helper makes that contract explicit at the call site so a
+/// reader doesn't have to know the serde-json detail, AND it gives
+/// us a single place to add bound-checking / overflow logging if
+/// the realistic input range ever changes.
+fn finite_or_null(v: f64) -> Value {
+    if v.is_finite() { json!(v) } else { Value::Null }
+}
+
+/// Element-wise [`finite_or_null`] for a slice. Replaces the
+/// earlier `nan_to_null`, which only handled NaN — `±∞` from a
+/// hypothetical overflow would have round-tripped to `Value::Null`
+/// via serde-json's own coercion (correct) but the function name
+/// promised more than it delivered.
+fn finite_or_null_array(values: &[f64]) -> Vec<Value> {
+    values.iter().copied().map(finite_or_null).collect()
 }
 
 #[cfg(test)]
