@@ -32,10 +32,10 @@ impl ToolHandler for TimezoneConvertTool {
             description: "Convert an ISO-8601 datetime between IANA \
                           timezones (e.g. Asia/Taipei → UTC). Input \
                           formats accepted: RFC 3339 (with offset), or \
-                          naive `YYYY-MM-DDTHH:MM:SS` + an explicit \
-                          `from_tz`. Output is RFC 3339 in the target \
-                          tz."
-            .to_string(),
+                          naive `YYYY-MM-DDTHH:MM:SS` / `YYYY-MM-DD \
+                          HH:MM:SS` + an explicit `from_tz`. Output \
+                          is RFC 3339 in the target tz."
+                .to_string(),
             input_schema: input_schema(),
             output_schema: Some(output_schema()),
         }
@@ -191,10 +191,18 @@ fn input_schema() -> Map<String, Value> {
                 "type": "string",
                 "minLength": 1,
                 "pattern": "\\S",
-                "description": "RFC-3339 string (with offset) or `YYYY-MM-DDTHH:MM:SS` + from_tz"
+                "description": "RFC-3339 string (with offset), `YYYY-MM-DDTHH:MM:SS` + from_tz, or `YYYY-MM-DD HH:MM:SS` + from_tz"
             },
             "from_tz": {
+                // The string branch carries `minLength: 1` +
+                // `pattern: "\\S"` so a whitespace-only or
+                // empty-string `from_tz` fails schema validation
+                // at the client instead of being silently
+                // converted to None and then failing server-side
+                // with "datetime lacks a timezone offset…".
                 "type": ["string", "null"],
+                "minLength": 1,
+                "pattern": "\\S",
                 "description": "IANA tz name (e.g. Asia/Taipei). Required when datetime has no offset; supply null / omit otherwise."
             },
             "to_tz": {

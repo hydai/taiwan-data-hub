@@ -179,7 +179,10 @@ impl ToolHandler for Base64DecodeTool {
 }
 
 // =====================================================================
-// url_encode / url_decode  — URL component (encodeURIComponent equivalent)
+// url_encode / url_decode — URL-component percent-encoding. Pass-
+// through set is the RFC 3986 *unreserved* characters
+// (alphanumerics + `-_.~`); stricter than JavaScript's
+// encodeURIComponent (which also leaves `! * ' ( )` unescaped).
 // =====================================================================
 
 pub const TOOL_URL_ENCODE: &str = "encode_url_component";

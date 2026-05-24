@@ -1,5 +1,6 @@
 //! MCP wrappers for the three miscellaneous text tools shipped in
-//! #6.10 batch B: slugify, `regex_test`, `html_sanitize`.
+//! #6.10 batch B: `text_slugify`, `text_regex_test`,
+//! `html_sanitize` (the names registered with the dispatcher).
 
 use async_trait::async_trait;
 use mcp_core::{ToolDescriptor, ToolError, ToolHandler};
@@ -171,6 +172,17 @@ impl ToolHandler for RegexTestTool {
     }
     async fn call(&self, args: Value) -> Result<Value, ToolError> {
         let pattern = parse_text(&args, "pattern", 1024)?;
+        // Defence-in-depth: the schema declares `minLength: 1`
+        // but a caller bypassing schema validation could submit
+        // an empty / whitespace-only pattern. An empty regex
+        // matches at every position, which (capped at 1024)
+        // returns 1024 zero-length matches at offsets 0..1023 —
+        // useless and confusing. Reject up front.
+        if pattern.trim().is_empty() {
+            return Err(ToolError::InvalidArguments(
+                "`pattern` must be a non-empty (non-whitespace) regex".into(),
+            ));
+        }
         let text = parse_text(&args, "text", MAX_TEXT_BYTES)?;
         let re = Regex::new(&pattern)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid regex: {e}")))?;
