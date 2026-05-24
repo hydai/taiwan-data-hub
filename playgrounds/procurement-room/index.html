@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>政府採購戰情室</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<h1>政府採購戰情室 <span class="tag">展示用</span></h1>
+				<p class="muted">
+					三面板儀表板:依年份篩選 <strong>得標前 10 大廠商</strong> ×
+					<strong>年增率突發異常名單</strong> × <strong>各部會發包對比</strong>。
+				</p>
+				<p class="caveat">
+					廠商名稱與金額皆為遵循公開均值生成的合成樣本,並非真實採購紀錄;面板配置可用於評估正式版 UX。
+				</p>
+			</header>
+
+			<form id="filters" aria-label="篩選">
+				<fieldset>
+					<legend>年份</legend>
+					<select id="year"></select>
+				</fieldset>
+				<fieldset>
+					<legend>金額單位</legend>
+					<label>
+						<input type="radio" name="unit" value="m" checked />
+						百萬 (M)
+					</label>
+					<label>
+						<input type="radio" name="unit" value="thousand" />
+						千 (K)
+					</label>
+				</fieldset>
+			</form>
+
+			<section class="grid">
+				<article class="panel" aria-labelledby="top-h">
+					<header>
+						<h2 id="top-h">前 10 大廠商</h2>
+						<p class="muted">依當年得標金額合計排序</p>
+					</header>
+					<ol id="top-list" class="bar-list" aria-live="polite"></ol>
+				</article>
+
+				<article class="panel" aria-labelledby="anom-h">
+					<header>
+						<h2 id="anom-h">異常年增 (≥ 5×)</h2>
+						<p class="muted">與前一年同廠商總額相比突然成長</p>
+					</header>
+					<ul id="anomaly-list" class="anomaly-list" aria-live="polite"></ul>
+				</article>
+
+				<article class="panel panel-wide" aria-labelledby="agency-h">
+					<header>
+						<h2 id="agency-h">各部會發包對比</h2>
+						<p class="muted">當年合計金額,由高到低</p>
+					</header>
+					<ol id="agency-list" class="bar-list" aria-live="polite"></ol>
+				</article>
+			</section>
+
+			<footer>
+				<p class="muted">
+					iframe 沙箱 + 嚴格 CSP 下執行;不發起任何網路呼叫,所有資料皆來自同目錄
+					<code>sample-data.js</code>。
+				</p>
+			</footer>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./sample-data.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>
