@@ -15,6 +15,13 @@ node_modules
 # message without re-running compile.
 /src/lib/paraglide
 
+# inlang-managed files inside `project.inlang/`. `settings.json`
+# is hand-edited and tracked; `.meta.json` + `README.md` are
+# vendored by the tool on every paraglide compile and would
+# otherwise leave a dirty tree after each run.
+/project.inlang/.meta.json
+/project.inlang/README.md
+
 # OS
 .DS_Store
 Thumbs.db
