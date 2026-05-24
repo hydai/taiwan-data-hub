@@ -19,7 +19,7 @@
 	import type { MeUser } from '$lib/gateway/config';
 	import type { GatewayMode } from '$lib/gateway/types';
 
-	import type { Locale as ParaglideLocale } from '$lib/paraglide/runtime';
+	import { deLocalizeUrl, type Locale as ParaglideLocale } from '$lib/paraglide/runtime';
 
 	/**
 	 * Re-export so call sites that imported `Locale` from this module
@@ -72,7 +72,16 @@
 
 		<nav aria-label="Main" class="hidden md:flex md:items-center md:gap-6">
 			{#each navLinks as link (link.href)}
-				{@const active = page.url.pathname.startsWith(link.href)}
+				<!--
+				Active-link check has to compare against the
+				DE-localised URL — `page.url.pathname` keeps
+				the locale prefix (e.g. `/en/datasets`) so a
+				naive `startsWith('/datasets')` would miss
+				every link on non-base-locale pages.
+				`deLocalizeUrl()` strips the prefix so the
+				comparison works for all five locales.
+				-->
+				{@const active = deLocalizeUrl(page.url).pathname.startsWith(link.href)}
 				<a
 					href={resolve(link.href)}
 					class={cn(

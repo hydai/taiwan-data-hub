@@ -12,9 +12,13 @@
  * downstream see the same value.
  *
  * `app.html` substitutes `%paraglide.lang%` with the resolved
- * locale via `transformPageChunk` — the `<html lang>` attribute
- * stays accurate even when the user navigates between locales
- * without a full page reload.
+ * locale via `transformPageChunk` so the initial SSR document
+ * carries the right `<html lang>`. Client-side navigation
+ * across locales doesn't re-render `app.html`, so
+ * `+layout.svelte` runs an `$effect` that re-syncs
+ * `document.documentElement.lang` from the live Paraglide
+ * runtime — between the two paths the `lang` attribute always
+ * matches the active locale.
  */
 
 import type { Handle } from '@sveltejs/kit';
