@@ -551,13 +551,6 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     Some(llms_txt::router(cache))
 }
 
-/// Build the `/.well-known/mcp.json` subrouter (#7.2). Always
-/// mountable — the manifest derives from the in-process
-/// dispatcher + env config, so there's no Storage dependency.
-///
-/// Snapshots the dispatcher at boot so the manifest body is
-/// rendered once; subsequent registrations would not be picked up,
-/// but the registry is fixed for the process lifetime.
 /// Build the `/api/openapi.json` + `/api/docs` + `/api/redoc`
 /// subrouter (#7.5). Logs its own mount line so an operator
 /// grepping the boot log can attribute the `OpenAPI` surfaces to
@@ -569,6 +562,14 @@ fn build_openapi_router() -> Router {
     openapi::router()
 }
 
+/// Build the five `/.well-known/*` subrouter surfaces (#7.2 +
+/// #7.3 + #7.4). Always mountable — every payload derives from
+/// the in-process dispatcher + env config, so there's no
+/// Storage dependency.
+///
+/// Snapshots the dispatcher at boot so the manifest body is
+/// rendered once; subsequent registrations would not be picked up,
+/// but the registry is fixed for the process lifetime.
 fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     let mut meta = well_known::ManifestMeta::defaults(mode, PKG_VERSION);
     if let Some(raw) = non_empty_env(MCP_PUBLIC_URL_ENV) {
