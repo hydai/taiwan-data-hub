@@ -439,13 +439,13 @@ mod tests {
 
     /// Mirrors the SQL `COALESCE(col->>$lang, col->>'zh-TW')` pattern
     /// in Rust so the stub's behavior matches production storage.
+    /// `->>` returns NULL only when the key is absent or its value is
+    /// JSON `null`; an explicit empty string passes through. The pick
+    /// here intentionally does NOT filter `""` so the stub stays in
+    /// lockstep with SQL semantics.
     fn resolve_jsonb_locale(value: &Value, locale: &str) -> Option<String> {
         let obj = value.as_object()?;
-        let pick = |key: &str| {
-            obj.get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-        };
+        let pick = |key: &str| obj.get(key).and_then(Value::as_str);
         pick(locale).or_else(|| pick("zh-TW")).map(str::to_owned)
     }
 
