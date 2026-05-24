@@ -27,6 +27,7 @@ use axum::extract::{Extension, State};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use shared::Mode;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// JSON body for `GET /api/v1/config`. Today only the
@@ -34,7 +35,7 @@ use uuid::Uuid;
 /// (feature toggles, branding, etc.) can extend the struct
 /// without breaking existing clients because added fields are
 /// backwards-compatible additions.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, ToSchema)]
 pub struct ConfigResponse {
     /// `"personal"` or `"multi-user"`. The shape matches
     /// `Mode::as_str` exactly so a new variant on the Rust
@@ -48,7 +49,7 @@ pub struct ConfigResponse {
 /// expired session), `Some(_)` means authenticated. This
 /// shape avoids the 401-vs-200 split the layout would
 /// otherwise have to special-case.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, ToSchema)]
 pub struct MeResponse {
     pub user: Option<MeUser>,
 }
@@ -56,7 +57,7 @@ pub struct MeResponse {
 /// Minimal user identity payload. Only fields the layout
 /// actually consumes — no email or profile data here.
 /// Richer user-profile endpoints land separately when needed.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, ToSchema)]
 pub struct MeUser {
     pub user_id: Uuid,
     /// Session created-at (NOT user created-at). Used by the
@@ -94,7 +95,16 @@ pub fn me_handler() -> axum::routing::MethodRouter<()> {
     axum::routing::get(get_me)
 }
 
-async fn get_config(State(mode): State<Mode>) -> Json<ConfigResponse> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/config",
+    tag = "config",
+    description = "Return the gateway's operating mode. Always-on; no auth or DB dependency.",
+    responses(
+        (status = 200, description = "Resolved mode of the running gateway", body = ConfigResponse),
+    ),
+)]
+pub(crate) async fn get_config(State(mode): State<Mode>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
         mode: mode.as_str(),
     })
