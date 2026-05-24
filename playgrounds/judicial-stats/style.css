@@ -79,8 +79,7 @@ form#filters legend {
 	letter-spacing: 0.04em;
 	padding-right: 0.375rem;
 }
-form#filters select,
-form#filters input {
+form#filters select {
 	font: inherit;
 	padding: 0.25rem 0.5rem;
 	border: 1px solid #d4d4d8;
