@@ -105,7 +105,9 @@ console.log('');
 const hardFailLocales = [...HARD_FAIL_LOCALES].sort().join(', ');
 if (hardErrors > 0) {
 	console.error(
-		`✗ ${hardErrors} hard-fail locale(s) failed coverage. ${hardFailLocales} MUST be 100%.`
+		`✗ ${hardErrors} hard-fail locale(s) drifted from the source key set. ` +
+			`${hardFailLocales} MUST contain exactly the same keys as ${SOURCE_LOCALE} ` +
+			`(no missing and no extra/orphaned).`
 	);
 	process.exit(1);
 }
