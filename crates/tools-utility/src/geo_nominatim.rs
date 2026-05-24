@@ -75,15 +75,26 @@ fn base_url() -> String {
 }
 
 /// Wait until our throttle slot is free, then update the slot for
-/// the next caller. The slot stamp is `now + MIN_INTERVAL` so a
-/// sub-second loop of geocodes naturally gets serialised at 1 Hz.
+/// the next caller. We RESERVE the slot under the lock then DROP
+/// the guard before sleeping — holding the mutex across the sleep
+/// would serialise slot reservation (call A sleeps holding lock,
+/// call B can't even decide when its turn is). With the early
+/// drop, callers form a FIFO queue at the reservation step (which
+/// is sub-microsecond) and then each sleeps independently until
+/// its reserved instant.
 async fn await_slot() {
-    let mut next_at = throttle().lock().await;
+    let reserved = {
+        let mut next_at = throttle().lock().await;
+        let now = Instant::now();
+        let my_slot = (*next_at).max(now);
+        *next_at = my_slot + MIN_INTERVAL;
+        my_slot
+        // Guard drops here at the end of the block.
+    };
     let now = Instant::now();
-    if now < *next_at {
-        tokio::time::sleep(*next_at - now).await;
+    if reserved > now {
+        tokio::time::sleep(reserved - now).await;
     }
-    *next_at = Instant::now() + MIN_INTERVAL;
 }
 
 #[derive(Debug, Error)]

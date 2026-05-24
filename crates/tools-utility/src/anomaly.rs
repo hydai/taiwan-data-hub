@@ -39,17 +39,24 @@ pub fn isolation_scores(values: &[f64]) -> Option<Vec<f64>> {
         return Some(vec![0.0]);
     }
     let mut sorted_with_idx: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    sorted_with_idx.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Total-order sort — `partial_cmp(...).unwrap_or(Equal)` would
+    // silently lie about NaN comparisons. `total_cmp` defines a
+    // total order over every f64 bit pattern, so direct Rust
+    // callers passing NaN don't break the sort invariant.
+    sorted_with_idx.sort_by(|a, b| a.1.total_cmp(&b.1));
     let min = sorted_with_idx.first().unwrap().1;
     let max = sorted_with_idx.last().unwrap().1;
     if min == max {
         return None;
     }
-    // Recursive depth = how many median splits are needed to isolate
-    // each value. Compute via the closed-form solution for sorted
-    // data: a value at rank r (0-indexed) in `n` items lands at
-    // depth ⌈log₂(max(r, n - 1 - r) + 1)⌉ — the farther from the
-    // median, the fewer splits.
+    // Recursive isolation depth: how many median splits are needed
+    // to isolate a value. Closed-form for already-sorted data uses
+    // `min(r, n - 1 - r)` — the distance from the NEAREST edge. A
+    // point at the edge (rank 0 or n-1) has distance 0 → bucket 1
+    // → depth 1 (most anomalous); a point at the median has the
+    // largest distance → deepest bucket → highest depth (least
+    // anomalous). The score is then `1 - normalised_depth` so
+    // edges map to 1.0 and the median to 0.0.
     let mut raw_depths = vec![0_u32; n];
     for (rank, (orig_idx, _)) in sorted_with_idx.iter().enumerate() {
         let dist_from_edge = rank.min(n - 1 - rank);

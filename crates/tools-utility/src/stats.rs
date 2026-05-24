@@ -47,6 +47,13 @@ pub fn summary(values: &[f64]) -> Option<Summary> {
     if values.is_empty() {
         return None;
     }
+    // Reject non-finite inputs explicitly so direct Rust callers
+    // (the module is `pub`-exported, not gated through MCP) can't
+    // poison the Welford accumulator with NaN/±∞. Mirrors what
+    // `histogram` already does for consistency.
+    if !values.iter().all(|v| v.is_finite()) {
+        return None;
+    }
     // Welford's online variance — numerically stable; sums the
     // running mean + M₂ in one pass.
     let mut mean = 0.0;
@@ -94,7 +101,12 @@ pub struct Summary {
 
 fn median(values: &[f64]) -> f64 {
     let mut sorted: Vec<f64> = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // `f64::total_cmp` defines a total order over ALL f64 bit
+    // patterns (including NaN); `partial_cmp(...).unwrap_or(Equal)`
+    // would silently lie about NaN comparisons and break the
+    // sort invariant. Pure helpers are pub-exported so a direct
+    // Rust caller might pass NaN.
+    sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
     if n == 0 {
         f64::NAN
@@ -112,7 +124,8 @@ pub fn percentile(values: &[f64], p: f64) -> Option<f64> {
         return None;
     }
     let mut sorted: Vec<f64> = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Total-order sort — see `median` for the NaN-safety rationale.
+    sorted.sort_by(f64::total_cmp);
     let n = sorted.len();
     if n == 1 {
         return Some(sorted[0]);
@@ -162,13 +175,15 @@ pub fn histogram(values: &[f64], bins: usize) -> Option<Histogram> {
     };
     let actual_bins = edges.len() - 1;
     let mut counts = vec![0_usize; actual_bins];
+    // Compute `step` once outside the loop — it's a function of
+    // min/max/actual_bins, all loop-invariant.
+    let step = (max - min) / actual_bins as f64;
     for &v in values {
         // For the equal-width case `(v - min) / step` can produce
         // `actual_bins` for `v == max` due to floating-point; clamp.
         let idx = if v == max {
             actual_bins - 1
         } else {
-            let step = (max - min) / actual_bins as f64;
             ((v - min) / step).floor() as usize
         };
         let bucket = idx.min(actual_bins - 1);
