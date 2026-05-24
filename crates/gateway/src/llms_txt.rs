@@ -438,7 +438,15 @@ fn render_index(meta: &LlmsTxtMeta, page_count: usize) -> String {
         "\nThe full catalog is paginated across **{page_count}** pages because the rendered document exceeds 5 MB.\n\n## Pages\n\n",
     );
     for n in 1..=page_count {
-        let _ = writeln!(out, "- [Page {n}](/llms-page/{n}) — <{base}/llms-page/{n}>");
+        // Both the markdown link href and the angle-bracket URL use
+        // `meta.public_base_url` so the rendered document works
+        // behind a reverse proxy that mounts the gateway on a
+        // subpath. A bare `/llms-page/{n}` would resolve to the
+        // domain root and 404.
+        let _ = writeln!(
+            out,
+            "- [Page {n}]({base}/llms-page/{n}) — <{base}/llms-page/{n}>"
+        );
     }
     out
 }
@@ -692,9 +700,14 @@ fn imf_fixdate_header(generated_at: DateTime<Utc>) -> Option<HeaderValue> {
 /// strip the prefix before comparing. Our stored `etag` is always
 /// strong (no `W/`), so the comparison reduces to literal equality
 /// of the quoted-string portion.
+///
+/// Splitting on bare commas is unsafe: entity-tag opaque-tag
+/// content is a quoted-string and may contain commas literally.
+/// Use a quote-aware split that only treats a comma as a
+/// separator when it sits outside `"..."`.
 fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
-    for raw in header_value.split(',') {
-        let entry = raw.trim();
+    for entry in split_outside_quotes(header_value) {
+        let entry = entry.trim();
         if entry.is_empty() {
             continue;
         }
@@ -707,6 +720,35 @@ fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
         }
     }
     false
+}
+
+/// Split `input` on top-level commas — commas inside `"..."` are
+/// preserved verbatim. Backslash escapes inside quotes are
+/// honoured (per RFC 9110's quoted-string grammar) so a quoted
+/// tag carrying `\"` doesn't terminate the quote early.
+fn split_outside_quotes(input: &str) -> Vec<&str> {
+    let bytes = input.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match b {
+            b'\\' if in_quotes => escape = true,
+            b'"' => in_quotes = !in_quotes,
+            b',' if !in_quotes => {
+                parts.push(&input[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&input[start..]);
+    parts
 }
 
 fn success_response(body: Bytes, etag: &str, generated_at: DateTime<Utc>) -> Response {
@@ -952,6 +994,28 @@ mod tests {
     fn if_none_match_ignores_empty_entries() {
         assert!(if_none_match_matches(",,\"abc\",", "\"abc\""));
         assert!(!if_none_match_matches(",,", "\"abc\""));
+    }
+
+    #[test]
+    fn if_none_match_handles_comma_inside_quoted_tag() {
+        // Per RFC 9110 the opaque-tag is a quoted-string so commas
+        // inside `"..."` are part of the tag, not list separators.
+        // A naive `.split(',')` would have split this into two
+        // entries and produced a false negative.
+        let stored = "\"abc,def\"";
+        assert!(if_none_match_matches(stored, stored));
+        // Mixed list: a benign quoted-comma tag plus a stored hit.
+        assert!(if_none_match_matches("\"xyz,zzz\", \"abc,def\"", stored));
+    }
+
+    #[test]
+    fn if_none_match_preserves_backslash_escaped_quote() {
+        // Backslash escape inside quoted-string lets the tag carry
+        // a literal `"` without terminating the quote. The split
+        // helper must honour that or it'll think the quote
+        // closed mid-tag and start splitting on internal commas.
+        let stored = "\"a\\\"b,c\"";
+        assert!(if_none_match_matches(stored, stored));
     }
 
     #[test]
