@@ -47,11 +47,24 @@ const source = loadCatalog(SOURCE_LOCALE);
 console.log(`i18n coverage check — source: ${SOURCE_LOCALE} (${source.keys.size} keys)`);
 console.log('');
 
+const discovered = discoverLocales();
+// Belt-and-braces: a deleted or renamed messages/<hard-fail>.json
+// would silently drop the locale from `discovered`, skipping its
+// gate. Assert presence up-front so the failure is loud and obvious.
+const missingHardFail = [...HARD_FAIL_LOCALES].filter((l) => !discovered.includes(l));
+if (missingHardFail.length > 0) {
+	console.error(
+		`✗ Hard-fail locale(s) have no catalog file: ${missingHardFail.join(', ')}. ` +
+			`Restore web/messages/<locale>.json or update HARD_FAIL_LOCALES.`
+	);
+	process.exit(1);
+}
+
 let hardErrors = 0;
 let warnings = 0;
 const summary = [];
 
-for (const locale of discoverLocales()) {
+for (const locale of discovered) {
 	const target = loadCatalog(locale);
 	const { missing, extra } = diff(source.keys, target.keys);
 	const coverage =
