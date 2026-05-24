@@ -398,36 +398,40 @@ fn try_render_single_page(meta: &LlmsTxtMeta, hits: &[SearchHit], cap: usize) ->
 fn paginate_hits(meta: &LlmsTxtMeta, hits: &[SearchHit], limits: &Limits) -> Vec<String> {
     let mut pages = Vec::new();
     let mut current = String::with_capacity(limits.page_budget / 4);
+    let mut entry_buf = String::new();
     let mut page_index = 1usize;
+    // Counter replaces the previous `buf.contains("\n- [")` probe
+    // — that scanned the whole (potentially multi-MB) page on
+    // every iteration. Tracking the per-page entry count is O(1).
+    let mut entries_on_current_page: usize = 0;
     start_page(&mut current, meta, page_index);
 
     for hit in hits {
-        let mut entry = String::new();
-        write_hit(&mut entry, meta, hit);
-        if current.len() + entry.len() > limits.page_budget && current_has_any_entries(&current) {
+        // Reuse `entry_buf` instead of allocating a fresh `String`
+        // per hit — for large catalogs the loop runs N times,
+        // and the previous shape was one allocate + one memcpy
+        // per entry. `.clear()` keeps the backing capacity so
+        // each subsequent `write_hit` writes in place.
+        entry_buf.clear();
+        write_hit(&mut entry_buf, meta, hit);
+        if current.len() + entry_buf.len() > limits.page_budget && entries_on_current_page > 0 {
+            // Splitting on a header-only page would leave it empty.
+            // The `entries_on_current_page > 0` guard prevents that
+            // for a single oversized entry that exceeds the budget
+            // on its own — that entry gets the page to itself,
+            // overflowing the budget by a bounded amount.
             finalise_page(&mut current, meta, page_index);
             pages.push(std::mem::take(&mut current));
             page_index += 1;
+            entries_on_current_page = 0;
             start_page(&mut current, meta, page_index);
         }
-        current.push_str(&entry);
+        current.push_str(&entry_buf);
+        entries_on_current_page += 1;
     }
     finalise_page(&mut current, meta, page_index);
     pages.push(current);
     pages
-}
-
-/// Marker the page-start template ends with so [`paginate_hits`] can
-/// tell "header only" from "header + at least one entry" without an
-/// extra counter. The literal `"## Datasets"` line appears exactly
-/// once per page.
-fn current_has_any_entries(buf: &str) -> bool {
-    // After `start_page` writes the header and "## Datasets" line,
-    // any subsequent dataset entry appends a `- [` bullet. Detecting
-    // that bullet avoids splitting on a page that has nothing on it
-    // yet — preventing an empty trailing page when a single dataset's
-    // description happens to push us over the limit on its own.
-    buf.contains("\n- [")
 }
 
 fn start_page(out: &mut String, meta: &LlmsTxtMeta, page_number: usize) {
