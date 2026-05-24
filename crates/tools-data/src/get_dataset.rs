@@ -60,7 +60,7 @@ impl ToolHandler for GetDatasetTool {
         let key = req.key();
         let full = self
             .reader
-            .get_dataset(key)
+            .get_dataset(key, &req.locale)
             .await
             .map_err(|e| ToolError::Execution(format!("storage: {e}")))?;
         let Some(full) = full else {
@@ -171,6 +171,9 @@ fn kind_of(v: &Value) -> &'static str {
 }
 
 /// Render `DatasetFull` into the schema-shaped JSON the tool advertises.
+/// i18n fields are already locale-resolved by the storage layer
+/// (#7.9 SQL COALESCE pattern) — `locale` here only labels the
+/// response envelope.
 fn render_full(full: &DatasetFull, locale: &str) -> Value {
     let d = &full.dataset;
     let mut dataset = Map::new();
@@ -180,16 +183,9 @@ fn render_full(full: &DatasetFull, locale: &str) -> Value {
     dataset.insert("slug".into(), Value::String(d.slug.clone()));
     dataset.insert("tier".into(), Value::String(d.tier.clone()));
     dataset.insert("license".into(), Value::String(d.license.clone()));
-    dataset.insert(
-        "name".into(),
-        resolve_i18n(&d.title_i18n, locale).map_or(Value::Null, Value::String),
-    );
-    if let Some(desc) = d
-        .description_i18n
-        .as_ref()
-        .and_then(|v| resolve_i18n(v, locale))
-    {
-        dataset.insert("description".into(), Value::String(desc));
+    dataset.insert("name".into(), Value::String(d.title.clone()));
+    if let Some(desc) = &d.description {
+        dataset.insert("description".into(), Value::String(desc.clone()));
     }
     if let Some(p) = &d.publisher {
         dataset.insert("publisher".into(), Value::String(p.clone()));
@@ -280,19 +276,6 @@ fn render_file(f: &DatasetFileRow) -> Value {
         out.insert("checksum".into(), Value::String(c.clone()));
     }
     Value::Object(out)
-}
-
-/// Pick the best string for `locale` from a jsonb i18n map, falling
-/// back to zh-TW per CLAUDE.md. Returns `None` when both the
-/// requested locale and zh-TW are missing or non-string.
-fn resolve_i18n(value: &Value, locale: &str) -> Option<String> {
-    let obj = value.as_object()?;
-    let pick = |key: &str| {
-        obj.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-    };
-    pick(locale).or_else(|| pick("zh-TW")).map(str::to_owned)
 }
 
 fn input_schema() -> Map<String, Value> {
@@ -402,24 +385,29 @@ mod tests {
     };
 
     /// In-memory reader for unit tests — no Postgres needed.
+    ///
+    /// Production storage runs `COALESCE(col->>$lang, col->>'zh-TW')`
+    /// at the SQL boundary; this stub keeps the raw i18n maps next to
+    /// the row and resolves them in Rust on each call so unit tests
+    /// can still exercise locale fallback end-to-end.
     struct StubReader {
-        by_id: BTreeMap<Uuid, DatasetFull>,
+        rows: BTreeMap<Uuid, (DatasetFull, Value, Option<Value>)>,
         by_slug: BTreeMap<String, Uuid>,
     }
 
     impl StubReader {
-        fn new(full: DatasetFull) -> Self {
-            let mut by_id = BTreeMap::new();
+        fn new(full: DatasetFull, title_i18n: Value, description_i18n: Option<Value>) -> Self {
+            let mut rows = BTreeMap::new();
             let mut by_slug = BTreeMap::new();
             let id = full.dataset.id;
             let slug = full.dataset.slug.clone();
-            by_id.insert(id, full);
             by_slug.insert(slug, id);
-            Self { by_id, by_slug }
+            rows.insert(id, (full, title_i18n, description_i18n));
+            Self { rows, by_slug }
         }
         fn empty() -> Self {
             Self {
-                by_id: BTreeMap::new(),
+                rows: BTreeMap::new(),
                 by_slug: BTreeMap::new(),
             }
         }
@@ -427,13 +415,38 @@ mod tests {
 
     #[async_trait]
     impl DatasetReader for StubReader {
-        async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
+        async fn get_dataset(
+            &self,
+            key: DatasetKey,
+            lang: &str,
+        ) -> Result<Option<DatasetFull>, StorageError> {
             let id = match key {
                 DatasetKey::Id(id) => Some(id),
                 DatasetKey::Slug(slug) => self.by_slug.get(&slug).copied(),
             };
-            Ok(id.and_then(|i| self.by_id.get(&i).cloned()))
+            Ok(id
+                .and_then(|i| self.rows.get(&i))
+                .map(|(full, title_i18n, description_i18n)| {
+                    let mut out = full.clone();
+                    out.dataset.title = resolve_jsonb_locale(title_i18n, lang).unwrap_or_default();
+                    out.dataset.description = description_i18n
+                        .as_ref()
+                        .and_then(|v| resolve_jsonb_locale(v, lang));
+                    out
+                }))
         }
+    }
+
+    /// Mirrors the SQL `COALESCE(col->>$lang, col->>'zh-TW')` pattern
+    /// in Rust so the stub's behavior matches production storage.
+    fn resolve_jsonb_locale(value: &Value, locale: &str) -> Option<String> {
+        let obj = value.as_object()?;
+        let pick = |key: &str| {
+            obj.get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        };
+        pick(locale).or_else(|| pick("zh-TW")).map(str::to_owned)
     }
 
     fn fixed_time() -> DateTime<Utc> {
@@ -442,19 +455,24 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    fn sample_full() -> DatasetFull {
+    /// Returns the bare row (with empty title/description — those are
+    /// resolved per-call by the stub) and the raw i18n maps so the
+    /// stub can mimic SQL COALESCE for any requested locale.
+    fn sample_full() -> (DatasetFull, Value, Option<Value>) {
         let dataset_id = Uuid::parse_str("019071a2-e1cb-7c11-9c1d-3e8a01b87000").unwrap();
         let version_id = Uuid::parse_str("019071a2-e1cb-7c11-9c1d-3e8a01b87100").unwrap();
         let file_id = Uuid::parse_str("019071a2-e1cb-7c11-9c1d-3e8a01b87200").unwrap();
-        DatasetFull {
+        let title_i18n = json!({"zh-TW": "實價登錄價格", "en": "Real estate prices"});
+        let description_i18n = Some(json!({"zh-TW": "全國不動產交易實價揭露"}));
+        let full = DatasetFull {
             dataset: DatasetRow {
                 id: dataset_id,
                 source: "data_gov_tw".into(),
                 source_id: "11102".into(),
                 slug: "real-estate-prices".into(),
                 domain_id: 1,
-                title_i18n: json!({"zh-TW": "實價登錄價格", "en": "Real estate prices"}),
-                description_i18n: Some(json!({"zh-TW": "全國不動產交易實價揭露"})),
+                title: String::new(),
+                description: None,
                 tier: "bronze".into(),
                 license: "政府資料開放授權條款-第1版".into(),
                 publisher: Some("內政部地政司".into()),
@@ -485,7 +503,8 @@ mod tests {
                     checksum: Some("def456".into()),
                 }],
             }],
-        }
+        };
+        (full, title_i18n, description_i18n)
     }
 
     fn invoke(reader: impl DatasetReader, args: Value) -> Result<Value, ToolError> {
@@ -505,9 +524,13 @@ mod tests {
 
     #[test]
     fn lookup_by_id_returns_full_view_in_default_locale() {
-        let full = sample_full();
+        let (full, title, desc) = sample_full();
         let id = full.dataset.id;
-        let out = invoke(StubReader::new(full), json!({"id": id.to_string()})).expect("ok");
+        let out = invoke(
+            StubReader::new(full, title, desc),
+            json!({"id": id.to_string()}),
+        )
+        .expect("ok");
         assert_eq!(out["locale"], "zh-TW");
         assert_eq!(out["dataset"]["slug"], "real-estate-prices");
         assert_eq!(out["dataset"]["name"], "實價登錄價格");
@@ -521,8 +544,9 @@ mod tests {
 
     #[test]
     fn lookup_by_slug_resolves_locale() {
+        let (full, title, desc) = sample_full();
         let out = invoke(
-            StubReader::new(sample_full()),
+            StubReader::new(full, title, desc),
             json!({"slug": "real-estate-prices", "locale": "en"}),
         )
         .expect("ok");
@@ -584,8 +608,9 @@ mod tests {
 
     #[test]
     fn locale_falls_back_to_zh_tw_for_unknown_language() {
+        let (full, title, desc) = sample_full();
         let out = invoke(
-            StubReader::new(sample_full()),
+            StubReader::new(full, title, desc),
             json!({"slug": "real-estate-prices", "locale": "ja"}),
         )
         .expect("ok");

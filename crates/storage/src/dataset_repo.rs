@@ -12,15 +12,29 @@ use uuid::Uuid;
 /// Object-safe read trait so tool implementations (#1.6, #1.7, ...)
 /// can be unit-tested with an in-memory stub rather than depending
 /// on a live Postgres pool. [`Storage`] is the production impl.
+///
+/// `lang` is the requested locale (BCP-47, e.g. `"en"`). The repo
+/// resolves `title_i18n` / `description_i18n` via the project-wide
+/// `COALESCE(col->>$lang, col->>'zh-TW')` pattern so callers receive
+/// already-resolved `String`s on `DatasetRow`. Unknown locales fall
+/// back to zh-TW per CLAUDE.md.
 #[async_trait]
 pub trait DatasetReader: Send + Sync + 'static {
-    async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError>;
+    async fn get_dataset(
+        &self,
+        key: DatasetKey,
+        lang: &str,
+    ) -> Result<Option<DatasetFull>, StorageError>;
 }
 
 #[async_trait]
 impl DatasetReader for Storage {
-    async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
-        Storage::get_dataset(self, key).await
+    async fn get_dataset(
+        &self,
+        key: DatasetKey,
+        lang: &str,
+    ) -> Result<Option<DatasetFull>, StorageError> {
+        Storage::get_dataset(self, key, lang).await
     }
 }
 
@@ -468,10 +482,11 @@ impl DatasetKey {
     }
 }
 
-/// One row from the `datasets` table, untouched by i18n resolution —
-/// callers (tool layer) decide which locale to render. JSONB columns
-/// are returned as `serde_json::Value` so tests can assert against
-/// shapes without re-binding the schema in Rust types.
+/// One row from the `datasets` table with i18n strings already
+/// resolved to the caller's requested locale (with zh-TW fallback,
+/// per #7.9). The repo runs `COALESCE(col->>$lang, col->>'zh-TW')`
+/// at the SQL boundary so neither the tool layer nor the wire format
+/// carries the full multi-locale JSONB.
 #[derive(Debug, Clone, Default, FromRow)]
 pub struct DatasetRow {
     pub id: Uuid,
@@ -479,8 +494,8 @@ pub struct DatasetRow {
     pub source_id: String,
     pub slug: String,
     pub domain_id: i16,
-    pub title_i18n: Value,
-    pub description_i18n: Option<Value>,
+    pub title: String,
+    pub description: Option<String>,
     pub tier: String,
     pub license: String,
     pub publisher: Option<String>,
@@ -753,7 +768,11 @@ impl Storage {
     /// commits that landed between the initial dataset lookup and
     /// the join — including a file row whose parent version was
     /// already dropped.
-    pub async fn get_dataset(&self, key: DatasetKey) -> Result<Option<DatasetFull>, StorageError> {
+    pub async fn get_dataset(
+        &self,
+        key: DatasetKey,
+        lang: &str,
+    ) -> Result<Option<DatasetFull>, StorageError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *tx)
@@ -763,12 +782,14 @@ impl Storage {
             DatasetKey::Id(id) => {
                 sqlx::query_as::<_, DatasetRow>(DATASET_BY_ID_SQL)
                     .bind(id)
+                    .bind(lang)
                     .fetch_optional(&mut *tx)
                     .await?
             }
             DatasetKey::Slug(slug) => {
                 sqlx::query_as::<_, DatasetRow>(DATASET_BY_SLUG_SQL)
                     .bind(slug)
+                    .bind(lang)
                     .fetch_optional(&mut *tx)
                     .await?
             }
@@ -1307,10 +1328,16 @@ pub enum StorageError {
 // new field added to `DatasetRow` must be added here in lockstep, and
 // the testcontainers tests catch the drift at `cargo test`.
 
+// $2 is the requested locale; the COALESCE chain falls back to the
+// zh-TW source per CLAUDE.md / #7.9. Column aliases (`title`,
+// `description`) match the resolved fields on `DatasetRow` so sqlx's
+// `FromRow` decoder matches by name.
 const DATASET_BY_ID_SQL: &str = "
     SELECT
         id, source, source_id, slug, domain_id,
-        title_i18n, description_i18n, tier, license, publisher,
+        COALESCE(title_i18n->>$2::text, title_i18n->>'zh-TW') AS title,
+        COALESCE(description_i18n->>$2::text, description_i18n->>'zh-TW') AS description,
+        tier, license, publisher,
         update_frequency, original_url, source_url, license_url,
         schema_json, row_count_estimate,
         last_modified_at, first_seen_at, fetched_at
@@ -1321,7 +1348,9 @@ const DATASET_BY_ID_SQL: &str = "
 const DATASET_BY_SLUG_SQL: &str = "
     SELECT
         id, source, source_id, slug, domain_id,
-        title_i18n, description_i18n, tier, license, publisher,
+        COALESCE(title_i18n->>$2::text, title_i18n->>'zh-TW') AS title,
+        COALESCE(description_i18n->>$2::text, description_i18n->>'zh-TW') AS description,
+        tier, license, publisher,
         update_frequency, original_url, source_url, license_url,
         schema_json, row_count_estimate,
         last_modified_at, first_seen_at, fetched_at
@@ -1734,14 +1763,14 @@ mod tests {
         // By id — Uuid::nil() will never match a real row (and we
         // don't need the v4 feature just to mint a random one).
         let by_id = storage
-            .get_dataset(DatasetKey::id(Uuid::nil()))
+            .get_dataset(DatasetKey::id(Uuid::nil()), "zh-TW")
             .await
             .expect("ok");
         assert!(by_id.is_none(), "unknown UUID must yield None");
 
         // By slug
         let by_slug = storage
-            .get_dataset(DatasetKey::slug("nope-not-here"))
+            .get_dataset(DatasetKey::slug("nope-not-here"), "zh-TW")
             .await
             .expect("ok");
         assert!(by_slug.is_none(), "unknown slug must yield None");
@@ -1782,13 +1811,14 @@ mod tests {
 
         // ── by id ──
         let by_id = storage
-            .get_dataset(DatasetKey::id(dataset_id))
+            .get_dataset(DatasetKey::id(dataset_id), "zh-TW")
             .await
             .expect("ok")
             .expect("present");
         assert_eq!(by_id.dataset.id, dataset_id);
         assert_eq!(by_id.dataset.slug, "real-estate-prices");
         assert_eq!(by_id.dataset.tier, "bronze", "default tier on first insert");
+        assert_eq!(by_id.dataset.title, "實價登錄價格", "zh-TW source title");
         assert_eq!(by_id.versions.len(), 1);
         let v0 = &by_id.versions[0];
         assert_eq!(v0.version.version, "2026.04");
@@ -1800,13 +1830,45 @@ mod tests {
 
         // ── by slug ── must produce the same view ──
         let by_slug = storage
-            .get_dataset(DatasetKey::slug("real-estate-prices"))
+            .get_dataset(DatasetKey::slug("real-estate-prices"), "zh-TW")
             .await
             .expect("ok")
             .expect("present");
         assert_eq!(by_slug.dataset.id, dataset_id);
         assert_eq!(by_slug.versions.len(), 1);
         assert_eq!(by_slug.versions[0].files.len(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn get_dataset_resolves_locale_with_zh_tw_fallback() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("seed");
+
+        // en hit — title has both zh-TW and en
+        let en = storage
+            .get_dataset(DatasetKey::slug("real-estate-prices"), "en")
+            .await
+            .expect("ok")
+            .expect("present");
+        assert_eq!(en.dataset.title, "Real estate prices");
+        // description only carries zh-TW → COALESCE falls back
+        assert_eq!(
+            en.dataset.description.as_deref(),
+            Some("全國不動產交易實價揭露")
+        );
+
+        // unknown locale → falls back to zh-TW
+        let ja = storage
+            .get_dataset(DatasetKey::slug("real-estate-prices"), "ja")
+            .await
+            .expect("ok")
+            .expect("present");
+        assert_eq!(ja.dataset.title, "實價登錄價格");
     }
 
     #[tokio::test]
@@ -1820,7 +1882,7 @@ mod tests {
             .expect("seed");
 
         let full = storage
-            .get_dataset(DatasetKey::id(dataset_id))
+            .get_dataset(DatasetKey::id(dataset_id), "zh-TW")
             .await
             .expect("ok")
             .expect("present");
