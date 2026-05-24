@@ -3,7 +3,10 @@
  * Exercises every framework API exposed by `window.tdh`:
  *   - `getState`  — read the initial state from the share-link URL
  *   - `setState`  — update the share-link URL on every counter change
- *   - `fetch`     — proxy a GET /api/v1/healthz call through the parent
+ *   - `fetch`     — proxy a GET /api/v1/config call through the parent
+ *                   (chosen because it's allowlisted as an unthrottled
+ *                   probe in the gateway's rate-limit middleware, so
+ *                   the demo never trips a 429)
  *
  * Authored as plain ES2018 — no bundler runs on this file, the
  * browser executes it verbatim under the iframe sandbox.
@@ -37,7 +40,7 @@
 	document.getElementById('ping').addEventListener('click', async function () {
 		apiOut.textContent = 'Calling…';
 		try {
-			var res = await window.tdh.fetch('/api/v1/healthz');
+			var res = await window.tdh.fetch('/api/v1/config');
 			var body = await res.text();
 			apiOut.textContent = 'HTTP ' + res.status + '\n' + body;
 		} catch (e) {

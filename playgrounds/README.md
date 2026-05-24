@@ -16,8 +16,15 @@ reach the gateway is through the framework-provided helpers.
        manifest.json     # metadata (see schema below)
        index.html        # entry point loaded inside the iframe
        app.js            # main script — referenced by index.html
-       (other assets)    # any extra .js, .css, .svg, .png; served as-is
+       (other assets)    # any extra .js, .mjs, .css, .json, .svg,
+                         #   .txt, or .html; served as-is.
    ```
+
+   **Text-only assets for now.** The build-time loader reads each
+   file as a UTF-8 string (`?raw`), which would corrupt PNG / JPG /
+   WOFF / other binary content. Restricting the contract to text
+   formats keeps the framework simple; binary support can ship in a
+   future iteration with a parallel `?url` loader.
 
 3. **No inline `<script>` tags.** The CSP forbids them. Put logic in
    `app.js` and load it via `<script src="./app.js"></script>`.
@@ -55,7 +62,7 @@ the build, not first request.
 ## Framework API
 
 A small global `tdh` is injected by `index.html` (via the framework's
-shim — see `web/src/lib/playgrounds/client.ts`). It exposes:
+shim — see `web/src/lib/playgrounds/shim.js`). It exposes:
 
 ### `tdh.getState<T>(): Promise<T | null>`
 

@@ -60,6 +60,34 @@ interface RegistryEntry {
 	assets: Map<string, string>;
 }
 
+/**
+ * Asset extensions the framework serves from a playground directory.
+ * Restricted to text-encodable formats because the build-time loader
+ * uses `?raw` (UTF-8 string), which would corrupt binary content
+ * like PNG / JPG / WOFF. If a playground needs binary assets in a
+ * future iteration, add a parallel `?url` glob + a binary-aware
+ * serving path; for now reject so the failure is loud at build,
+ * not silent at request time.
+ *
+ * Declared BEFORE `buildRegistry()` runs so `collectAssets` (which
+ * is hoisted but references this set) doesn't hit the const's
+ * temporal dead zone during module evaluation.
+ */
+const ALLOWED_ASSET_EXTENSIONS: ReadonlySet<string> = new Set([
+	'js',
+	'mjs',
+	'css',
+	'json',
+	'svg',
+	'txt',
+	'html'
+]);
+
+function extensionOf(filename: string): string {
+	const dot = filename.lastIndexOf('.');
+	return dot < 0 ? '' : filename.slice(dot + 1).toLowerCase();
+}
+
 const REGISTRY: ReadonlyMap<string, RegistryEntry> = buildRegistry();
 
 function buildRegistry(): Map<string, RegistryEntry> {
@@ -158,6 +186,15 @@ function collectAssets(slug: string): Map<string, string> {
 		// belt — Vite's glob shouldn't ever produce these, but the
 		// downstream router uses the filename verbatim.
 		if (filename.includes('/') || filename.includes('..')) continue;
+		const ext = extensionOf(filename);
+		if (!ALLOWED_ASSET_EXTENSIONS.has(ext)) {
+			throw new Error(
+				`playgrounds/${slug}: asset "${filename}" has unsupported extension ".${ext}". ` +
+					`Allowed text-only extensions: ${[...ALLOWED_ASSET_EXTENSIONS].join(', ')}. ` +
+					`Binary assets (PNG, JPG, WOFF, …) would be corrupted by the ?raw loader; ` +
+					`they need a binary-aware path that doesn't exist yet.`
+			);
+		}
 		out.set(filename, body);
 	}
 	return out;

@@ -70,7 +70,16 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 		path: string,
 		init: { method?: string; headers?: Record<string, string>; body?: string } | undefined
 	): Promise<void> {
-		if (!path.startsWith(PLAYGROUND_GATEWAY_PREFIX)) {
+		// Allowlist by NORMALISED same-origin pathname, not raw
+		// `startsWith`. A naive prefix check is bypassable with dot-
+		// segments like `/api/v1/../../admin` — the literal string
+		// matches `/api/v1/` but `fetch()` then resolves the URL
+		// against the page origin and normalises it to `/admin`.
+		// `URL`'s constructor does that normalisation for us; we
+		// reject anything that doesn't land back inside the allowed
+		// prefix.
+		const normalised = safeGatewayPath(path);
+		if (normalised === null) {
 			iframe.contentWindow?.postMessage(
 				{
 					type: PLAYGROUND_MSG_TYPES.API_RESPONSE,
@@ -79,14 +88,14 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 					status: 0,
 					contentType: null,
 					body: '',
-					error: `Path "${path}" rejected: must start with ${PLAYGROUND_GATEWAY_PREFIX}`
+					error: `Path "${path}" rejected: must resolve under ${PLAYGROUND_GATEWAY_PREFIX} (same-origin, no dot-segment escape)`
 				},
 				'*'
 			);
 			return;
 		}
 		try {
-			const res = await fetch(path, {
+			const res = await fetch(normalised, {
 				method: init?.method ?? 'GET',
 				headers: init?.headers,
 				body: init?.body
@@ -158,4 +167,26 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 			pendingUrlUpdate = null;
 		}
 	};
+}
+
+/**
+ * Normalise an iframe-supplied `path` against the page origin and
+ * return the same-origin pathname iff it sits under
+ * `PLAYGROUND_GATEWAY_PREFIX`. Returns `null` on any escape (cross
+ * -origin, dot-segments that leave the prefix, malformed URL).
+ *
+ * Exported for tests; not part of the runtime API surface.
+ */
+export function safeGatewayPath(rawPath: string): string | null {
+	let parsed: URL;
+	try {
+		parsed = new URL(rawPath, window.location.origin);
+	} catch {
+		return null;
+	}
+	if (parsed.origin !== window.location.origin) return null;
+	if (!parsed.pathname.startsWith(PLAYGROUND_GATEWAY_PREFIX)) return null;
+	// Return the normalised pathname (+ search + hash) so the proxied
+	// fetch hits the canonical URL the allowlist actually approved.
+	return parsed.pathname + parsed.search + parsed.hash;
 }

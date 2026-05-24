@@ -10,6 +10,12 @@ COPY web/package.json web/
 RUN pnpm install --frozen-lockfile
 
 COPY web web
+# The web build discovers playground apps under the sibling
+# `playgrounds/` directory at compile time via Vite's
+# `import.meta.glob('/../playgrounds/*/...')`. Without this copy
+# the build sees an empty playgrounds dir, the registry ships
+# empty, and `/playgrounds/<slug>` 404s in production.
+COPY playgrounds playgrounds
 
 RUN pnpm --filter web build
 
