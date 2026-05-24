@@ -512,16 +512,24 @@ fn write_hit(out: &mut String, meta: &LlmsTxtMeta, hit: &SearchHit) {
 /// dominate the page. Cut at a char boundary, suffix with `…` so
 /// agents see the truncation. The cap is generous enough that most
 /// real descriptions land untouched.
+///
+/// Implementation walks the iterator at most `MAX_CHARS + 1` times
+/// to detect truncation, so a pathologically large description
+/// doesn't make snapshot builds O(n) on the full string. The
+/// trailing `.next()` after `take(MAX_CHARS)` tells us whether more
+/// chars remain without consuming them all.
 fn truncate_description(s: &str) -> String {
     const MAX_CHARS: usize = 280;
     let trimmed = s.trim();
-    let char_count = trimmed.chars().count();
-    if char_count <= MAX_CHARS {
-        return trimmed.to_string();
+    let mut iter = trimmed.chars();
+    let head: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        let mut out = head;
+        out.push('…');
+        out
+    } else {
+        head
     }
-    let mut out: String = trimmed.chars().take(MAX_CHARS).collect();
-    out.push('…');
-    out
 }
 
 /// Escape characters that would otherwise break the markdown shape
@@ -962,6 +970,22 @@ mod tests {
         let cut = truncate_description(&long);
         assert!(cut.ends_with('…'));
         assert_eq!(cut.chars().count(), 281, "max-chars + ellipsis");
+    }
+
+    #[test]
+    fn truncate_description_leaves_short_strings_untouched() {
+        // Exactly at the cap → no ellipsis. The implementation
+        // walks at most MAX_CHARS + 1 chars to decide truncation,
+        // so a 280-char input is consumed completely and the
+        // `iter.next()` probe returns `None`.
+        let exactly_max = "x".repeat(280);
+        let cut = truncate_description(&exactly_max);
+        assert!(!cut.ends_with('…'));
+        assert_eq!(cut.chars().count(), 280);
+
+        // Below the cap → still no ellipsis.
+        let short = "short description";
+        assert_eq!(truncate_description(short), short);
     }
 
     #[test]

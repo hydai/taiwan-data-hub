@@ -525,6 +525,16 @@ fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
     if url.fragment().is_some() {
         return Err("must not carry a fragment".into());
     }
+    // Userinfo (`user:pass@host`) would be rendered verbatim into
+    // every cross-link in `/llms*.txt`, leaking credentials to any
+    // agent that fetches the document. Reject defensively even
+    // though operators are unlikely to set this on purpose.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "must not carry userinfo (user:pass@) — credentials would leak into rendered links"
+                .into(),
+        );
+    }
     Ok(trimmed.to_owned())
 }
 
@@ -1535,6 +1545,17 @@ mod tests {
         assert!(err.contains("query"), "unexpected error: {err}");
         let err = normalise_llms_txt_base_url("https://example.com/#frag").unwrap_err();
         assert!(err.contains("fragment"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_userinfo() {
+        // Credentials in the base URL would be rendered verbatim
+        // into every cross-link the gateway serves. Reject both
+        // user-only and user:pass shapes.
+        let err = normalise_llms_txt_base_url("https://alice@example.com").unwrap_err();
+        assert!(err.contains("userinfo"), "unexpected error: {err}");
+        let err = normalise_llms_txt_base_url("https://alice:secret@example.com").unwrap_err();
+        assert!(err.contains("userinfo"), "unexpected error: {err}");
     }
 
     #[test]
