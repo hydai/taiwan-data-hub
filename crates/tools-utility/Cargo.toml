@@ -27,8 +27,12 @@ ammonia = { workspace = true }
 base64 = { workspace = true }
 blake3 = "1"
 chrono = { workspace = true, features = ["clock", "std"] }
-# Used by `time_convert_timezone` for IANA tz lookups. Already in
-# the workspace dep graph via the existing date_tools utilities.
+# `chrono-tz` is a new direct dep on this crate — first user is
+# `time_convert_timezone` (the existing `date_tools` use chrono
+# directly without IANA tz lookups). Kept here rather than in
+# `[workspace.dependencies]` because tools-utility is currently
+# the only crate that needs it; promote to workspace later if a
+# second crate picks it up.
 chrono-tz = "0.10"
 hex = { workspace = true }
 mcp-core = { path = "../mcp-core" }

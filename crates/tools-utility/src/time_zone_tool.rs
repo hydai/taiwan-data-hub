@@ -3,8 +3,9 @@
 //! `America/New_York`).
 //!
 //! Uses `chrono` for parsing + arithmetic and `chrono-tz` for the
-//! IANA tzdata. Both are already in the workspace dep graph
-//! (`chrono` directly, `chrono-tz` via the existing `date_tools`).
+//! IANA tzdata. `chrono` was already in the workspace dep graph;
+//! `chrono-tz` is a new direct dep on this crate (declared in
+//! `crates/tools-utility/Cargo.toml`) — first user is this tool.
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone};
