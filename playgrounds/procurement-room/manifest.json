@@ -1,0 +1,12 @@
+{
+  "title_i18n": {
+    "zh-TW": "政府採購戰情室",
+    "en": "Procurement war room"
+  },
+  "description_i18n": {
+    "zh-TW": "三面板儀表板:依年份篩選 (a) 得標金額前 10 大廠商、(b) 年增率突發 5 倍以上的異常名單、(c) 各部會發包金額對比。示範組合 procurement_subsidy 資料集的時序分析 + 異常偵測 + 群組比較。廠商名稱與金額皆為合成樣本,正式版需連線至載入政府電子採購網資料的後端。",
+    "en": "Three-panel dashboard filtered by year: (a) top 10 vendors by contract value, (b) anomaly list of vendors with sudden >5× YoY growth, (c) per-agency spend comparison. Demonstrates time-series + anomaly-detection + group-compare patterns against the procurement_subsidy dataset. Vendor names and amounts are synthetic samples; production needs a backend with the Government e-Procurement dataset loaded."
+  },
+  "tags": ["procurement", "time-series", "anomaly", "dashboard"],
+  "status": "beta"
+}
