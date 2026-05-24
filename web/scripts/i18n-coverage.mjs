@@ -89,11 +89,18 @@ for (const s of summary) {
 }
 console.log('');
 
+const hardFailLocales = [...HARD_FAIL_LOCALES].sort().join(', ');
 if (hardErrors > 0) {
-	console.error(`✗ ${hardErrors} hard-fail locale(s) failed coverage. en MUST be 100%.`);
+	console.error(
+		`✗ ${hardErrors} hard-fail locale(s) failed coverage. ${hardFailLocales} MUST be 100%.`
+	);
 	process.exit(1);
 }
 if (warnings > 0) {
-	console.log(`⚠ ${warnings} advisory locale(s) have gaps (ja/ko/fr translations pending).`);
+	const advisoryLocales = summary
+		.filter((s) => s.level === 'warn')
+		.map((s) => s.locale)
+		.join(', ');
+	console.log(`⚠ ${warnings} advisory locale(s) have gaps (${advisoryLocales}).`);
 }
 console.log('✓ i18n coverage check passed.');
