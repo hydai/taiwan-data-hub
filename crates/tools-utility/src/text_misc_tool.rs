@@ -277,11 +277,15 @@ mod tests {
 
     #[test]
     fn slugify_strips_unicode() {
-        // `slug` crate drops non-ASCII chars rather than transliterating.
+        // Latin-extended chars (é, è, à, ñ, etc.) are best-effort
+        // transliterated to ASCII by the `slug` crate (café →
+        // cafe, résumé → resume). Chars without a mapping (most
+        // CJK, emoji, mathematical symbols) are dropped. The
+        // assertion is intentionally weak — ASCII-lowercase +
+        // hyphens only — so future `slug` releases can change
+        // exact mappings without breaking the test.
         let out = run(&SlugifyTool::new(), json!({"text": "café — résumé"})).unwrap();
         let slug = out["slug"].as_str().unwrap();
-        // Latin extended chars are transliterated by the slug crate
-        // (café → cafe), but we just assert ASCII-only + lowercase.
         assert!(slug.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
         assert!(!slug.is_empty());
     }
