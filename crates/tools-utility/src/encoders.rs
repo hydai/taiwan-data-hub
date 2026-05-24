@@ -9,20 +9,36 @@
 //! `InvalidArguments`.
 
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE as BASE64_URL_SAFE};
+use base64::engine::general_purpose::{
+    STANDARD as BASE64_STANDARD, URL_SAFE as BASE64_URL_SAFE,
+    URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
+};
 
+/// `url_safe=true` emits the URL-safe alphabet **without trailing
+/// `=` padding** to match JWT / PKCE / OAuth conventions (RFC 4648
+/// §5 base64url). The padded variant is rarely seen in those
+/// ecosystems and a tool that produces padded output would surprise
+/// callers expecting the JWT-style shape.
 pub fn base64_encode(input: &str, url_safe: bool) -> String {
     let bytes = input.as_bytes();
     if url_safe {
-        BASE64_URL_SAFE.encode(bytes)
+        BASE64_URL_SAFE_NO_PAD.encode(bytes)
     } else {
         BASE64_STANDARD.encode(bytes)
     }
 }
 
+/// `url_safe=true` accepts both padded (`URL_SAFE`) and unpadded
+/// (`URL_SAFE_NO_PAD`) input. Try the no-pad engine first because
+/// that's what callers most often produce; fall back to the padded
+/// variant on failure. This makes the decoder forgiving about
+/// trailing `=` regardless of which form the upstream emitted.
 pub fn base64_decode(input: &str, url_safe: bool) -> Result<String, String> {
     let bytes = if url_safe {
-        BASE64_URL_SAFE.decode(input).map_err(|e| e.to_string())?
+        BASE64_URL_SAFE_NO_PAD
+            .decode(input)
+            .or_else(|_| BASE64_URL_SAFE.decode(input))
+            .map_err(|e| e.to_string())?
     } else {
         BASE64_STANDARD.decode(input).map_err(|e| e.to_string())?
     };

@@ -89,7 +89,10 @@ impl ToolHandler for Base64EncodeTool {
             name: TOOL_BASE64_ENCODE.to_string(),
             description: "Base64-encode a UTF-8 string. `url_safe=true` \
                           selects the URL-safe alphabet (`-` and `_` \
-                          instead of `+` and `/`)."
+                          instead of `+` and `/`) AND drops the \
+                          trailing `=` padding, matching the \
+                          base64url convention used by JWT, PKCE, \
+                          and OAuth."
                 .to_string(),
             input_schema: {
                 let mut m = input_schema_with_text();
@@ -143,8 +146,10 @@ impl ToolHandler for Base64DecodeTool {
         ToolDescriptor {
             name: TOOL_BASE64_DECODE.to_string(),
             description: "Decode a base64 string. Set `url_safe=true` if \
-                          the input uses the URL-safe alphabet. Decoded \
-                          bytes must be valid UTF-8."
+                          the input uses the URL-safe alphabet (`-_`); \
+                          the decoder accepts both the padded (`=`-\
+                          terminated) and unpadded JWT-style forms in \
+                          that mode. Decoded bytes must be valid UTF-8."
                 .to_string(),
             input_schema: {
                 let mut m = input_schema_with_text();
