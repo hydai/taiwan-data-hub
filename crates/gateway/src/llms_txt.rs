@@ -433,7 +433,7 @@ fn render_index(meta: &LlmsTxtMeta, page_count: usize) -> String {
         "\nThe full catalog is paginated across **{page_count}** pages because the rendered document exceeds 5 MB.\n\n## Pages\n\n",
     );
     for n in 1..=page_count {
-        let _ = writeln!(out, "- [Page {n}](/llms-page/{n}) — <{base}/llms-page/{n}>",);
+        let _ = writeln!(out, "- [Page {n}](/llms-page/{n}) — <{base}/llms-page/{n}>");
     }
     out
 }
