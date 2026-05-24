@@ -159,7 +159,8 @@ form#filters label {
 	border-radius: 9999px;
 	display: block;
 }
-/* Width buckets — multiples of 5 %. Set via classList because
+/* Width buckets — multiples of 5 %. Selected via classes
+   (the bar element's className includes one of these) because
    the CSP blocks `el.style.width = ...`. 21 rules for 0-100 %. */
 .w-0 { width: 0%; }
 .w-5 { width: 5%; }

@@ -8,10 +8,10 @@
  * Filters: year selector + currency unit. All dynamic styles are
  * CSS classes — the framework CSP blocks `element.style.foo = ...`
  * mutations. Bar widths use percentage classes `.w-0` … `.w-100`
- * defined in style.css (rounded to nearest 5 %), applied via
- * `classList.add('w-' + bucket)`. Colour bins, grid placement,
- * etc. follow the same data-attr-or-class idiom established in
- * the earlier playgrounds.
+ * defined in style.css (rounded to nearest 5 %), applied by
+ * setting `bar.className = 'bar w-' + bucket`. Colour bins, grid
+ * placement, etc. follow the same data-attr-or-class idiom
+ * established in the earlier playgrounds.
  */
 
 (async function () {
