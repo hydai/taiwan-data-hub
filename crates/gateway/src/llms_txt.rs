@@ -160,11 +160,16 @@ impl LlmsTxtMeta {
 /// Cache + builder for the rendered snapshot. Holding the source +
 /// metadata behind `Arc` lets the background refresh task and every
 /// HTTP handler share a single cache instance via clone.
+///
+/// The snapshot itself is wrapped in `Arc<Snapshot>` so the hot read
+/// path doesn't deep-clone potentially multi-MB `Vec<String>` pages
+/// on every request — handlers grab a refcount under the read lock
+/// and the inner allocations stay shared.
 #[derive(Clone)]
 pub struct LlmsTxtCache {
     source: DatasetSource,
     meta: LlmsTxtMeta,
-    snapshot: Arc<RwLock<Option<Snapshot>>>,
+    snapshot: Arc<RwLock<Option<Arc<Snapshot>>>>,
 }
 
 impl LlmsTxtCache {
@@ -180,17 +185,24 @@ impl LlmsTxtCache {
     /// just clears the slot under the write lock. The actual rebuild
     /// is lazy because nothing forces work onto the background task's
     /// schedule.
+    ///
+    /// Today only the unit tests call this; a future ETL-driven
+    /// invalidation hook (so `upsert_dataset` can flush the cache
+    /// without waiting for the nightly tick) is tracked separately.
+    #[allow(dead_code)]
     pub async fn invalidate(&self) {
         *self.snapshot.write().await = None;
     }
 
     /// Build a fresh snapshot from the dataset source. Called both
     /// lazily (on first request after `invalidate`) and proactively
-    /// (by the background refresh task once per day).
-    async fn build(&self) -> Result<Snapshot, LlmsTxtError> {
+    /// (by the background refresh task once per day). Returns an
+    /// `Arc` so the result can be installed into the cache without
+    /// re-allocating the page strings.
+    async fn build(&self) -> Result<Arc<Snapshot>, LlmsTxtError> {
         let hits = self.fetch_all_hits().await?;
         let snapshot = render_snapshot(&self.meta, &hits, &Limits::default());
-        Ok(snapshot)
+        Ok(Arc::new(snapshot))
     }
 
     /// Walk the catalog in `SEARCH_PAGE_SIZE` strides until the
@@ -228,8 +240,9 @@ impl LlmsTxtCache {
 
     /// Return the current snapshot, building it on demand if absent.
     /// Two-phase locking: first try the read lock so the hot path
-    /// stays read-only; rebuild only when the slot is empty.
-    async fn get_or_build(&self) -> Result<Snapshot, LlmsTxtError> {
+    /// stays read-only and only bumps an `Arc` refcount; rebuild
+    /// only when the slot is empty.
+    async fn get_or_build(&self) -> Result<Arc<Snapshot>, LlmsTxtError> {
         if let Some(snap) = self.snapshot.read().await.clone() {
             return Ok(snap);
         }
@@ -247,6 +260,12 @@ impl LlmsTxtCache {
     /// Spawn the nightly refresh loop. Hands the join handle back so
     /// the caller can abort it on shutdown if it cares; today the
     /// gateway is happy to let the task die with the process.
+    ///
+    /// **Failure mode**: the loop builds the new snapshot *first*
+    /// and only swaps it into the cache on success, so a transient
+    /// upstream blip can't degrade an otherwise-good snapshot to a
+    /// 500-serving cold state. The old snapshot keeps serving
+    /// requests until the next successful refresh.
     pub fn spawn_refresh_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(DEFAULT_REFRESH_INTERVAL);
@@ -257,19 +276,24 @@ impl LlmsTxtCache {
             ticker.tick().await;
             loop {
                 ticker.tick().await;
-                self.invalidate().await;
                 match self.build().await {
                     Ok(snap) => {
                         let pages = snap.pages.len();
                         let bytes: usize = snap.pages.iter().map(String::len).sum();
+                        // Atomic swap: the new snapshot is fully
+                        // built before we touch the cache slot, so
+                        // concurrent HTTP requests during the
+                        // refresh window keep serving the previous
+                        // snapshot. No cold window.
                         *self.snapshot.write().await = Some(snap);
                         tracing::info!(pages, bytes, "llms.txt snapshot refreshed");
                     }
                     Err(e) => {
-                        // Leave the slot empty so the next HTTP
-                        // request retries the build; logging the
-                        // error gives operators a breadcrumb.
-                        tracing::warn!(error = %e, "llms.txt refresh failed");
+                        // Keep serving the last-known-good
+                        // snapshot — an upstream blip shouldn't
+                        // demote the cache to a cold state. Log so
+                        // operators see the failed refresh.
+                        tracing::warn!(error = %e, "llms.txt refresh failed; keeping previous snapshot");
                     }
                 }
             }
@@ -568,22 +592,43 @@ async fn handler_page(
 
 fn not_modified_if_match(headers: &HeaderMap, etag: &str) -> Option<Response> {
     let inm = headers.get(header::IF_NONE_MATCH)?.to_str().ok()?;
-    // `If-None-Match` may carry a comma-separated list; checking
-    // substring containment is a deliberate simplification — every
-    // ETag we emit is unique enough that a literal-substring match
-    // is equivalent to the spec-correct parse for our shape.
-    if inm.contains(etag) {
-        let mut resp = StatusCode::NOT_MODIFIED.into_response();
-        resp.headers_mut()
-            .insert(header::ETAG, HeaderValue::from_str(etag).ok()?);
-        resp.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(CACHE_CONTROL),
-        );
-        Some(resp)
-    } else {
-        None
+    if !if_none_match_matches(inm, etag) {
+        return None;
     }
+    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+    resp.headers_mut()
+        .insert(header::ETAG, HeaderValue::from_str(etag).ok()?);
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL),
+    );
+    Some(resp)
+}
+
+/// RFC 9110 §13.1.2-compliant `If-None-Match` comparison.
+///
+/// The header is a comma-separated list of entity tags, with the
+/// special value `*` matching *any* current representation. Each
+/// entry may be prefixed with `W/` for a weak validator — for
+/// `If-None-Match` weak comparison is the prescribed mode, so we
+/// strip the prefix before comparing. Our stored `etag` is always
+/// strong (no `W/`), so the comparison reduces to literal equality
+/// of the quoted-string portion.
+fn if_none_match_matches(header_value: &str, etag: &str) -> bool {
+    for raw in header_value.split(',') {
+        let entry = raw.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry == "*" {
+            return true;
+        }
+        let stripped = entry.strip_prefix("W/").unwrap_or(entry);
+        if stripped == etag {
+            return true;
+        }
+    }
+    false
 }
 
 fn success_response(body: String, etag: &str, generated_at: DateTime<Utc>) -> Response {
@@ -763,6 +808,32 @@ mod tests {
     fn escape_inline_collapses_newlines_and_backticks() {
         let escaped = escape_markdown_inline("line1\nline2 `code` |pipe|");
         assert_eq!(escaped, "line1 line2 'code' /pipe/");
+    }
+
+    #[test]
+    fn if_none_match_wildcard_matches_any_etag() {
+        assert!(if_none_match_matches("*", "\"abc123\""));
+        assert!(if_none_match_matches(" * ", "\"abc123\""));
+    }
+
+    #[test]
+    fn if_none_match_handles_comma_list_and_weak_prefix() {
+        let stored = "\"abc\"";
+        assert!(if_none_match_matches("\"abc\"", stored));
+        assert!(if_none_match_matches("\"xyz\", \"abc\"", stored));
+        assert!(if_none_match_matches("W/\"abc\"", stored));
+        assert!(if_none_match_matches("\"zzz\", W/\"abc\"", stored));
+        assert!(!if_none_match_matches("\"xyz\"", stored));
+        // Substring of the stored etag must NOT match — guards the
+        // pre-fix regression where the implementation used a naive
+        // `inm.contains(etag)` check.
+        assert!(!if_none_match_matches("\"ab\"", stored));
+    }
+
+    #[test]
+    fn if_none_match_ignores_empty_entries() {
+        assert!(if_none_match_matches(",,\"abc\",", "\"abc\""));
+        assert!(!if_none_match_matches(",,", "\"abc\""));
     }
 
     #[test]

@@ -60,20 +60,35 @@ const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 /// a session across multiple HTTP requests.
 const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 
-/// HTTP routes the gateway always exposes without auth. The `serve`
-/// boot log prints this list so operators can sanity-check what is
-/// reachable; the `doctor` subcommand reuses the same source of truth
-/// so the two outputs cannot disagree.
-const PUBLIC_ROUTES: &[&str] = &[
-    "/healthz",
-    "/readyz",
-    "/mcp",
-    // #7.1 — llms.txt + paginated variants. Mounted only when
-    // `Storage` is available (catalog source needs a DB).
-    "/llms.txt",
-    "/llms-index.txt",
-    "/llms-page-{n}.txt",
-];
+/// HTTP routes the gateway **always** mounts without auth or
+/// optional dependencies. The `serve` boot log and the `doctor`
+/// subcommand both anchor on this constant so the two outputs
+/// cannot disagree.
+///
+/// Routes that mount conditionally (e.g. `/llms.txt` needs
+/// `Storage`, `/api/v1/me` needs the session middleware) are NOT
+/// listed here — `resolved_public_routes` folds them in only when
+/// their dependency is actually wired up, so the boot log never
+/// advertises an endpoint that 404s.
+const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+
+/// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
+/// available. Kept as a separate constant so both the boot log and
+/// `doctor` can show "mounted" vs "skipped" without re-encoding
+/// the list.
+const LLMS_TXT_PUBLIC_ROUTES: &[&str] = &["/llms.txt", "/llms-index.txt", "/llms-page-{n}.txt"];
+
+/// Render the public-route list the boot log + doctor display.
+/// Conditionally folds in optional subrouters so an operator
+/// scanning the log sees exactly the endpoints the binary will
+/// actually serve.
+fn resolved_public_routes(llms_txt_enabled: bool) -> Vec<&'static str> {
+    let mut routes: Vec<&'static str> = ALWAYS_ON_PUBLIC_ROUTES.to_vec();
+    if llms_txt_enabled {
+        routes.extend(LLMS_TXT_PUBLIC_ROUTES);
+    }
+    routes
+}
 
 /// Env var: optional override for the host embedded in cross-links
 /// the `/llms.txt` document renders (e.g. <https://hub.example/datasets/x>).
@@ -269,18 +284,22 @@ async fn serve() -> anyhow::Result<()> {
     let mode = Mode::from_env().context("invalid MODE env var")?;
     let addr = read_gateway_addr()?;
 
-    info!(
-        mode = mode.as_str(),
-        public_routes = PUBLIC_ROUTES.join(","),
-        gated_routes = gated_route_list(mode),
-        "operating mode resolved"
-    );
-
     // Single Storage handle reused by the DB-backed MCP tools AND the
     // #4.6 api-keys subrouter. Connecting once at boot means a transient
     // DB outage doesn't double the gateway's startup pressure on the
     // pool; both consumers share the same pool's connection lifecycle.
     let storage = connect_storage_if_available().await;
+
+    // Log mode + the routes that will actually be mounted. The
+    // resolved list folds in optional subrouters (e.g. /llms.txt
+    // when Storage is available) so the boot log can't advertise
+    // an endpoint that 404s.
+    info!(
+        mode = mode.as_str(),
+        public_routes = resolved_public_routes(storage.is_some()).join(","),
+        gated_routes = gated_route_list(mode),
+        "operating mode resolved"
+    );
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
@@ -836,7 +855,7 @@ impl DoctorReport {
 
     fn from_snapshot(env: &EnvSnapshot) -> Self {
         let mut report = Self::default();
-        report.push_entry(validate_mode(&env.mode));
+        report.push_entry(validate_mode(&env.mode, env.database_url.as_deref()));
         report.push_entry(validate_gateway_addr(env.gateway_addr.as_deref()));
         report.push_entry(validate_database_url(env.database_url.as_deref()));
         report.push_entry(validate_object_store(
@@ -945,19 +964,26 @@ fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) ->
     }
 }
 
-fn validate_mode(raw: &ModeRaw) -> DoctorEntry {
+fn validate_mode(raw: &ModeRaw, database_url: Option<&str>) -> DoctorEntry {
     let parsed = match raw {
         ModeRaw::NonUnicode => Err(ModeParseError::NonUnicode),
         ModeRaw::Unset => Mode::from_env_value(None),
         ModeRaw::Set(s) => Mode::from_env_value(Some(s.as_str())),
     };
+    // `/llms.txt` mounts iff `Storage` is available; doctor can't
+    // probe the pool, so the next-best signal is "DATABASE_URL is
+    // set". This mirrors what `connect_storage_if_available` reads
+    // — if the URL is unset, no Storage means no llms.txt subrouter.
+    // Doctor still flags a malformed URL elsewhere
+    // (`validate_database_url`); here we only need the boolean.
+    let llms_txt_enabled = database_url.is_some();
     match parsed {
         Ok(mode) => doctor_entry(
             "MODE",
             DoctorStatus::Ok,
             format!(
                 "{mode} (public: {}; gated: {})",
-                PUBLIC_ROUTES.join(","),
+                resolved_public_routes(llms_txt_enabled).join(","),
                 gated_route_list(mode),
             ),
         ),
@@ -1359,19 +1385,31 @@ mod tests {
 
     #[test]
     fn validate_mode_renders_resolved_routes() {
-        let entry = validate_mode(&ModeRaw::Unset);
+        // No DATABASE_URL → /llms.txt won't mount → only always-on
+        // routes appear in the resolved list.
+        let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        assert!(!entry.detail.contains("/llms.txt"));
         assert!(entry.detail.contains("gated: <none>"));
 
-        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()));
+        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()), None);
         assert!(entry.detail.contains("gated: <pending #4.5>"));
     }
 
     #[test]
+    fn validate_mode_includes_llms_txt_when_database_url_set() {
+        let entry = validate_mode(&ModeRaw::Unset, Some("postgres://stub/stub"));
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(entry.detail.contains("/llms.txt"));
+        assert!(entry.detail.contains("/llms-index.txt"));
+        assert!(entry.detail.contains("/llms-page-{n}.txt"));
+    }
+
+    #[test]
     fn validate_mode_flags_unknown_value() {
-        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()));
+        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()), None);
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("invalid MODE value"));
     }
@@ -1381,9 +1419,19 @@ mod tests {
         // The runtime errors on a non-Unicode MODE via Mode::from_env;
         // doctor must surface the same condition rather than collapse
         // it to "unset → personal".
-        let entry = validate_mode(&ModeRaw::NonUnicode);
+        let entry = validate_mode(&ModeRaw::NonUnicode, None);
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn resolved_public_routes_includes_llms_only_when_enabled() {
+        let without = resolved_public_routes(false);
+        assert_eq!(without, vec!["/healthz", "/readyz", "/mcp"]);
+        let with = resolved_public_routes(true);
+        assert!(with.contains(&"/healthz"));
+        assert!(with.contains(&"/llms.txt"));
+        assert!(with.contains(&"/llms-page-{n}.txt"));
     }
 
     #[test]
