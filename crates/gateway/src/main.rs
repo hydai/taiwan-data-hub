@@ -550,7 +550,7 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     }
     tracing::info!(
         mode = mode.as_str(),
-        "well-known surfaces mounted: /.well-known/mcp.json, agent-card.json, agent-skills.json"
+        "well-known surfaces mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json"
     );
     well_known::router(dispatcher, &meta)
 }

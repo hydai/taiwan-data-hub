@@ -160,7 +160,15 @@ pub fn router(dispatcher: &Dispatcher, meta: &ManifestMeta) -> Router {
 /// `body + etag` pair every handler serves. Pulled out so all
 /// three routes share the same allocation + caching path.
 fn build_state<T: Serialize>(payload: &T) -> Arc<ManifestState> {
-    let body_json = serde_json::to_string_pretty(payload).expect("manifest serialises to JSON");
+    // All three well-known payloads (MCP manifest, A2A agent
+    // card, skills index) are statically-typed structs whose
+    // field types are all `serde_json`-compatible — a panic here
+    // would mean an upstream change introduced a non-serialisable
+    // field, which is a programmer error, not a runtime input
+    // problem. The generic message reflects the shared
+    // contract across all three payload types.
+    let body_json =
+        serde_json::to_string_pretty(payload).expect("well-known payload serialises to JSON");
     let etag = etag_for(&body_json);
     Arc::new(ManifestState {
         body: Bytes::from(body_json),
