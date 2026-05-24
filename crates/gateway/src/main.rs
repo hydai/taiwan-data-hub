@@ -291,9 +291,11 @@ fn build_router(
         // always-on because they derive from compile-time state
         // (tool registry, env config, annotated handlers).
         // Merged here so they sit alongside `/healthz` and
-        // `/mcp` in the IP-rate-limit layer below.
+        // `/mcp` in the IP-rate-limit layer below. Each
+        // subrouter logs its own mount on construction so the
+        // origin of each route is unambiguous in the boot log.
         .merge(well_known_router)
-        .merge(openapi::router());
+        .merge(build_openapi_router());
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -556,6 +558,17 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
 /// Snapshots the dispatcher at boot so the manifest body is
 /// rendered once; subsequent registrations would not be picked up,
 /// but the registry is fixed for the process lifetime.
+/// Build the `/api/openapi.json` + `/api/docs` + `/api/redoc`
+/// subrouter (#7.5). Logs its own mount line so an operator
+/// grepping the boot log can attribute the `OpenAPI` surfaces to
+/// this helper rather than to `build_well_known_router`.
+fn build_openapi_router() -> Router {
+    tracing::info!(
+        "OpenAPI surfaces mounted: /api/openapi.json, /api/docs (Swagger UI), /api/redoc"
+    );
+    openapi::router()
+}
+
 fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     let mut meta = well_known::ManifestMeta::defaults(mode, PKG_VERSION);
     if let Some(raw) = non_empty_env(MCP_PUBLIC_URL_ENV) {
@@ -573,7 +586,7 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     }
     tracing::info!(
         mode = mode.as_str(),
-        "well-known + REST docs mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json, /.well-known/api-catalog, /.well-known/oauth-protected-resource, /api/openapi.json, /api/docs (Swagger UI), /api/redoc"
+        "well-known surfaces mounted: /.well-known/mcp.json, /.well-known/agent-card.json, /.well-known/agent-skills.json, /.well-known/api-catalog, /.well-known/oauth-protected-resource"
     );
     well_known::router(dispatcher, &meta)
 }

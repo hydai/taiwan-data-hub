@@ -42,12 +42,11 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 anyhow = { workspace = true }
-# #7.5 — OpenAPI 3.1 spec generation + browsable docs UI. utoipa
-# emits the spec from handler annotations; utoipa-axum bridges
-# Axum routers; utoipa-swagger-ui + utoipa-redoc each provide a
-# self-contained Router that serves the corresponding UI.
+# #7.5 — OpenAPI 3.1 spec generation + browsable docs UI.
+# `utoipa` emits the spec from `#[utoipa::path]` + `ToSchema`
+# annotations; utoipa-swagger-ui + utoipa-redoc each provide a
+# self-contained Axum router that serves the corresponding UI.
 utoipa = { workspace = true }
-utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 utoipa-redoc = { workspace = true }
 

@@ -139,13 +139,14 @@ jsonwebtoken = { version = "9.3", default-features = false }
 comrak = { version = "0.43", default-features = false }
 ammonia = "4"
 # #7.5 — OpenAPI 3.1 spec generation + browsable docs UI. utoipa
-# 5.x ships as a few crates: the macro + core types live in
-# `utoipa`, the Axum integration (`OpenApiRouter`) lives in
-# `utoipa-axum`, and the UI bindings live in `utoipa-swagger-ui` /
-# `utoipa-redoc`. All four pin to the same major-version line so
-# they don't double-compile each other.
+# 5.x ships the macro + core types; utoipa-swagger-ui and
+# utoipa-redoc each provide a self-contained Axum router that
+# serves the corresponding UI. (`utoipa-axum`'s `OpenApiRouter`
+# is intentionally NOT pulled in — its value-add is the
+# annotation-driven path collection, which we already get
+# directly through `#[derive(OpenApi)]` + `paths(...)`. Adding it
+# would just inflate compile time without a payoff.)
 utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid", "preserve_order"] }
-utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", default-features = false, features = ["axum"] }
 utoipa-redoc = { version = "6", features = ["axum"] }
 
