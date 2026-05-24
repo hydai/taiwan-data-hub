@@ -46,13 +46,36 @@
 	populateYearSelect(yearFromSel, YEARS, YEARS[0]);
 	populateYearSelect(yearToSel, YEARS, YEARS[YEARS.length - 1]);
 
+	// State comes from the share-link URL, which is user-controlled.
+	// Validate every field against the known-good lists before
+	// applying — otherwise a malformed link (e.g. year_from=0) can
+	// expand the chart's year loop to thousands of buckets and
+	// freeze the playground.
+	var validCourts = new Set(COURTS);
+	var validTypes = new Set(CASE_TYPES);
+	var validYears = new Set(YEARS);
+	var validGroupBy = new Set(['total', 'case_type', 'court']);
+
 	var initial = await window.tdh.getState();
 	if (initial && typeof initial === 'object') {
-		if (typeof initial.court === 'string') courtSel.value = initial.court;
-		if (typeof initial.case_type === 'string') typeSel.value = initial.case_type;
-		if (typeof initial.year_from === 'number') yearFromSel.value = String(initial.year_from);
-		if (typeof initial.year_to === 'number') yearToSel.value = String(initial.year_to);
-		if (typeof initial.group_by === 'string') setRadio('group-by', initial.group_by);
+		if (typeof initial.court === 'string' && (initial.court === '' || validCourts.has(initial.court))) {
+			courtSel.value = initial.court;
+		}
+		if (
+			typeof initial.case_type === 'string' &&
+			(initial.case_type === '' || validTypes.has(initial.case_type))
+		) {
+			typeSel.value = initial.case_type;
+		}
+		if (typeof initial.year_from === 'number' && validYears.has(initial.year_from)) {
+			yearFromSel.value = String(initial.year_from);
+		}
+		if (typeof initial.year_to === 'number' && validYears.has(initial.year_to)) {
+			yearToSel.value = String(initial.year_to);
+		}
+		if (typeof initial.group_by === 'string' && validGroupBy.has(initial.group_by)) {
+			setRadio('group-by', initial.group_by);
+		}
 	}
 
 	[courtSel, typeSel, yearFromSel, yearToSel].forEach(function (el) {
@@ -218,26 +241,36 @@
 			appendText(chartEl, x, padding.top + plotH + 18, String(years[xi]), '#52525b', 'middle', 11);
 		}
 
-		// One polyline + circles per series.
+		// One polyline + circles per series. Append order matters in
+		// SVG: later siblings paint on top of earlier ones. So:
+		//   gridlines + axis labels (already appended above)
+		//   → polyline (paints over the grid so the trend is legible)
+		//   → circles (paint over the polyline so points stay
+		//     visible at line crossings)
 		var seriesIdx = 0;
 		series.forEach(function (perYear, label) {
 			var color = PALETTE[seriesIdx % PALETTE.length];
 			var pts = [];
+			var circlePositions = [];
 			for (var xj = 0; xj < years.length; xj += 1) {
 				var year = years[xj];
 				var val = perYear.get(year) || 0;
 				var x = padding.left + step * xj;
 				var y2 = padding.top + plotH - (val / max) * plotH;
 				pts.push(x + ',' + y2);
-				appendCircle(chartEl, x, y2, 3, color);
+				circlePositions.push({ x: x, y: y2 });
 			}
-			var poly = createSvg('polyline', {
-				points: pts.join(' '),
-				fill: 'none',
-				stroke: color,
-				'stroke-width': '2'
-			});
-			chartEl.insertBefore(poly, chartEl.firstChild ? chartEl.firstChild.nextSibling : null);
+			chartEl.appendChild(
+				createSvg('polyline', {
+					points: pts.join(' '),
+					fill: 'none',
+					stroke: color,
+					'stroke-width': '2'
+				})
+			);
+			for (var ci = 0; ci < circlePositions.length; ci += 1) {
+				appendCircle(chartEl, circlePositions[ci].x, circlePositions[ci].y, 3, color);
+			}
 			seriesIdx += 1;
 		});
 
