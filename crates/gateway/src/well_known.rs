@@ -29,8 +29,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use shared::Mode;
 
-/// MIME type per RFC 8615 + the MCP discovery convention. Always
-/// served as `application/json` regardless of mode.
+/// `Content-Type` for the JSON manifest body. RFC 8259 registers
+/// `application/json`; the `/.well-known/` path itself follows
+/// RFC 8615's URI mechanism. Always served regardless of mode.
 const CONTENT_TYPE: &str = "application/json; charset=utf-8";
 
 /// `Cache-Control` value applied to every response. The manifest

@@ -112,7 +112,7 @@ const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
 /// (#7.2). Drives `server_url` (`{base}/mcp`) and, in multi-user mode,
 /// the OAuth resource-metadata pointer
 /// (`{base}/.well-known/oauth-protected-resource`). Validated at boot
-/// via the same [`normalise_llms_txt_base_url`] helper so the two
+/// via the same [`normalise_public_base_url`] helper so the two
 /// well-known surfaces can't disagree on what "valid base URL"
 /// means. Invalid values fall back to the placeholder in
 /// [`well_known::ManifestMeta::defaults`].
@@ -506,7 +506,7 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     let storage = storage?;
     let mut meta = llms_txt::LlmsTxtMeta::defaults();
     if let Some(raw) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
-        match normalise_llms_txt_base_url(&raw) {
+        match normalise_public_base_url(&raw) {
             Ok(base) => meta.public_base_url = base,
             Err(e) => tracing::warn!(
                 error = %e,
@@ -536,7 +536,7 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
 fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     let mut meta = well_known::ManifestMeta::defaults(mode, PKG_VERSION);
     if let Some(raw) = non_empty_env(MCP_PUBLIC_URL_ENV) {
-        match normalise_llms_txt_base_url(&raw) {
+        match normalise_public_base_url(&raw) {
             Ok(base) => meta.public_base_url = base,
             Err(e) => tracing::warn!(
                 error = %e,
@@ -552,16 +552,18 @@ fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
     well_known::router(dispatcher, &meta)
 }
 
-/// Validate + normalise the `LLMS_TXT_BASE_URL` value. Trims any
-/// trailing `/` so the renderer's `{base}/llms-page/{n}` template
-/// can't produce `//llms-page/...` URLs, and parses the value via
-/// `Url::parse` so a malformed input is rejected at boot rather
-/// than silently producing broken cross-links.
+/// Validate + normalise a public-facing base URL supplied via env
+/// (currently `LLMS_TXT_BASE_URL` and `MCP_PUBLIC_URL`). Trims any
+/// trailing `/` so concatenating literal path suffixes can't
+/// produce `//...` URLs, and parses the value via `Url::parse` so
+/// a malformed input is rejected at boot rather than silently
+/// producing broken cross-links.
 ///
-/// Shared with [`build_well_known_router`] so `MCP_PUBLIC_URL`
-/// and `LLMS_TXT_BASE_URL` agree on what "valid base URL" means —
-/// any future tightening of the validator reaches both surfaces.
-fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
+/// Centralising the validator means every well-known surface
+/// agrees on what "valid base URL" means — any future tightening
+/// (e.g. additional disallowed components) reaches all consumers
+/// in one place.
+fn normalise_public_base_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("value is blank after trimming".into());
@@ -1602,53 +1604,53 @@ mod tests {
     }
 
     #[test]
-    fn llms_txt_base_url_trims_trailing_slash_and_accepts_https() {
+    fn public_base_url_trims_trailing_slash_and_accepts_https() {
         assert_eq!(
-            normalise_llms_txt_base_url("https://example.com/").unwrap(),
+            normalise_public_base_url("https://example.com/").unwrap(),
             "https://example.com",
         );
         assert_eq!(
-            normalise_llms_txt_base_url("https://example.com").unwrap(),
+            normalise_public_base_url("https://example.com").unwrap(),
             "https://example.com",
         );
         assert_eq!(
-            normalise_llms_txt_base_url("  http://hub.local:8080  ").unwrap(),
+            normalise_public_base_url("  http://hub.local:8080  ").unwrap(),
             "http://hub.local:8080",
         );
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_malformed_or_non_http_inputs() {
-        assert!(normalise_llms_txt_base_url("not a url").is_err());
-        assert!(normalise_llms_txt_base_url("/relative/path").is_err());
-        assert!(normalise_llms_txt_base_url("").is_err());
-        assert!(normalise_llms_txt_base_url("ftp://example.com").is_err());
+    fn public_base_url_rejects_malformed_or_non_http_inputs() {
+        assert!(normalise_public_base_url("not a url").is_err());
+        assert!(normalise_public_base_url("/relative/path").is_err());
+        assert!(normalise_public_base_url("").is_err());
+        assert!(normalise_public_base_url("ftp://example.com").is_err());
         // `file:` URLs parse but have no host — caught by the
         // host-presence check so cross-link rendering can't
         // silently produce `file:///llms-page/...` links.
-        assert!(normalise_llms_txt_base_url("file:///etc/passwd").is_err());
+        assert!(normalise_public_base_url("file:///etc/passwd").is_err());
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_query_or_fragment() {
+    fn public_base_url_rejects_query_or_fragment() {
         // String concatenation with query strings or fragments
         // produces malformed cross-links (e.g.
         // `https://host?x=1/llms-page/1`). Both shapes must
         // fail loud at boot.
-        let err = normalise_llms_txt_base_url("https://example.com?x=1").unwrap_err();
+        let err = normalise_public_base_url("https://example.com?x=1").unwrap_err();
         assert!(err.contains("query"), "unexpected error: {err}");
-        let err = normalise_llms_txt_base_url("https://example.com/#frag").unwrap_err();
+        let err = normalise_public_base_url("https://example.com/#frag").unwrap_err();
         assert!(err.contains("fragment"), "unexpected error: {err}");
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_userinfo() {
+    fn public_base_url_rejects_userinfo() {
         // Credentials in the base URL would be rendered verbatim
         // into every cross-link the gateway serves. Reject both
         // user-only and user:pass shapes.
-        let err = normalise_llms_txt_base_url("https://alice@example.com").unwrap_err();
+        let err = normalise_public_base_url("https://alice@example.com").unwrap_err();
         assert!(err.contains("userinfo"), "unexpected error: {err}");
-        let err = normalise_llms_txt_base_url("https://alice:secret@example.com").unwrap_err();
+        let err = normalise_public_base_url("https://alice:secret@example.com").unwrap_err();
         assert!(err.contains("userinfo"), "unexpected error: {err}");
     }
 
