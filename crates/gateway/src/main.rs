@@ -24,6 +24,7 @@ mod ratings_routes;
 mod reports_routes;
 mod session_middleware;
 mod submissions_routes;
+mod well_known;
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -71,7 +72,17 @@ const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// listed here — `resolved_public_routes` folds them in only when
 /// their dependency is actually wired up, so the boot log never
 /// advertises an endpoint that 404s.
-const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
+    "/healthz",
+    "/readyz",
+    "/mcp",
+    // #7.2 — `/.well-known/mcp.json` is generated from the
+    // in-process dispatcher + env config, so it mounts in every
+    // mode without any DB dependency. Always-on so agents that
+    // probe well-known URLs never see a phantom 404 in
+    // personal-mode boots.
+    "/.well-known/mcp.json",
+];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
 /// available. Kept as a separate constant so both the boot log and
@@ -96,6 +107,16 @@ fn resolved_public_routes(llms_txt_enabled: bool) -> Vec<&'static str> {
 /// Defaults to the placeholder in [`llms_txt::LlmsTxtMeta::defaults`] when
 /// unset so the route works without configuration.
 const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
+
+/// Env var: public-facing base URL embedded in `/.well-known/mcp.json`
+/// (#7.2). Drives `server_url` (`{base}/mcp`) and, in multi-user mode,
+/// the OAuth resource-metadata pointer
+/// (`{base}/.well-known/oauth-protected-resource`). Validated at boot
+/// via the same [`normalise_public_base_url`] helper so the two
+/// well-known surfaces can't disagree on what "valid base URL"
+/// means. Invalid values fall back to the placeholder in
+/// [`well_known::ManifestMeta::defaults`].
+const MCP_PUBLIC_URL_ENV: &str = "MCP_PUBLIC_URL";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -219,6 +240,7 @@ fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
     llms_txt_router: Option<Router>,
+    well_known_router: Router,
     rate_limiter: Arc<dyn auth::RateLimiter>,
     mode: Mode,
     cancel: CancellationToken,
@@ -244,7 +266,12 @@ fn build_router(
         // personal-mode badge and multi-user auth UI. No DB
         // or auth dependency, so it serves in personal mode
         // too.
-        .merge(api_routes::config_router(mode));
+        .merge(api_routes::config_router(mode))
+        // #7.2 — `/.well-known/mcp.json` is always-on because the
+        // tool registry + env config are available regardless of
+        // Storage. Merged here so it sits alongside `/healthz`
+        // and `/mcp` in the IP-rate-limit layer below.
+        .merge(well_known_router);
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -311,6 +338,13 @@ async fn serve() -> anyhow::Result<()> {
     builder = wire_db_tools_if_available(builder, storage.clone());
     let dispatcher = builder.build();
     let tool_count = dispatcher.len();
+    // Build the `/.well-known/mcp.json` router BEFORE the
+    // dispatcher gets moved into `McpServer`. The manifest is
+    // rendered once at boot from the dispatcher (borrowed here;
+    // `Dispatcher::list_tools` reads through the `Arc`-backed
+    // inner map without cloning the registry) so the well-known
+    // surface and `/mcp` see identical tool lists.
+    let well_known_router = build_well_known_router(&dispatcher, mode);
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");
 
@@ -335,6 +369,7 @@ async fn serve() -> anyhow::Result<()> {
         server,
         auth_router,
         llms_txt_router,
+        well_known_router,
         rate_limiter,
         mode,
         cancel.child_token(),
@@ -472,7 +507,7 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     let storage = storage?;
     let mut meta = llms_txt::LlmsTxtMeta::defaults();
     if let Some(raw) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
-        match normalise_llms_txt_base_url(&raw) {
+        match normalise_public_base_url(&raw) {
             Ok(base) => meta.public_base_url = base,
             Err(e) => tracing::warn!(
                 error = %e,
@@ -492,12 +527,44 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     Some(llms_txt::router(cache))
 }
 
-/// Validate + normalise the `LLMS_TXT_BASE_URL` value. Trims any
-/// trailing `/` so the renderer's `{base}/llms-page/{n}` template
-/// can't produce `//llms-page/...` URLs, and parses the value via
-/// `Url::parse` so a malformed input is rejected at boot rather
-/// than silently producing broken cross-links.
-fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
+/// Build the `/.well-known/mcp.json` subrouter (#7.2). Always
+/// mountable — the manifest derives from the in-process
+/// dispatcher + env config, so there's no Storage dependency.
+///
+/// Snapshots the dispatcher at boot so the manifest body is
+/// rendered once; subsequent registrations would not be picked up,
+/// but the registry is fixed for the process lifetime.
+fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
+    let mut meta = well_known::ManifestMeta::defaults(mode, PKG_VERSION);
+    if let Some(raw) = non_empty_env(MCP_PUBLIC_URL_ENV) {
+        match normalise_public_base_url(&raw) {
+            Ok(base) => meta.public_base_url = base,
+            Err(e) => tracing::warn!(
+                error = %e,
+                value = %raw,
+                "{MCP_PUBLIC_URL_ENV} rejected; falling back to default base URL",
+            ),
+        }
+    }
+    tracing::info!(
+        mode = mode.as_str(),
+        "/.well-known/mcp.json manifest mounted"
+    );
+    well_known::router(dispatcher, &meta)
+}
+
+/// Validate + normalise a public-facing base URL supplied via env
+/// (currently `LLMS_TXT_BASE_URL` and `MCP_PUBLIC_URL`). Trims any
+/// trailing `/` so concatenating literal path suffixes can't
+/// produce `//...` URLs, and parses the value via `Url::parse` so
+/// a malformed input is rejected at boot rather than silently
+/// producing broken cross-links.
+///
+/// Centralising the validator means every well-known surface
+/// agrees on what "valid base URL" means — any future tightening
+/// (e.g. additional disallowed components) reaches all consumers
+/// in one place.
+fn normalise_public_base_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("value is blank after trimming".into());
@@ -921,6 +988,14 @@ impl DoctorReport {
             env.s3_secret_access_key.as_deref(),
             env.s3_session_token.as_deref(),
         ));
+        report.push_entry(validate_public_base_url(
+            MCP_PUBLIC_URL_ENV,
+            env.mcp_public_url.as_deref(),
+        ));
+        report.push_entry(validate_public_base_url(
+            LLMS_TXT_BASE_URL_ENV,
+            env.llms_txt_base_url.as_deref(),
+        ));
         report
     }
 
@@ -966,6 +1041,12 @@ struct EnvSnapshot {
     s3_access_key_id: Option<String>,
     s3_secret_access_key: Option<String>,
     s3_session_token: Option<String>,
+    /// Optional public-facing base URL for the `/.well-known/mcp.json`
+    /// manifest (#7.2). Validated via [`normalise_public_base_url`].
+    mcp_public_url: Option<String>,
+    /// Optional public-facing base URL embedded in `/llms.txt`
+    /// cross-links (#7.1). Validated via the same helper.
+    llms_txt_base_url: Option<String>,
 }
 
 impl EnvSnapshot {
@@ -981,6 +1062,8 @@ impl EnvSnapshot {
             s3_access_key_id: non_empty_env("S3_ACCESS_KEY_ID"),
             s3_secret_access_key: non_empty_env("S3_SECRET_ACCESS_KEY"),
             s3_session_token: non_empty_env("S3_SESSION_TOKEN"),
+            mcp_public_url: non_empty_env(MCP_PUBLIC_URL_ENV),
+            llms_txt_base_url: non_empty_env(LLMS_TXT_BASE_URL_ENV),
         }
     }
 }
@@ -1084,6 +1167,25 @@ fn validate_database_url(raw: Option<&str>) -> DoctorEntry {
                     ),
                 ),
             },
+        },
+    }
+}
+
+/// Doctor entry for the public-base-URL env vars (`MCP_PUBLIC_URL`,
+/// `LLMS_TXT_BASE_URL`). Routes the raw value through the same
+/// [`normalise_public_base_url`] helper `serve` uses at boot so a
+/// malformed value lights up in doctor instead of as a `warn!` line
+/// after the gateway starts.
+fn validate_public_base_url(label: &str, raw: Option<&str>) -> DoctorEntry {
+    match raw {
+        None => doctor_entry(
+            label,
+            DoctorStatus::Info,
+            "unset — falls back to placeholder base URL",
+        ),
+        Some(raw) => match normalise_public_base_url(raw) {
+            Ok(normalised) => doctor_entry(label, DoctorStatus::Ok, normalised),
+            Err(e) => doctor_entry(label, DoctorStatus::Error, e),
         },
     }
 }
@@ -1238,6 +1340,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1283,6 +1390,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1339,6 +1451,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1450,7 +1567,15 @@ mod tests {
         let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
-        assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        // Always-on now includes /.well-known/mcp.json (#7.2) since
+        // the manifest derives from in-process state with no DB
+        // dependency. /llms.txt routes still don't appear without
+        // DATABASE_URL set.
+        assert!(
+            entry
+                .detail
+                .contains("public: /healthz,/readyz,/mcp,/.well-known/mcp.json")
+        );
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
         assert!(entry.detail.contains("gated: <none>"));
@@ -1500,61 +1625,68 @@ mod tests {
     #[test]
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
-        assert_eq!(without, vec!["/healthz", "/readyz", "/mcp"]);
+        // Always-on set is /healthz, /readyz, /mcp, and (since
+        // #7.2) /.well-known/mcp.json. The llms.txt routes must
+        // NOT appear without the storage flag set.
+        assert_eq!(
+            without,
+            vec!["/healthz", "/readyz", "/mcp", "/.well-known/mcp.json"],
+        );
         let with = resolved_public_routes(true);
         assert!(with.contains(&"/healthz"));
+        assert!(with.contains(&"/.well-known/mcp.json"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
     }
 
     #[test]
-    fn llms_txt_base_url_trims_trailing_slash_and_accepts_https() {
+    fn public_base_url_trims_trailing_slash_and_accepts_https() {
         assert_eq!(
-            normalise_llms_txt_base_url("https://example.com/").unwrap(),
+            normalise_public_base_url("https://example.com/").unwrap(),
             "https://example.com",
         );
         assert_eq!(
-            normalise_llms_txt_base_url("https://example.com").unwrap(),
+            normalise_public_base_url("https://example.com").unwrap(),
             "https://example.com",
         );
         assert_eq!(
-            normalise_llms_txt_base_url("  http://hub.local:8080  ").unwrap(),
+            normalise_public_base_url("  http://hub.local:8080  ").unwrap(),
             "http://hub.local:8080",
         );
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_malformed_or_non_http_inputs() {
-        assert!(normalise_llms_txt_base_url("not a url").is_err());
-        assert!(normalise_llms_txt_base_url("/relative/path").is_err());
-        assert!(normalise_llms_txt_base_url("").is_err());
-        assert!(normalise_llms_txt_base_url("ftp://example.com").is_err());
+    fn public_base_url_rejects_malformed_or_non_http_inputs() {
+        assert!(normalise_public_base_url("not a url").is_err());
+        assert!(normalise_public_base_url("/relative/path").is_err());
+        assert!(normalise_public_base_url("").is_err());
+        assert!(normalise_public_base_url("ftp://example.com").is_err());
         // `file:` URLs parse but have no host — caught by the
         // host-presence check so cross-link rendering can't
         // silently produce `file:///llms-page/...` links.
-        assert!(normalise_llms_txt_base_url("file:///etc/passwd").is_err());
+        assert!(normalise_public_base_url("file:///etc/passwd").is_err());
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_query_or_fragment() {
+    fn public_base_url_rejects_query_or_fragment() {
         // String concatenation with query strings or fragments
         // produces malformed cross-links (e.g.
         // `https://host?x=1/llms-page/1`). Both shapes must
         // fail loud at boot.
-        let err = normalise_llms_txt_base_url("https://example.com?x=1").unwrap_err();
+        let err = normalise_public_base_url("https://example.com?x=1").unwrap_err();
         assert!(err.contains("query"), "unexpected error: {err}");
-        let err = normalise_llms_txt_base_url("https://example.com/#frag").unwrap_err();
+        let err = normalise_public_base_url("https://example.com/#frag").unwrap_err();
         assert!(err.contains("fragment"), "unexpected error: {err}");
     }
 
     #[test]
-    fn llms_txt_base_url_rejects_userinfo() {
+    fn public_base_url_rejects_userinfo() {
         // Credentials in the base URL would be rendered verbatim
         // into every cross-link the gateway serves. Reject both
         // user-only and user:pass shapes.
-        let err = normalise_llms_txt_base_url("https://alice@example.com").unwrap_err();
+        let err = normalise_public_base_url("https://alice@example.com").unwrap_err();
         assert!(err.contains("userinfo"), "unexpected error: {err}");
-        let err = normalise_llms_txt_base_url("https://alice:secret@example.com").unwrap_err();
+        let err = normalise_public_base_url("https://alice:secret@example.com").unwrap_err();
         assert!(err.contains("userinfo"), "unexpected error: {err}");
     }
 
@@ -1717,7 +1849,7 @@ mod tests {
     fn doctor_report_from_snapshot_threads_through_all_validators() {
         let env = EnvSnapshot::default();
         let report = DoctorReport::from_snapshot(&env);
-        assert_eq!(report.entries.len(), 5);
+        assert_eq!(report.entries.len(), 7);
         assert_eq!(report.error_count(), 0);
         let labels: Vec<&str> = report.entries.iter().map(|e| e.label.as_str()).collect();
         assert_eq!(
@@ -1727,8 +1859,37 @@ mod tests {
                 "GATEWAY_ADDR",
                 "DATABASE_URL",
                 "OBJECT_STORE_*",
-                "S3_*"
+                "S3_*",
+                "MCP_PUBLIC_URL",
+                "LLMS_TXT_BASE_URL",
             ],
         );
+    }
+
+    #[test]
+    fn validate_public_base_url_unset_is_info() {
+        let entry = validate_public_base_url("MCP_PUBLIC_URL", None);
+        assert_eq!(entry.status, DoctorStatus::Info);
+        assert!(entry.detail.contains("placeholder"));
+    }
+
+    #[test]
+    fn validate_public_base_url_valid_input_normalises() {
+        // Trailing slash gets trimmed (the normaliser is shared with
+        // the env reader so the doctor output matches what `serve`
+        // would do).
+        let entry = validate_public_base_url("MCP_PUBLIC_URL", Some("https://hub.example/"));
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert_eq!(entry.detail, "https://hub.example");
+    }
+
+    #[test]
+    fn validate_public_base_url_malformed_is_error() {
+        let entry = validate_public_base_url("LLMS_TXT_BASE_URL", Some("not a url"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        let entry =
+            validate_public_base_url("MCP_PUBLIC_URL", Some("https://user:pass@hub.example"));
+        assert_eq!(entry.status, DoctorStatus::Error);
+        assert!(entry.detail.contains("userinfo"));
     }
 }
