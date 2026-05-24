@@ -24,6 +24,7 @@ mod ratings_routes;
 mod reports_routes;
 mod session_middleware;
 mod submissions_routes;
+mod well_known;
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
@@ -71,7 +72,17 @@ const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 /// listed here — `resolved_public_routes` folds them in only when
 /// their dependency is actually wired up, so the boot log never
 /// advertises an endpoint that 404s.
-const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
+    "/healthz",
+    "/readyz",
+    "/mcp",
+    // #7.2 — `/.well-known/mcp.json` is generated from the
+    // in-process dispatcher + env config, so it mounts in every
+    // mode without any DB dependency. Always-on so agents that
+    // probe well-known URLs never see a phantom 404 in
+    // personal-mode boots.
+    "/.well-known/mcp.json",
+];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
 /// available. Kept as a separate constant so both the boot log and
@@ -96,6 +107,16 @@ fn resolved_public_routes(llms_txt_enabled: bool) -> Vec<&'static str> {
 /// Defaults to the placeholder in [`llms_txt::LlmsTxtMeta::defaults`] when
 /// unset so the route works without configuration.
 const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
+
+/// Env var: public-facing base URL embedded in `/.well-known/mcp.json`
+/// (#7.2). Drives `server_url` (`{base}/mcp`) and, in multi-user mode,
+/// the OAuth resource-metadata pointer
+/// (`{base}/.well-known/oauth-protected-resource`). Validated at boot
+/// via the same [`normalise_llms_txt_base_url`] helper so the two
+/// well-known surfaces can't disagree on what "valid base URL"
+/// means. Invalid values fall back to the placeholder in
+/// [`well_known::ManifestMeta::defaults`].
+const MCP_PUBLIC_URL_ENV: &str = "MCP_PUBLIC_URL";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -219,6 +240,7 @@ fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
     llms_txt_router: Option<Router>,
+    well_known_router: Router,
     rate_limiter: Arc<dyn auth::RateLimiter>,
     mode: Mode,
     cancel: CancellationToken,
@@ -244,7 +266,12 @@ fn build_router(
         // personal-mode badge and multi-user auth UI. No DB
         // or auth dependency, so it serves in personal mode
         // too.
-        .merge(api_routes::config_router(mode));
+        .merge(api_routes::config_router(mode))
+        // #7.2 — `/.well-known/mcp.json` is always-on because the
+        // tool registry + env config are available regardless of
+        // Storage. Merged here so it sits alongside `/healthz`
+        // and `/mcp` in the IP-rate-limit layer below.
+        .merge(well_known_router);
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -311,6 +338,12 @@ async fn serve() -> anyhow::Result<()> {
     builder = wire_db_tools_if_available(builder, storage.clone());
     let dispatcher = builder.build();
     let tool_count = dispatcher.len();
+    // Build the `/.well-known/mcp.json` router BEFORE the
+    // dispatcher gets moved into `McpServer`. The manifest is
+    // rendered once at boot from a dispatcher snapshot — cloning
+    // the registry here is cheap (it's `Arc`-backed) and means
+    // the well-known surface and `/mcp` see identical tool lists.
+    let well_known_router = build_well_known_router(&dispatcher, mode);
     let server = McpServer::new(dispatcher, gateway_implementation())
         .with_instructions("Taiwan Data Hub MCP server.");
 
@@ -335,6 +368,7 @@ async fn serve() -> anyhow::Result<()> {
         server,
         auth_router,
         llms_txt_router,
+        well_known_router,
         rate_limiter,
         mode,
         cancel.child_token(),
@@ -492,11 +526,41 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     Some(llms_txt::router(cache))
 }
 
+/// Build the `/.well-known/mcp.json` subrouter (#7.2). Always
+/// mountable — the manifest derives from the in-process
+/// dispatcher + env config, so there's no Storage dependency.
+///
+/// Snapshots the dispatcher at boot so the manifest body is
+/// rendered once; subsequent registrations would not be picked up,
+/// but the registry is fixed for the process lifetime.
+fn build_well_known_router(dispatcher: &Dispatcher, mode: Mode) -> Router {
+    let mut meta = well_known::ManifestMeta::defaults(mode, PKG_VERSION);
+    if let Some(raw) = non_empty_env(MCP_PUBLIC_URL_ENV) {
+        match normalise_llms_txt_base_url(&raw) {
+            Ok(base) => meta.public_base_url = base,
+            Err(e) => tracing::warn!(
+                error = %e,
+                value = %raw,
+                "{MCP_PUBLIC_URL_ENV} rejected; falling back to default base URL",
+            ),
+        }
+    }
+    tracing::info!(
+        mode = mode.as_str(),
+        "/.well-known/mcp.json manifest mounted"
+    );
+    well_known::router(dispatcher, &meta)
+}
+
 /// Validate + normalise the `LLMS_TXT_BASE_URL` value. Trims any
 /// trailing `/` so the renderer's `{base}/llms-page/{n}` template
 /// can't produce `//llms-page/...` URLs, and parses the value via
 /// `Url::parse` so a malformed input is rejected at boot rather
 /// than silently producing broken cross-links.
+///
+/// Shared with [`build_well_known_router`] so `MCP_PUBLIC_URL`
+/// and `LLMS_TXT_BASE_URL` agree on what "valid base URL" means —
+/// any future tightening of the validator reaches both surfaces.
 fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -1238,6 +1302,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1283,6 +1352,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1339,6 +1413,11 @@ mod tests {
             test_server(),
             None,
             None,
+            // Empty router is fine for these tests — none of them
+            // hit `/.well-known/mcp.json`. The real wiring is
+            // exercised by the `well_known::tests` module against
+            // a stub dispatcher.
+            Router::new(),
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1450,7 +1529,15 @@ mod tests {
         let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
-        assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        // Always-on now includes /.well-known/mcp.json (#7.2) since
+        // the manifest derives from in-process state with no DB
+        // dependency. /llms.txt routes still don't appear without
+        // DATABASE_URL set.
+        assert!(
+            entry
+                .detail
+                .contains("public: /healthz,/readyz,/mcp,/.well-known/mcp.json")
+        );
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
         assert!(entry.detail.contains("gated: <none>"));
@@ -1500,9 +1587,16 @@ mod tests {
     #[test]
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
-        assert_eq!(without, vec!["/healthz", "/readyz", "/mcp"]);
+        // Always-on set is /healthz, /readyz, /mcp, and (since
+        // #7.2) /.well-known/mcp.json. The llms.txt routes must
+        // NOT appear without the storage flag set.
+        assert_eq!(
+            without,
+            vec!["/healthz", "/readyz", "/mcp", "/.well-known/mcp.json"],
+        );
         let with = resolved_public_routes(true);
         assert!(with.contains(&"/healthz"));
+        assert!(with.contains(&"/.well-known/mcp.json"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
     }
