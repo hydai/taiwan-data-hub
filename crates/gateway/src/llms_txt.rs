@@ -11,11 +11,13 @@
 //!
 //! The snapshot is built on demand the first time any of the three
 //! routes is hit and cached in `Arc<RwLock<Option<…>>>`. A background
-//! tokio task spawned at boot invalidates the snapshot every 24 h so
-//! the document tracks the catalog without operators having to wire a
-//! webhook. Storage writes can also call [`LlmsTxtCache::invalidate`]
-//! directly when they want the next request to rebuild — that hook
-//! lands separately and isn't required for the M7 `DoD`.
+//! tokio task spawned at boot refreshes the snapshot every 24 h —
+//! it builds the new snapshot first and only swaps it into the
+//! cache on success, so a transient upstream blip can't open a
+//! cold-cache window. Storage writes can also call
+//! [`LlmsTxtCache::invalidate`] directly when they want the next
+//! request to rebuild — that hook lands separately and isn't
+//! required for the M7 `DoD`.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -120,7 +122,8 @@ impl Representation {
 /// Snapshot of the rendered llms.txt corpus. `pages.len() == 1` means
 /// the catalog fit under the size budget so `/llms.txt` serves that
 /// single page directly; `> 1` means we paginated and `/llms.txt`
-/// redirects callers to the index.
+/// serves the index body in place (no HTTP redirect — the same
+/// route returns the index payload).
 ///
 /// Each [`Representation`] pairs the rendered body with an `ETag`
 /// derived from exactly its own bytes — `/llms.txt`,
