@@ -72,26 +72,26 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 	}
 
 	/**
-	 * The shim posts READY as soon as it loads. If the iframe loaded
-	 * from cache before `attachPlaygroundHost` ran (fast/repeat
-	 * visits), the READY message has already been dispatched to a
-	 * window with no listener, and `tdh.getState()` inside the
-	 * playground would hang forever. Belt-and-braces:
+	 * Recovery for the "shim already posted READY before this host
+	 * was attached" race (cached iframe loads). The previous attempt
+	 * here gated on `iframe.contentDocument.readyState`, but a
+	 * sandboxed iframe has an opaque cross-origin document so
+	 * `contentDocument` is always `null` — the check could never
+	 * recover the case it was meant to fix.
 	 *
-	 *   - send INIT immediately if the iframe is already loaded
-	 *   - send INIT on the iframe's next `load` event regardless
-	 *   - send INIT in response to READY (existing path)
+	 * Simpler: fire INIT unconditionally at attach time, and also on
+	 * the next `load` event. The shim resolves its init promise
+	 * exactly once, so any of these firing is harmless; what we MUST
+	 * avoid is zero INITs reaching a loaded shim.
 	 *
-	 * The shim de-duplicates INIT internally, so all three firing is
-	 * harmless — what we MUST avoid is *zero* INITs reaching the
-	 * playground.
+	 *   - INIT at attach: handles the cached-load race. If the iframe
+	 *     hasn't loaded yet, the postMessage hits the about:blank
+	 *     contentWindow and is silently discarded — no error, no
+	 *     side effect, and the `load` path below picks it back up.
+	 *   - INIT on `load`: handles the fresh-load case.
+	 *   - INIT on READY (in `handleMessage`): handles the steady-
+	 *     state contract.
 	 */
-	function kickInit(): void {
-		if (iframe.contentDocument && iframe.contentDocument.readyState === 'complete') {
-			sendInit();
-		}
-	}
-
 	function handleIframeLoad(): void {
 		sendInit();
 	}
@@ -258,7 +258,7 @@ export function attachPlaygroundHost(opts: PlaygroundHostOptions): () => void {
 
 	window.addEventListener('message', handleMessage);
 	iframe.addEventListener('load', handleIframeLoad);
-	kickInit();
+	sendInit();
 
 	return function detach(): void {
 		window.removeEventListener('message', handleMessage);
