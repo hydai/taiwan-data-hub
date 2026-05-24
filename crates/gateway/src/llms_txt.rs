@@ -638,7 +638,7 @@ async fn handler_page(
     headers: HeaderMap,
 ) -> Response {
     if n == 0 {
-        return (StatusCode::NOT_FOUND, "page numbers start at 1").into_response();
+        return page_not_found_response("page numbers start at 1");
     }
     match cache.get_or_build().await {
         Ok(snap) => {
@@ -647,11 +647,28 @@ async fn handler_page(
             }
             match snap.pages.get(n - 1) {
                 Some(body) => success_response(body.clone(), &snap.etag, snap.generated_at),
-                None => (StatusCode::NOT_FOUND, "no such page").into_response(),
+                None => page_not_found_response("no such page"),
             }
         }
         Err(e) => error_response(&e),
     }
+}
+
+/// 404 for `/llms-page/{n}` that explicitly says "don't cache me".
+///
+/// Agents walk pagination by following `Next page` links until they
+/// hit a 404; that sentinel must reflect the *current* snapshot, not
+/// a cached negative response from before the catalog grew. Without
+/// `Cache-Control`, intermediary caches can plausibly hold the 404
+/// for hours under their heuristic-freshness rules — long enough to
+/// mask a freshly-added trailing page. `no-store` is the
+/// belt-and-braces answer (per RFC 9111 §5.2.2.5 it forbids both
+/// shared and private caches from retaining the response).
+fn page_not_found_response(message: &'static str) -> Response {
+    let mut resp = (StatusCode::NOT_FOUND, message).into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
 }
 
 fn not_modified_if_match(
@@ -1183,6 +1200,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn router_emits_no_store_on_page_404() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let source: DatasetSource = Arc::new(StubSearcher::with_pages(vec![SearchPage {
+            hits: vec![fixture_hit("a", None)],
+            next_offset: None,
+        }]));
+        let cache = Arc::new(LlmsTxtCache::new(source, meta()));
+        let app = router(cache);
+
+        // Out-of-range page → 404 with no-store so intermediary
+        // caches can't pin the "end of pagination" marker after
+        // the catalog grows.
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/llms-page/99").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store",
+        );
+
+        // Page zero → same explicit no-store policy.
+        let resp = app
+            .oneshot(Request::get("/llms-page/0").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store",
+        );
     }
 
     #[tokio::test]

@@ -471,8 +471,15 @@ fn wire_db_tools_if_available(
 fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router> {
     let storage = storage?;
     let mut meta = llms_txt::LlmsTxtMeta::defaults();
-    if let Some(base) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
-        meta.public_base_url = base;
+    if let Some(raw) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
+        match normalise_llms_txt_base_url(&raw) {
+            Ok(base) => meta.public_base_url = base,
+            Err(e) => tracing::warn!(
+                error = %e,
+                value = %raw,
+                "{LLMS_TXT_BASE_URL_ENV} rejected; falling back to default base URL",
+            ),
+        }
     }
     let source: llms_txt::DatasetSource = Arc::new(storage);
     let cache = Arc::new(llms_txt::LlmsTxtCache::new(source, meta));
@@ -483,6 +490,29 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
     drop(cache.clone().spawn_refresh_task());
     tracing::info!("llms.txt subrouter enabled at /llms.txt + /llms-index.txt + /llms-page/{{n}}");
     Some(llms_txt::router(cache))
+}
+
+/// Validate + normalise the `LLMS_TXT_BASE_URL` value. Trims any
+/// trailing `/` so the renderer's `{base}/llms-page/{n}` template
+/// can't produce `//llms-page/...` URLs, and parses the value via
+/// `Url::parse` so a malformed input is rejected at boot rather
+/// than silently producing broken cross-links.
+fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("value is blank after trimming".into());
+    }
+    let url = Url::parse(trimmed).map_err(|e| format!("not a valid URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "scheme must be http or https, got {:?}",
+            url.scheme()
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("missing host component".into());
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Build the `/v1/api-keys` subrouter (session-gated). Returns
@@ -1452,6 +1482,34 @@ mod tests {
         assert!(with.contains(&"/healthz"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
+    }
+
+    #[test]
+    fn llms_txt_base_url_trims_trailing_slash_and_accepts_https() {
+        assert_eq!(
+            normalise_llms_txt_base_url("https://example.com/").unwrap(),
+            "https://example.com",
+        );
+        assert_eq!(
+            normalise_llms_txt_base_url("https://example.com").unwrap(),
+            "https://example.com",
+        );
+        assert_eq!(
+            normalise_llms_txt_base_url("  http://hub.local:8080  ").unwrap(),
+            "http://hub.local:8080",
+        );
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_malformed_or_non_http_inputs() {
+        assert!(normalise_llms_txt_base_url("not a url").is_err());
+        assert!(normalise_llms_txt_base_url("/relative/path").is_err());
+        assert!(normalise_llms_txt_base_url("").is_err());
+        assert!(normalise_llms_txt_base_url("ftp://example.com").is_err());
+        // `file:` URLs parse but have no host — caught by the
+        // host-presence check so cross-link rendering can't
+        // silently produce `file:///llms-page/...` links.
+        assert!(normalise_llms_txt_base_url("file:///etc/passwd").is_err());
     }
 
     #[test]
