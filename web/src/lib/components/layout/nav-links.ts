@@ -11,6 +11,7 @@ export const navLinks = [
 	{ href: '/datasets', label: 'Datasets' },
 	{ href: '/collections', label: 'Collections' },
 	{ href: '/connectors', label: 'Connectors' },
+	{ href: '/playgrounds', label: 'Playgrounds' },
 	{ href: '/licenses', label: 'Licenses' }
 ] as const;
 

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-TW">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Playground Template</title>
+		<link rel="stylesheet" href="./style.css" />
+	</head>
+	<body>
+		<main>
+			<h1>Playground framework template</h1>
+			<p class="muted">
+				Edit the counter — the share-link state in the parent URL updates with every change.
+			</p>
+
+			<section aria-labelledby="counter-h">
+				<h2 id="counter-h">Shared state</h2>
+				<div class="counter">
+					<button id="dec" type="button" aria-label="Decrease">−</button>
+					<output id="value">0</output>
+					<button id="inc" type="button" aria-label="Increase">+</button>
+				</div>
+			</section>
+
+			<section aria-labelledby="api-h">
+				<h2 id="api-h">Proxied API call</h2>
+				<button id="ping" type="button">Call <code>/api/v1/healthz</code> via parent</button>
+				<pre id="api-out" class="api-out" aria-live="polite"></pre>
+			</section>
+		</main>
+		<script src="./__framework.js"></script>
+		<script src="./app.js"></script>
+	</body>
+</html>
