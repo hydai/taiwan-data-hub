@@ -2,9 +2,10 @@
  *
  * Builds a 6-col × 14-row CSS grid of <button> tiles (one per
  * county), colors each by the selected metric (density or
- * population) using a 7-step viridis-ish palette, and shows a
- * detail panel on click. Selected county + metric are pushed to
- * the framework share-link state.
+ * population) using a 7-step slate-grayscale palette (defined as
+ * `.bin-0` … `.bin-6` in style.css), and shows a detail panel on
+ * click. Selected county + metric are pushed to the framework
+ * share-link state.
  *
  * Tile-cartogram chosen over a real geographic projection so the
  * playground stays self-contained: a township-level real map

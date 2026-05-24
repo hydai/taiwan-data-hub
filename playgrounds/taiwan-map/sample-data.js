@@ -10,15 +10,16 @@
  * profile. Density = population / area_km2 (computed at render
  * time).
  *
- * `tile_layout` is a 6-column × 14-row cartogram — NOT a real
- * geographic projection. Each county sits in a row roughly
- * matching its north-to-south position on the main island
- * (rows 1-14); outer islands cluster in column 6. The trade-off:
- * we lose cartographic accuracy but the bundle stays under 5 KB,
- * which keeps the playground snappy under the framework's
- * Lighthouse budget. A real geo_basemap render would use
- * MapLibre with the full township-level boundary vectors loaded
- * from the gateway — out of scope for this self-contained demo.
+ * Layout is a 6-column × 14-row cartogram — NOT a real geographic
+ * projection. Each county row carries its own `row` and `col`
+ * integers (no separate layout table); rows roughly match north-
+ * to-south position on the main island (1-14) and outer islands
+ * cluster in column 6. The trade-off: we lose cartographic
+ * accuracy but the bundle stays under 5 KB, which keeps the
+ * playground snappy under the framework's Lighthouse budget. A
+ * real geo_basemap render would use MapLibre with the full
+ * township-level boundary vectors loaded from the gateway —
+ * out of scope for this self-contained demo.
  */
 
 window.__TAIWAN_MAP_DATA__ = {
