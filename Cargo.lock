@@ -1581,6 +1581,7 @@ name = "gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "auth",
  "axum",
  "base64",
@@ -1592,11 +1593,13 @@ dependencies = [
  "polars",
  "serde",
  "serde_json",
+ "sha2",
  "shared",
  "sqlx",
  "storage",
  "tempfile",
  "testcontainers-modules",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tools-data",

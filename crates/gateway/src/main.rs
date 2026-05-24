@@ -17,6 +17,7 @@ mod api_keys_routes;
 mod api_routes;
 mod bookmarks_routes;
 mod comments_routes;
+mod llms_txt;
 mod moderation_routes;
 mod rate_limit_middleware;
 mod ratings_routes;
@@ -24,6 +25,7 @@ mod reports_routes;
 mod session_middleware;
 mod submissions_routes;
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 
 use anyhow::Context;
@@ -59,11 +61,41 @@ const DEFAULT_ADDR: &str = "0.0.0.0:8080";
 /// a session across multiple HTTP requests.
 const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 
-/// HTTP routes the gateway always exposes without auth. The `serve`
-/// boot log prints this list so operators can sanity-check what is
-/// reachable; the `doctor` subcommand reuses the same source of truth
-/// so the two outputs cannot disagree.
-const PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+/// HTTP routes the gateway **always** mounts without auth or
+/// optional dependencies. The `serve` boot log and the `doctor`
+/// subcommand both anchor on this constant so the two outputs
+/// cannot disagree.
+///
+/// Routes that mount conditionally (e.g. `/llms.txt` needs
+/// `Storage`, `/api/v1/me` needs the session middleware) are NOT
+/// listed here — `resolved_public_routes` folds them in only when
+/// their dependency is actually wired up, so the boot log never
+/// advertises an endpoint that 404s.
+const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &["/healthz", "/readyz", "/mcp"];
+
+/// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
+/// available. Kept as a separate constant so both the boot log and
+/// `doctor` can show "mounted" vs "skipped" without re-encoding
+/// the list.
+const LLMS_TXT_PUBLIC_ROUTES: &[&str] = &["/llms.txt", "/llms-index.txt", "/llms-page/{n}"];
+
+/// Render the public-route list the boot log + doctor display.
+/// Conditionally folds in optional subrouters so an operator
+/// scanning the log sees exactly the endpoints the binary will
+/// actually serve.
+fn resolved_public_routes(llms_txt_enabled: bool) -> Vec<&'static str> {
+    let mut routes: Vec<&'static str> = ALWAYS_ON_PUBLIC_ROUTES.to_vec();
+    if llms_txt_enabled {
+        routes.extend(LLMS_TXT_PUBLIC_ROUTES);
+    }
+    routes
+}
+
+/// Env var: optional override for the host embedded in cross-links
+/// the `/llms.txt` document renders (e.g. <https://hub.example/datasets/x>).
+/// Defaults to the placeholder in [`llms_txt::LlmsTxtMeta::defaults`] when
+/// unset so the route works without configuration.
+const LLMS_TXT_BASE_URL_ENV: &str = "LLMS_TXT_BASE_URL";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -186,6 +218,7 @@ fn gateway_implementation() -> Implementation {
 fn build_router(
     server: McpServer,
     auth_router: Option<Router>,
+    llms_txt_router: Option<Router>,
     rate_limiter: Arc<dyn auth::RateLimiter>,
     mode: Mode,
     cancel: CancellationToken,
@@ -214,6 +247,9 @@ fn build_router(
         .merge(api_routes::config_router(mode));
     if let Some(auth) = auth_router {
         router = router.merge(auth);
+    }
+    if let Some(llms) = llms_txt_router {
+        router = router.merge(llms);
     }
     // IP rate-limit middleware wraps the WHOLE router so it
     // sees every route the gateway serves (`/mcp` and any
@@ -249,18 +285,22 @@ async fn serve() -> anyhow::Result<()> {
     let mode = Mode::from_env().context("invalid MODE env var")?;
     let addr = read_gateway_addr()?;
 
-    info!(
-        mode = mode.as_str(),
-        public_routes = PUBLIC_ROUTES.join(","),
-        gated_routes = gated_route_list(mode),
-        "operating mode resolved"
-    );
-
     // Single Storage handle reused by the DB-backed MCP tools AND the
     // #4.6 api-keys subrouter. Connecting once at boot means a transient
     // DB outage doesn't double the gateway's startup pressure on the
     // pool; both consumers share the same pool's connection lifecycle.
     let storage = connect_storage_if_available().await;
+
+    // Log mode + the routes that will actually be mounted. The
+    // resolved list folds in optional subrouters (e.g. /llms.txt
+    // when Storage is available) so the boot log can't advertise
+    // an endpoint that 404s.
+    info!(
+        mode = mode.as_str(),
+        public_routes = resolved_public_routes(storage.is_some()).join(","),
+        gated_routes = gated_route_list(mode),
+        "operating mode resolved"
+    );
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
@@ -283,10 +323,18 @@ async fn serve() -> anyhow::Result<()> {
     let rate_limiter = build_rate_limiter(storage.clone());
 
     let cancel = CancellationToken::new();
+    // `/llms.txt` (#7.1) needs Storage to read the catalog. Build the
+    // cache + router before consuming `storage` into the auth helper
+    // so both surfaces share the same connection pool. The refresh
+    // task is detached: it lives for the process lifetime and the
+    // JoinHandle is intentionally dropped — the gateway has no
+    // shutdown drain for background tasks today.
+    let llms_txt_router = build_llms_txt_router_if_available(storage.clone());
     let auth_router = build_auth_router_if_available(storage, rate_limiter.clone());
     let app = build_router(
         server,
         auth_router,
+        llms_txt_router,
         rate_limiter,
         mode,
         cancel.child_token(),
@@ -410,6 +458,84 @@ fn wire_db_tools_if_available(
     };
     let router = build_object_store_router();
     tools_data::register_db_tools(builder, storage, router)
+}
+
+/// Build the `/llms.txt` + paginated variants (#7.1). Returns
+/// `None` when no `Storage` handle is available — the route would
+/// have nothing to enumerate without the catalog.
+///
+/// Spawns the nightly refresh task as a side effect because the
+/// task and the cache share a single `Arc` and the cache itself is
+/// the only consumer of the handle — there's nothing to gain by
+/// returning the join handle to the caller.
+fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router> {
+    let storage = storage?;
+    let mut meta = llms_txt::LlmsTxtMeta::defaults();
+    if let Some(raw) = non_empty_env(LLMS_TXT_BASE_URL_ENV) {
+        match normalise_llms_txt_base_url(&raw) {
+            Ok(base) => meta.public_base_url = base,
+            Err(e) => tracing::warn!(
+                error = %e,
+                value = %raw,
+                "{LLMS_TXT_BASE_URL_ENV} rejected; falling back to default base URL",
+            ),
+        }
+    }
+    let source: llms_txt::DatasetSource = Arc::new(storage);
+    let cache = Arc::new(llms_txt::LlmsTxtCache::new(source, meta));
+    // Discard the JoinHandle deliberately — the task lives for the
+    // process lifetime and the gateway has no shutdown drain for
+    // background tasks today. `drop(_)` defeats clippy's
+    // `let_underscore_future` lint without us pretending to await it.
+    drop(cache.clone().spawn_refresh_task());
+    tracing::info!("llms.txt subrouter enabled at /llms.txt + /llms-index.txt + /llms-page/{{n}}");
+    Some(llms_txt::router(cache))
+}
+
+/// Validate + normalise the `LLMS_TXT_BASE_URL` value. Trims any
+/// trailing `/` so the renderer's `{base}/llms-page/{n}` template
+/// can't produce `//llms-page/...` URLs, and parses the value via
+/// `Url::parse` so a malformed input is rejected at boot rather
+/// than silently producing broken cross-links.
+fn normalise_llms_txt_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("value is blank after trimming".into());
+    }
+    let url = Url::parse(trimmed).map_err(|e| format!("not a valid URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "scheme must be http or https, got {:?}",
+            url.scheme()
+        ));
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("missing host component".into());
+    }
+    // The renderer concatenates `{base}` with literal path
+    // suffixes (`/llms-page/{n}`, `/datasets/{slug}`), so a
+    // base carrying query (`?…`) or fragment (`#…`) components
+    // would emit URLs like `https://host?x=1/llms-page/1`
+    // that break path resolution. Reject both so the operator
+    // sees a `warn!` at boot instead of broken cross-links
+    // in production.
+    if url.query().is_some() {
+        return Err("must not carry a query string".into());
+    }
+    if url.fragment().is_some() {
+        return Err("must not carry a fragment".into());
+    }
+    // Userinfo (`user:pass@host`) would be rendered verbatim into
+    // every cross-link in `/llms*.txt`, leaking credentials to any
+    // agent that fetches the document. Reject defensively even
+    // though operators are unlikely to set this on purpose.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "must not carry userinfo (user:pass@) — credentials would leak into rendered links"
+                .into(),
+        );
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Build the `/v1/api-keys` subrouter (session-gated). Returns
@@ -781,7 +907,7 @@ impl DoctorReport {
 
     fn from_snapshot(env: &EnvSnapshot) -> Self {
         let mut report = Self::default();
-        report.push_entry(validate_mode(&env.mode));
+        report.push_entry(validate_mode(&env.mode, env.database_url.as_deref()));
         report.push_entry(validate_gateway_addr(env.gateway_addr.as_deref()));
         report.push_entry(validate_database_url(env.database_url.as_deref()));
         report.push_entry(validate_object_store(
@@ -890,22 +1016,36 @@ fn doctor_entry(label: &str, status: DoctorStatus, detail: impl Into<String>) ->
     }
 }
 
-fn validate_mode(raw: &ModeRaw) -> DoctorEntry {
+fn validate_mode(raw: &ModeRaw, database_url: Option<&str>) -> DoctorEntry {
     let parsed = match raw {
         ModeRaw::NonUnicode => Err(ModeParseError::NonUnicode),
         ModeRaw::Unset => Mode::from_env_value(None),
         ModeRaw::Set(s) => Mode::from_env_value(Some(s.as_str())),
     };
+    // The MODE entry only lists ALWAYS-ON public routes — they are
+    // the only ones doctor can promise the binary will serve
+    // without a runtime connection probe. Optional surfaces (e.g.
+    // `/llms.txt`, which requires `Storage::connect` to succeed,
+    // not just `DATABASE_URL` to be set) are reported via a
+    // separate "would mount" line below so a doctor "DB-down but
+    // env-set" snapshot can't disagree with what `serve` actually
+    // wires up.
     match parsed {
-        Ok(mode) => doctor_entry(
-            "MODE",
-            DoctorStatus::Ok,
-            format!(
+        Ok(mode) => {
+            let mut detail = format!(
                 "{mode} (public: {}; gated: {})",
-                PUBLIC_ROUTES.join(","),
+                ALWAYS_ON_PUBLIC_ROUTES.join(","),
                 gated_route_list(mode),
-            ),
-        ),
+            );
+            if database_url.is_some() {
+                let conditional = LLMS_TXT_PUBLIC_ROUTES.join(",");
+                let _ = write!(
+                    detail,
+                    "; conditional (mounted iff Storage::connect succeeds): {conditional}",
+                );
+            }
+            doctor_entry("MODE", DoctorStatus::Ok, detail)
+        }
         Err(e) => doctor_entry("MODE", DoctorStatus::Error, e.to_string()),
     }
 }
@@ -1097,6 +1237,7 @@ mod tests {
         let app = build_router(
             test_server(),
             None,
+            None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
             CancellationToken::new(),
@@ -1140,6 +1281,7 @@ mod tests {
     async fn cors_is_scoped_to_mcp_and_does_not_leak_to_healthz() {
         let app = build_router(
             test_server(),
+            None,
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
@@ -1195,6 +1337,7 @@ mod tests {
     async fn mcp_post_initialize_returns_2025_11_25_with_gateway_identity() {
         let app = build_router(
             test_server(),
+            None,
             None,
             Arc::new(auth::InMemoryRateLimiter::default()),
             Mode::Personal,
@@ -1301,19 +1444,45 @@ mod tests {
 
     #[test]
     fn validate_mode_renders_resolved_routes() {
-        let entry = validate_mode(&ModeRaw::Unset);
+        // No DATABASE_URL → only always-on routes; the `conditional:`
+        // suffix is omitted entirely so doctor never advertises a
+        // route the binary won't even try to mount.
+        let entry = validate_mode(&ModeRaw::Unset, None);
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         assert!(entry.detail.contains("public: /healthz,/readyz,/mcp"));
+        assert!(!entry.detail.contains("/llms.txt"));
+        assert!(!entry.detail.contains("conditional"));
         assert!(entry.detail.contains("gated: <none>"));
 
-        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()));
+        let entry = validate_mode(&ModeRaw::Set("multi-user".to_owned()), None);
         assert!(entry.detail.contains("gated: <pending #4.5>"));
     }
 
     #[test]
+    fn validate_mode_marks_llms_txt_conditional_when_database_url_set() {
+        // DATABASE_URL set → llms.txt routes appear under
+        // `conditional:` since doctor can't actually probe
+        // `Storage::connect` (it deliberately avoids runtime
+        // probes). This keeps doctor and `serve`'s boot log
+        // in agreement even when the DB is unreachable.
+        let entry = validate_mode(&ModeRaw::Unset, Some("postgres://stub/stub"));
+        assert_eq!(entry.status, DoctorStatus::Ok);
+        assert!(
+            entry
+                .detail
+                .contains("conditional (mounted iff Storage::connect succeeds)"),
+            "doctor must mark /llms.txt routes as conditional, got: {}",
+            entry.detail,
+        );
+        assert!(entry.detail.contains("/llms.txt"));
+        assert!(entry.detail.contains("/llms-index.txt"));
+        assert!(entry.detail.contains("/llms-page/{n}"));
+    }
+
+    #[test]
     fn validate_mode_flags_unknown_value() {
-        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()));
+        let entry = validate_mode(&ModeRaw::Set("garbage".to_owned()), None);
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("invalid MODE value"));
     }
@@ -1323,9 +1492,70 @@ mod tests {
         // The runtime errors on a non-Unicode MODE via Mode::from_env;
         // doctor must surface the same condition rather than collapse
         // it to "unset → personal".
-        let entry = validate_mode(&ModeRaw::NonUnicode);
+        let entry = validate_mode(&ModeRaw::NonUnicode, None);
         assert_eq!(entry.status, DoctorStatus::Error);
         assert!(entry.detail.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn resolved_public_routes_includes_llms_only_when_enabled() {
+        let without = resolved_public_routes(false);
+        assert_eq!(without, vec!["/healthz", "/readyz", "/mcp"]);
+        let with = resolved_public_routes(true);
+        assert!(with.contains(&"/healthz"));
+        assert!(with.contains(&"/llms.txt"));
+        assert!(with.contains(&"/llms-page/{n}"));
+    }
+
+    #[test]
+    fn llms_txt_base_url_trims_trailing_slash_and_accepts_https() {
+        assert_eq!(
+            normalise_llms_txt_base_url("https://example.com/").unwrap(),
+            "https://example.com",
+        );
+        assert_eq!(
+            normalise_llms_txt_base_url("https://example.com").unwrap(),
+            "https://example.com",
+        );
+        assert_eq!(
+            normalise_llms_txt_base_url("  http://hub.local:8080  ").unwrap(),
+            "http://hub.local:8080",
+        );
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_malformed_or_non_http_inputs() {
+        assert!(normalise_llms_txt_base_url("not a url").is_err());
+        assert!(normalise_llms_txt_base_url("/relative/path").is_err());
+        assert!(normalise_llms_txt_base_url("").is_err());
+        assert!(normalise_llms_txt_base_url("ftp://example.com").is_err());
+        // `file:` URLs parse but have no host — caught by the
+        // host-presence check so cross-link rendering can't
+        // silently produce `file:///llms-page/...` links.
+        assert!(normalise_llms_txt_base_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_query_or_fragment() {
+        // String concatenation with query strings or fragments
+        // produces malformed cross-links (e.g.
+        // `https://host?x=1/llms-page/1`). Both shapes must
+        // fail loud at boot.
+        let err = normalise_llms_txt_base_url("https://example.com?x=1").unwrap_err();
+        assert!(err.contains("query"), "unexpected error: {err}");
+        let err = normalise_llms_txt_base_url("https://example.com/#frag").unwrap_err();
+        assert!(err.contains("fragment"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn llms_txt_base_url_rejects_userinfo() {
+        // Credentials in the base URL would be rendered verbatim
+        // into every cross-link the gateway serves. Reject both
+        // user-only and user:pass shapes.
+        let err = normalise_llms_txt_base_url("https://alice@example.com").unwrap_err();
+        assert!(err.contains("userinfo"), "unexpected error: {err}");
+        let err = normalise_llms_txt_base_url("https://alice:secret@example.com").unwrap_err();
+        assert!(err.contains("userinfo"), "unexpected error: {err}");
     }
 
     #[test]

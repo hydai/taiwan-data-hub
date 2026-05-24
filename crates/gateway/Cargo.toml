@@ -32,6 +32,11 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `sha2` powers the strong ETag the /llms.txt route (#7.1) sends so
+# CDNs and well-behaved agents can revalidate cheaply. New direct dep
+# on this crate; workspace pin already exists for storage / tools-*.
+sha2 = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
@@ -45,6 +50,10 @@ anyhow = { workspace = true }
 [dev-dependencies]
 # tokio is already a normal dep with `macros` + `rt-multi-thread`
 # enabled at the workspace level — no need to re-declare it here.
+# `async-trait` is needed for the in-process `DatasetSearcher` stub
+# the `llms_txt` unit tests use (#7.1) — keeping it dev-only because
+# the production code doesn't author any new traits.
+async-trait = { workspace = true }
 connectors = { path = "../connectors" }
 polars = { workspace = true }
 sqlx = { workspace = true }
