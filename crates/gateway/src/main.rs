@@ -89,10 +89,11 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
     "/.well-known/oauth-protected-resource",
     // #7.5 — OpenAPI 3.1 spec + Swagger UI + ReDoc. Generated
     // from compile-time utoipa annotations, no runtime
-    // dependency, so always-on.
-    "/api/openapi.json",
-    "/api/docs",
-    "/api/redoc",
+    // dependency, so always-on. Mount points come from
+    // `openapi` so the router config + this list can't drift.
+    openapi::OPENAPI_JSON_PATH,
+    openapi::SWAGGER_UI_PATH,
+    openapi::REDOC_PATH,
 ];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
@@ -556,8 +557,14 @@ fn build_llms_txt_router_if_available(storage: Option<Storage>) -> Option<Router
 /// grepping the boot log can attribute the `OpenAPI` surfaces to
 /// this helper rather than to `build_well_known_router`.
 fn build_openapi_router() -> Router {
+    // Mount points come from the `openapi` module so this log
+    // line can't drift from the actual router config — a
+    // future rename touches both call sites together.
     tracing::info!(
-        "OpenAPI surfaces mounted: /api/openapi.json, /api/docs (Swagger UI), /api/redoc"
+        spec = openapi::OPENAPI_JSON_PATH,
+        swagger_ui = openapi::SWAGGER_UI_PATH,
+        redoc = openapi::REDOC_PATH,
+        "OpenAPI surfaces mounted"
     );
     openapi::router()
 }

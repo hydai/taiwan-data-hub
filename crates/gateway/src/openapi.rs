@@ -48,16 +48,20 @@ use crate::api_routes;
 )]
 pub struct ApiDoc;
 
-/// Mount point for the `OpenAPI` JSON document. Tests pin the
-/// literal path so a future rename surfaces immediately rather
-/// than as a stale link in the api-catalog.
-const OPENAPI_JSON_PATH: &str = "/api/openapi.json";
+/// Mount point for the `OpenAPI` JSON document. `pub` so
+/// `main.rs` can echo the same literal into its
+/// `ALWAYS_ON_PUBLIC_ROUTES` list without re-typing it — keeps
+/// the router config and the boot-log/doctor view in lockstep
+/// even when a future rename moves the path.
+pub const OPENAPI_JSON_PATH: &str = "/api/openapi.json";
 
-/// Mount point for the Swagger UI.
-const SWAGGER_UI_PATH: &str = "/api/docs";
+/// Mount point for the Swagger UI. Same shared-constant pattern
+/// as [`OPENAPI_JSON_PATH`].
+pub const SWAGGER_UI_PATH: &str = "/api/docs";
 
-/// Mount point for the `ReDoc` UI.
-const REDOC_PATH: &str = "/api/redoc";
+/// Mount point for the `ReDoc` UI. Same shared-constant pattern
+/// as [`OPENAPI_JSON_PATH`].
+pub const REDOC_PATH: &str = "/api/redoc";
 
 /// Build the `OpenAPI` subrouter that serves the spec JSON +
 /// Swagger UI + `ReDoc`. Each surface is composed from the same
@@ -97,7 +101,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        // Generous cap (16 MiB) so this test doesn't tip into
+        // false failures as more endpoints + schemas get
+        // annotated. The actual response today is a few KiB;
+        // a single OpenAPI doc that exceeds 16 MiB would
+        // signal we've inlined far too many large schemas
+        // inline and should already be splitting them up.
+        let bytes = to_bytes(resp.into_body(), 16 * 1024 * 1024).await.unwrap();
         let spec: Value = serde_json::from_slice(&bytes).unwrap();
 
         // utoipa 5.x emits an `OpenAPI` 3.1 document by default —
