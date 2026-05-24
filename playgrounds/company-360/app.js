@@ -138,7 +138,10 @@
 		if (r.name_en) dl.appendChild(dlRow('英文名稱', r.name_en));
 		dl.appendChild(dlRow('地址', r.registered_address || ''));
 		dl.appendChild(
-			dlRow('資本額 (TWD)', r.capital_twd ? r.capital_twd.toLocaleString('zh-TW') : '')
+			dlRow(
+				'資本額 (TWD)',
+				typeof r.capital_twd === 'number' ? r.capital_twd.toLocaleString('zh-TW') : ''
+			)
 		);
 		dl.appendChild(dlRow('設立日期', r.established_date || ''));
 		dl.appendChild(dlRow('代表人', r.representative || ''));
