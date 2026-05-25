@@ -124,11 +124,20 @@ fn input_schema() -> Map<String, Value> {
                 "description": "Document to validate. Any JSON value."
             },
             "schema": {
-                "type": "object",
-                "description": "JSON Schema to validate against. Must itself \
-                    be a well-formed schema for the selected draft; a \
-                    malformed schema returns InvalidArguments, not a \
-                    validation failure."
+                // JSON Schema spec lets the top-level schema be a
+                // boolean: `true` accepts everything, `false`
+                // rejects everything. The `jsonschema` crate
+                // honours that, so the wrapper must too — declaring
+                // `type: object` here would have advertised a
+                // narrower contract than the underlying validator
+                // actually accepts.
+                "type": ["object", "boolean"],
+                "description": "JSON Schema to validate against. May be an \
+                    object schema OR a boolean (`true` = accept anything, \
+                    `false` = reject everything — per the JSON Schema \
+                    spec). Must itself be well-formed for the selected \
+                    draft; a malformed schema returns InvalidArguments, \
+                    not a validation failure."
             },
             "draft": {
                 "type": "string",
@@ -249,8 +258,8 @@ mod tests {
 
     #[test]
     fn missing_args_are_invalid_arguments() {
-        let err = block_on(JsonSchemaValidateTool::new().call(json!({})))
-            .expect_err("missing both");
+        let err =
+            block_on(JsonSchemaValidateTool::new().call(json!({}))).expect_err("missing both");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
 
         let err = block_on(JsonSchemaValidateTool::new().call(json!({
@@ -264,6 +273,43 @@ mod tests {
         })))
         .expect_err("missing schema");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn boolean_true_schema_accepts_anything() {
+        // Per the JSON Schema spec, `true` at the top level is
+        // the always-accept schema. The tool wrapper must let
+        // these through — Copilot R1 caught that the original
+        // input_schema forced `schema` to be an object, which
+        // would have rejected this perfectly valid request at
+        // the rmcp layer before reaching the validator.
+        for doc in [
+            json!(null),
+            json!(42),
+            json!("hello"),
+            json!({"a": 1}),
+            json!([1, 2, 3]),
+        ] {
+            let out = block_on(JsonSchemaValidateTool::new().call(json!({
+                "data": doc,
+                "schema": true
+            })))
+            .expect("call");
+            assert_eq!(out["valid"], true);
+            assert_eq!(out["errors"], json!([]));
+        }
+    }
+
+    #[test]
+    fn boolean_false_schema_rejects_everything() {
+        let out = block_on(JsonSchemaValidateTool::new().call(json!({
+            "data": { "any": "value" },
+            "schema": false
+        })))
+        .expect("call");
+        assert_eq!(out["valid"], false);
+        let errors = out["errors"].as_array().expect("errors array");
+        assert_eq!(errors.len(), 1, "false-schema → exactly one rejection");
     }
 
     #[test]

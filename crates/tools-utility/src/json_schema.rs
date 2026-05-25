@@ -128,16 +128,19 @@ mod tests {
     #[test]
     fn valid_document_returns_empty_errors() {
         let data = json!({ "name": "Alice", "age": 30 });
-        let errors = validate(&data, &user_schema(), SchemaDraft::default_draft())
-            .expect("compile");
-        assert!(errors.is_empty(), "valid doc must produce 0 errors, got {errors:?}");
+        let errors =
+            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        assert!(
+            errors.is_empty(),
+            "valid doc must produce 0 errors, got {errors:?}"
+        );
     }
 
     #[test]
     fn missing_required_field_is_an_error() {
         let data = json!({ "name": "Alice" });
-        let errors = validate(&data, &user_schema(), SchemaDraft::default_draft())
-            .expect("compile");
+        let errors =
+            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
         assert!(!errors.is_empty());
         let combined = errors
             .iter()
@@ -153,8 +156,8 @@ mod tests {
     #[test]
     fn wrong_type_carries_pointer_into_failing_field() {
         let data = json!({ "name": 42, "age": 30 });
-        let errors = validate(&data, &user_schema(), SchemaDraft::default_draft())
-            .expect("compile");
+        let errors =
+            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
         // At least one error should pin the path to /name.
         assert!(
             errors.iter().any(|e| e.instance_path == "/name"),
@@ -168,8 +171,8 @@ mod tests {
         // validator should emit one error per failure so the
         // agent can fix them in one round-trip.
         let data = json!({ "name": 42, "age": -1 });
-        let errors = validate(&data, &user_schema(), SchemaDraft::default_draft())
-            .expect("compile");
+        let errors =
+            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
         assert!(
             errors.len() >= 2,
             "expected ≥ 2 errors, got {} ({errors:?})",
@@ -180,13 +183,33 @@ mod tests {
     #[test]
     fn additional_properties_false_rejects_unknown_keys() {
         let data = json!({ "name": "Alice", "age": 30, "spurious": 1 });
-        let errors = validate(&data, &user_schema(), SchemaDraft::default_draft())
-            .expect("compile");
+        let errors =
+            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
         assert!(
-            errors.iter().any(|e| e.message.contains("spurious")
-                || e.message.contains("additional")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("spurious") || e.message.contains("additional")),
             "additionalProperties:false must reject `spurious`; got {errors:?}",
         );
+    }
+
+    #[test]
+    fn boolean_schemas_round_trip_through_validator() {
+        // The JSON Schema spec lets the top-level schema be a
+        // boolean: `true` accepts everything, `false` rejects
+        // everything. The `jsonschema` crate honours that, so the
+        // pure helper must too — pinning this behaviour here so
+        // the tool wrapper can rely on it without re-testing.
+        let ok = validate(
+            &json!({"any": "value"}),
+            &json!(true),
+            SchemaDraft::default_draft(),
+        )
+        .expect("compile bool-true");
+        assert!(ok.is_empty(), "true schema → 0 errors");
+        let bad = validate(&json!(42), &json!(false), SchemaDraft::default_draft())
+            .expect("compile bool-false");
+        assert_eq!(bad.len(), 1, "false schema → exactly one rejection");
     }
 
     #[test]
@@ -197,7 +220,10 @@ mod tests {
         // misleading pass for every document.
         let schema = json!({ "type": "objet" });
         let result = validate(&json!({}), &schema, SchemaDraft::default_draft());
-        assert!(result.is_err(), "malformed schema must be Err, got {result:?}");
+        assert!(
+            result.is_err(),
+            "malformed schema must be Err, got {result:?}"
+        );
     }
 
     #[test]
@@ -222,11 +248,9 @@ mod tests {
         // `const` is in every modern draft. This test pins that the
         // 2020-12 selector compiles a schema using it correctly.
         let schema = json!({ "const": "fixed" });
-        let ok = validate(&json!("fixed"), &schema, SchemaDraft::Draft202012)
-            .expect("compile");
+        let ok = validate(&json!("fixed"), &schema, SchemaDraft::Draft202012).expect("compile");
         assert!(ok.is_empty());
-        let bad = validate(&json!("other"), &schema, SchemaDraft::Draft202012)
-            .expect("compile");
+        let bad = validate(&json!("other"), &schema, SchemaDraft::Draft202012).expect("compile");
         assert!(!bad.is_empty());
     }
 }
