@@ -39,8 +39,19 @@ chrono = { workspace = true, features = ["clock", "std"] }
 # second crate picks it up.
 chrono-tz = "0.10"
 hex = { workspace = true }
+# #6.10 batch B follow-up — JSON Path (RFC 9535) + JSON Schema
+# (draft 2020-12 default, 7 / 2019-09 selectable per request).
+# Both are first-users in this crate; promote to
+# `[workspace.dependencies]` later if a second crate picks them
+# up. `default-features` is left enabled on `jsonschema` so the
+# canonical format vocabulary (date-time, ipv4, email, regex,
+# …) is available — most of the validator's value comes from
+# those checks, and turning them off shrinks the binary by
+# under 100 KiB.
+jsonschema = "0.30"
 mcp-core = { path = "../mcp-core" }
 regex = { workspace = true }
+serde_json_path = "0.7"
 sha2 = { workspace = true }
 slug = "0.1"
 # `std` feature pulls in `Ulid::new()` (uses SystemTime + rand);
