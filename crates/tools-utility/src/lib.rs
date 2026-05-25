@@ -32,6 +32,10 @@ pub mod geo_reverse_geocode_tool;
 pub mod hashers_tool;
 pub mod ids_tool;
 pub mod json_helpers;
+pub mod json_path;
+pub mod json_path_tool;
+pub mod json_schema;
+pub mod json_schema_validate_tool;
 pub mod national_id;
 pub mod normalize_address_tool;
 pub mod passport;
@@ -114,6 +118,13 @@ pub use hashers_tool::{
     Blake3Tool, Sha256Tool, TOOL_BLAKE3 as HASH_BLAKE3_TOOL_NAME,
     TOOL_SHA256 as HASH_SHA256_TOOL_NAME,
 };
+// #6.10 batch B follow-up — JSON Path (RFC 9535) + JSON Schema
+// validation. Two of the eight bullets the original batch
+// deferred for their heavy crates.
+pub use json_path_tool::{JsonPathTool, TOOL_NAME as JSON_PATH_TOOL_NAME};
+pub use json_schema_validate_tool::{
+    JsonSchemaValidateTool, TOOL_NAME as JSON_SCHEMA_VALIDATE_TOOL_NAME,
+};
 pub use ids_tool::{
     TOOL_ULID as GENERATE_ULID_TOOL_NAME, TOOL_UUID_V4 as GENERATE_UUID_V4_TOOL_NAME,
     TOOL_UUID_V7 as GENERATE_UUID_V7_TOOL_NAME, UlidTool, UuidV4Tool, UuidV7Tool,
@@ -191,4 +202,12 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(RegexTestTool::new())
         .register(HtmlSanitizeTool::new())
         .register(TimezoneConvertTool::new())
+        // #6.10 batch B follow-up — JSON tooling. Two more of the
+        // 20 misc tools the wave-2 DoD asks for; the remaining
+        // 6 (pdf_extract, url_to_markdown, language_detect,
+        // big5_utf8_transcode, tw_traditional_simplified,
+        // holiday_between_dates) ship in later batches because
+        // each pulls in a heavier dep audited in isolation.
+        .register(JsonPathTool::new())
+        .register(JsonSchemaValidateTool::new())
 }
