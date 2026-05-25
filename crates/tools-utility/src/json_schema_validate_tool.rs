@@ -113,12 +113,11 @@ impl ToolHandler for JsonSchemaValidateTool {
         check_body_size(&schema, "schema")?;
         let draft = parse_draft(&args)?;
 
-        let mut errors =
-            json_schema::validate(&data, &schema, draft).map_err(ToolError::InvalidArguments)?;
-        let truncated = errors.len() > MAX_ERRORS;
-        if truncated {
-            errors.truncate(MAX_ERRORS);
-        }
+        // `validate` short-circuits at MAX_ERRORS so the validator
+        // stops walking the schema as soon as the cap is hit —
+        // bounds runtime + memory, not just response size.
+        let (errors, truncated) = json_schema::validate(&data, &schema, draft, MAX_ERRORS)
+            .map_err(ToolError::InvalidArguments)?;
         let valid = errors.is_empty() && !truncated;
         let errors_json: Vec<Value> = errors
             .into_iter()

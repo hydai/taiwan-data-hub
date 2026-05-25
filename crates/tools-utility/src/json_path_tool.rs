@@ -101,12 +101,11 @@ impl ToolHandler for JsonPathTool {
             .ok_or_else(|| ToolError::InvalidArguments("missing `data`".into()))?;
         check_data_size(&data)?;
         let expression = parse_expression(&args)?;
-        let mut matches =
-            json_path::query(&data, &expression).map_err(ToolError::InvalidArguments)?;
-        let truncated = matches.len() > MAX_MATCHES;
-        if truncated {
-            matches.truncate(MAX_MATCHES);
-        }
+        // `query` short-circuits at MAX_MATCHES so the heavy work
+        // (cloning each matched subtree) stops at the cap rather
+        // than collecting everything and trimming afterwards.
+        let (matches, truncated) = json_path::query(&data, &expression, MAX_MATCHES)
+            .map_err(ToolError::InvalidArguments)?;
         let count = matches.len();
         Ok(json!({ "matches": matches, "count": count, "truncated": truncated }))
     }

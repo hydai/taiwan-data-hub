@@ -16,16 +16,36 @@ use serde_json::Value;
 use serde_json_path::JsonPath;
 
 /// Apply a `JSONPath` expression to a JSON value, returning every
-/// node the expression selects. Returns the matches in document
-/// order (the RFC 9535 guarantee).
+/// node the expression selects up to `limit` matches in document
+/// order (the RFC 9535 guarantee). Returns
+/// `(matches, truncated)` where `truncated` is `true` iff the
+/// query produced more than `limit` results; trailing matches
+/// are dropped without ever being cloned into the `Vec`.
+///
+/// Returning truncation as part of the function signature — rather
+/// than letting the caller collect everything and trim afterwards
+/// — keeps the cap a *resource* bound, not just a *response*
+/// bound. For pathological expressions like `$..*` against a
+/// near-4 MiB document, the difference is the wall-clock /
+/// allocation cost of cloning the full match set into memory
+/// before truncation.
 ///
 /// Matched values are cloned out of the input so the caller can
-/// `serde_json::to_value` the result without holding a borrow on
-/// the original document — the MCP wrapper needs an owned
-/// `Value` to put into its response envelope.
-pub fn query(input: &Value, expression: &str) -> Result<Vec<Value>, String> {
+/// hold the result without keeping a borrow on the original
+/// document — the MCP wrapper needs owned `Value`s for its
+/// response envelope.
+pub fn query(input: &Value, expression: &str, limit: usize) -> Result<(Vec<Value>, bool), String> {
     let path = JsonPath::parse(expression).map_err(|e| e.to_string())?;
-    Ok(path.query(input).all().into_iter().cloned().collect())
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    for node in path.query(input).all() {
+        if matches.len() >= limit {
+            truncated = true;
+            break;
+        }
+        matches.push(node.clone());
+    }
+    Ok((matches, truncated))
 }
 
 #[cfg(test)]
@@ -51,9 +71,15 @@ mod tests {
         })
     }
 
+    /// Most tests use this generous cap so the existing
+    /// behavioural assertions don't depend on truncation; the
+    /// truncation-specific tests use a small explicit cap.
+    const UNBOUNDED: usize = 1_000_000;
+
     #[test]
     fn root_returns_whole_document() {
-        let matches = query(&sample(), "$").expect("root query");
+        let (matches, truncated) = query(&sample(), "$", UNBOUNDED).expect("root query");
+        assert!(!truncated);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0], sample());
     }
@@ -61,7 +87,7 @@ mod tests {
     #[test]
     fn descendant_selector_collects_every_match() {
         // `$..author` — every `author` value anywhere under root.
-        let matches = query(&sample(), "$..author").expect("descendant query");
+        let (matches, _) = query(&sample(), "$..author", UNBOUNDED).expect("descendant query");
         assert_eq!(matches.len(), 4);
         let authors: Vec<&str> = matches.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(authors.contains(&"Nigel Rees"));
@@ -71,7 +97,8 @@ mod tests {
     #[test]
     fn filter_expression_works() {
         // Every book over $10 — uses RFC 9535 filter syntax.
-        let matches = query(&sample(), "$.store.book[?@.price > 10]").expect("filter query");
+        let (matches, _) =
+            query(&sample(), "$.store.book[?@.price > 10]", UNBOUNDED).expect("filter query");
         assert_eq!(matches.len(), 2);
         // Both expensive titles are present.
         let titles: Vec<&str> = matches
@@ -84,11 +111,11 @@ mod tests {
 
     #[test]
     fn array_index_and_slice() {
-        let matches = query(&sample(), "$.store.book[0]").expect("index query");
+        let (matches, _) = query(&sample(), "$.store.book[0]", UNBOUNDED).expect("index query");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0]["title"], "Sayings of the Century");
 
-        let matches = query(&sample(), "$.store.book[1:3]").expect("slice query");
+        let (matches, _) = query(&sample(), "$.store.book[1:3]", UNBOUNDED).expect("slice query");
         assert_eq!(matches.len(), 2);
     }
 
@@ -99,10 +126,13 @@ mod tests {
         // on this so it can return `{"matches": [], "count": 0}`
         // for the "valid expression, no hits" case rather than
         // surfacing it as a tool error.
-        let matches = query(&sample(), "$.does.not.exist").expect("no-match query");
+        let (matches, truncated) =
+            query(&sample(), "$.does.not.exist", UNBOUNDED).expect("no-match query");
         assert!(matches.is_empty());
+        assert!(!truncated);
 
-        let matches = query(&sample(), "$.store.book[?@.price > 9999]").expect("empty filter");
+        let (matches, _) =
+            query(&sample(), "$.store.book[?@.price > 9999]", UNBOUNDED).expect("empty filter");
         assert!(matches.is_empty());
     }
 
@@ -111,13 +141,34 @@ mod tests {
         // The parser's own message is more informative than
         // anything we'd hand-write; preserve it verbatim so
         // callers see the caret + reason.
-        let err = query(&sample(), "$.[bad syntax").unwrap_err();
+        let err = query(&sample(), "$.[bad syntax", UNBOUNDED).unwrap_err();
         assert!(!err.is_empty(), "parser must emit a non-empty diagnostic");
     }
 
     #[test]
+    fn limit_stops_iteration_early_with_truncated_flag() {
+        // `$..*` on the sample doc selects ~20 nodes; cap at 3
+        // and verify both the early stop and the truncation flag.
+        // This is the contract the MCP wrapper depends on for
+        // bounded memory under pathological queries.
+        let (matches, truncated) = query(&sample(), "$..*", 3).expect("limited query");
+        assert_eq!(matches.len(), 3, "must cap at the limit");
+        assert!(truncated, "must flag truncation when limit exceeded");
+
+        // Exactly-at-limit: not truncated.
+        let (matches, truncated) = query(&sample(), "$..author", 4).expect("exact-limit query");
+        assert_eq!(matches.len(), 4);
+        assert!(!truncated, "exactly-at-limit is not truncation");
+
+        // Over-limit (limit > actual): not truncated.
+        let (matches, truncated) = query(&sample(), "$..author", 100).expect("over-limit query");
+        assert_eq!(matches.len(), 4);
+        assert!(!truncated);
+    }
+
+    #[test]
     fn matches_returned_in_document_order() {
-        let matches = query(&sample(), "$..price").expect("descendant prices");
+        let (matches, _) = query(&sample(), "$..price", UNBOUNDED).expect("descendant prices");
         // Document order per RFC 9535: book[0..3].price then
         // bicycle.price. Pin the exact sequence so a future RFC-
         // 9535 traversal change in `serde_json_path` doesn't

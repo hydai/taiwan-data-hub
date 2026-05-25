@@ -81,36 +81,57 @@ pub struct SchemaError {
     pub message: String,
 }
 
-/// Compile + run the schema against `data`. Returns
-/// `Ok(Vec<SchemaError>)` for both passing (empty vec) and
-/// failing validations; `Err(String)` is reserved for malformed
-/// schemas (the caller's fault, not the document's).
+/// Compile + run the schema against `data`, returning at most
+/// `limit` errors. Returns `Ok((errors, truncated))` where
+/// `truncated` is `true` iff the validator produced more failures
+/// than `limit`; trailing errors are discarded without ever being
+/// formatted into `SchemaError` structs. `Err(String)` is
+/// reserved for malformed schemas (the caller's fault, not the
+/// document's).
+///
+/// Early-stop matters: `jsonschema::iter_errors` is itself lazy
+/// (it walks the schema/data pair on demand), so iterating with
+/// `take(limit + 1)` bounds both the *count* of allocated error
+/// records and the *work* the validator does — important for
+/// pathological schemas like `{"items": {"not": {}}}` against a
+/// million-element array.
 pub fn validate(
     data: &Value,
     schema: &Value,
     draft: SchemaDraft,
-) -> Result<Vec<SchemaError>, String> {
+    limit: usize,
+) -> Result<(Vec<SchemaError>, bool), String> {
     let validator = jsonschema::options()
         .with_draft(draft.to_jsonschema_draft())
         .build(schema)
         .map_err(|e| format!("schema is invalid: {e}"))?;
-    Ok(collect_errors(&validator, data))
+    Ok(collect_errors(&validator, data, limit))
 }
 
-fn collect_errors(validator: &Validator, data: &Value) -> Vec<SchemaError> {
-    validator
-        .iter_errors(data)
-        .map(|err| SchemaError {
+fn collect_errors(validator: &Validator, data: &Value, limit: usize) -> (Vec<SchemaError>, bool) {
+    let mut errors = Vec::new();
+    let mut truncated = false;
+    for err in validator.iter_errors(data) {
+        if errors.len() >= limit {
+            truncated = true;
+            break;
+        }
+        errors.push(SchemaError {
             instance_path: err.instance_path.to_string(),
             message: err.to_string(),
-        })
-        .collect()
+        });
+    }
+    (errors, truncated)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Generous cap for tests that don't care about truncation;
+    /// the truncation-specific test uses a tiny explicit cap.
+    const UNBOUNDED: usize = 1_000_000;
 
     fn user_schema() -> Value {
         json!({
@@ -128,8 +149,16 @@ mod tests {
     #[test]
     fn valid_document_returns_empty_errors() {
         let data = json!({ "name": "Alice", "age": 30 });
-        let errors =
-            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        let errors = {
+            let (errors, _) = validate(
+                &data,
+                &user_schema(),
+                SchemaDraft::default_draft(),
+                UNBOUNDED,
+            )
+            .expect("compile");
+            errors
+        };
         assert!(
             errors.is_empty(),
             "valid doc must produce 0 errors, got {errors:?}"
@@ -139,8 +168,16 @@ mod tests {
     #[test]
     fn missing_required_field_is_an_error() {
         let data = json!({ "name": "Alice" });
-        let errors =
-            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        let errors = {
+            let (errors, _) = validate(
+                &data,
+                &user_schema(),
+                SchemaDraft::default_draft(),
+                UNBOUNDED,
+            )
+            .expect("compile");
+            errors
+        };
         assert!(!errors.is_empty());
         let combined = errors
             .iter()
@@ -156,8 +193,16 @@ mod tests {
     #[test]
     fn wrong_type_carries_pointer_into_failing_field() {
         let data = json!({ "name": 42, "age": 30 });
-        let errors =
-            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        let errors = {
+            let (errors, _) = validate(
+                &data,
+                &user_schema(),
+                SchemaDraft::default_draft(),
+                UNBOUNDED,
+            )
+            .expect("compile");
+            errors
+        };
         // At least one error should pin the path to /name.
         assert!(
             errors.iter().any(|e| e.instance_path == "/name"),
@@ -171,8 +216,16 @@ mod tests {
         // validator should emit one error per failure so the
         // agent can fix them in one round-trip.
         let data = json!({ "name": 42, "age": -1 });
-        let errors =
-            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        let errors = {
+            let (errors, _) = validate(
+                &data,
+                &user_schema(),
+                SchemaDraft::default_draft(),
+                UNBOUNDED,
+            )
+            .expect("compile");
+            errors
+        };
         assert!(
             errors.len() >= 2,
             "expected ≥ 2 errors, got {} ({errors:?})",
@@ -183,8 +236,16 @@ mod tests {
     #[test]
     fn additional_properties_false_rejects_unknown_keys() {
         let data = json!({ "name": "Alice", "age": 30, "spurious": 1 });
-        let errors =
-            validate(&data, &user_schema(), SchemaDraft::default_draft()).expect("compile");
+        let errors = {
+            let (errors, _) = validate(
+                &data,
+                &user_schema(),
+                SchemaDraft::default_draft(),
+                UNBOUNDED,
+            )
+            .expect("compile");
+            errors
+        };
         assert!(
             errors
                 .iter()
@@ -200,15 +261,21 @@ mod tests {
         // everything. The `jsonschema` crate honours that, so the
         // pure helper must too — pinning this behaviour here so
         // the tool wrapper can rely on it without re-testing.
-        let ok = validate(
+        let (ok, _) = validate(
             &json!({"any": "value"}),
             &json!(true),
             SchemaDraft::default_draft(),
+            UNBOUNDED,
         )
         .expect("compile bool-true");
         assert!(ok.is_empty(), "true schema → 0 errors");
-        let bad = validate(&json!(42), &json!(false), SchemaDraft::default_draft())
-            .expect("compile bool-false");
+        let (bad, _) = validate(
+            &json!(42),
+            &json!(false),
+            SchemaDraft::default_draft(),
+            UNBOUNDED,
+        )
+        .expect("compile bool-false");
         assert_eq!(bad.len(), 1, "false schema → exactly one rejection");
     }
 
@@ -219,7 +286,7 @@ mod tests {
         // than silently accepting the schema and producing a
         // misleading pass for every document.
         let schema = json!({ "type": "objet" });
-        let result = validate(&json!({}), &schema, SchemaDraft::default_draft());
+        let result = validate(&json!({}), &schema, SchemaDraft::default_draft(), UNBOUNDED);
         assert!(
             result.is_err(),
             "malformed schema must be Err, got {result:?}"
@@ -248,9 +315,44 @@ mod tests {
         // `const` is in every modern draft. This test pins that the
         // 2020-12 selector compiles a schema using it correctly.
         let schema = json!({ "const": "fixed" });
-        let ok = validate(&json!("fixed"), &schema, SchemaDraft::Draft202012).expect("compile");
+        let (ok, _) = validate(
+            &json!("fixed"),
+            &schema,
+            SchemaDraft::Draft202012,
+            UNBOUNDED,
+        )
+        .expect("compile");
         assert!(ok.is_empty());
-        let bad = validate(&json!("other"), &schema, SchemaDraft::Draft202012).expect("compile");
+        let (bad, _) = validate(
+            &json!("other"),
+            &schema,
+            SchemaDraft::Draft202012,
+            UNBOUNDED,
+        )
+        .expect("compile");
         assert!(!bad.is_empty());
+    }
+
+    #[test]
+    fn limit_stops_at_cap_with_truncated_flag() {
+        // Array of N integers against `items: {"not": {}}` — every
+        // item fails, so the validator emits N errors. Cap at 3
+        // and verify both early stop and truncation flag.
+        let schema = json!({
+            "type": "array",
+            "items": { "not": {} }
+        });
+        let data = json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+
+        let (errors, truncated) =
+            validate(&data, &schema, SchemaDraft::Draft202012, 3).expect("compile");
+        assert_eq!(errors.len(), 3, "must cap at limit");
+        assert!(truncated, "must flag truncation");
+
+        // At-limit: not truncated.
+        let (errors, truncated) =
+            validate(&data, &schema, SchemaDraft::Draft202012, 10).expect("compile");
+        assert_eq!(errors.len(), 10);
+        assert!(!truncated, "exactly-at-limit is not truncation");
     }
 }
