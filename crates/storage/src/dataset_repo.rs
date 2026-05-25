@@ -264,16 +264,25 @@ impl CacheHitRatio {
 
 /// Inputs the #2.8 nightly tier classifier consumes per dataset.
 /// Composed in [`TierRepo::list_for_tiering`] from a single
-/// `datasets` scan plus a 7-day [`usage_records`] subquery so the
-/// scorer can stay pure. Optional fields are `None` when the
-/// upstream metadata didn't provide a value; the scorer treats
-/// `None` as a zero signal for that dimension.
+/// `datasets` scan plus an aggregation over `dataset_files` and
+/// a 7-day [`usage_records`] subquery so the scorer can stay
+/// pure. Optional fields are `None` (or empty `formats`) when
+/// the upstream metadata didn't provide a value; the scorer
+/// treats those as a zero signal for that dimension.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TierDatasetRow {
     pub id: Uuid,
     pub publisher: Option<String>,
     pub update_frequency: Option<String>,
-    pub format: Option<String>,
+    /// Distinct file formats the dataset ships across every
+    /// `dataset_files` row attached to its versions. Empty when
+    /// the ETL hasn't materialised any files yet (every fresh
+    /// metadata row starts here). The scorer picks the
+    /// best-scoring entry — a publisher that offers both CSV and
+    /// PDF gets credit for CSV. The `datasets` table itself has
+    /// no `format` column; format only exists on
+    /// `dataset_files`, so aggregation is mandatory.
+    pub formats: Vec<String>,
     /// Count of `usage_records` rows in the configured window
     /// (default 7 days). Always non-negative; `i64` matches the
     /// Postgres COUNT(*) return type.
@@ -1284,13 +1293,30 @@ impl Storage {
         &self,
         window_days: i32,
     ) -> Result<Vec<TierDatasetRow>, StorageError> {
+        // `format` lives on `dataset_files`, not `datasets`; aggregate
+        // distinct file formats per dataset so the scorer sees every
+        // representation the publisher offers. Datasets with no files
+        // yet (fresh ETL, metadata-only rows) get an empty array,
+        // which collapses to a 0 format signal.
+        //
+        // `COALESCE(array_agg(...) FILTER (WHERE ... IS NOT NULL), '{}')`
+        // keeps the LEFT JOIN's NULLs out of the returned array
+        // rather than emitting `{NULL}` for empty matches.
+        //
         // Column-tuple kept narrow on purpose — a richer scoring
         // signal (e.g. last_modified_at, schema_diff_count) just
         // extends the SELECT and the destructure below.
-        type Row = (Uuid, Option<String>, Option<String>, Option<String>, i64);
+        type Row = (Uuid, Option<String>, Option<String>, Vec<String>, i64);
         let rows: Vec<Row> = sqlx::query_as(
             "SELECT \
-                d.id, d.publisher, d.update_frequency, d.format, \
+                d.id, d.publisher, d.update_frequency, \
+                COALESCE( \
+                    (SELECT array_agg(DISTINCT df.format) \
+                     FROM dataset_versions dv \
+                     JOIN dataset_files df ON df.dataset_version_id = dv.id \
+                     WHERE dv.dataset_id = d.id), \
+                    '{}' \
+                ) AS formats, \
                 (SELECT COUNT(*) FROM usage_records u \
                  WHERE u.dataset_id = d.id \
                    AND u.requested_at >= now() - ($1::int * INTERVAL '1 day') \
@@ -1305,11 +1331,11 @@ impl Storage {
         Ok(rows
             .into_iter()
             .map(
-                |(id, publisher, update_frequency, format, access_count)| TierDatasetRow {
+                |(id, publisher, update_frequency, formats, access_count)| TierDatasetRow {
                     id,
                     publisher,
                     update_frequency,
-                    format,
+                    formats,
                     access_count,
                 },
             )

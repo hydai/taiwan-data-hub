@@ -201,6 +201,55 @@ fn validate(cfg: &TierConfig, label: &str) -> Result<(), TierConfigError> {
             message: "access.normalize_cap must be > 0 (it's the saturation denominator)".into(),
         });
     }
+    // Every lookup value contributes directly to the final score
+    // via `weight · lookup`. An out-of-range entry (negative, > 1.0,
+    // NaN, infinity) can push `tier_score` outside the
+    // `NUMERIC(4,3) CHECK (>= 0 AND <= 1)` constraint and crash
+    // the batch UPDATE at the next tick — long after the config
+    // file was edited. Catch the bad value at load instead.
+    check_lookup_bounds(
+        &cfg.update_frequency_scores,
+        "update_frequency_scores",
+        label,
+    )?;
+    check_lookup_bounds(&cfg.format_scores, "format_scores", label)?;
+    check_score_in_unit_interval(
+        cfg.publisher_authority.default,
+        "publisher_authority.default",
+        label,
+    )?;
+    for (i, rule) in cfg.publisher_authority.rules.iter().enumerate() {
+        check_score_in_unit_interval(
+            rule.score,
+            &format!("publisher_authority.rules[{i}].score"),
+            label,
+        )?;
+    }
+    Ok(())
+}
+
+fn check_lookup_bounds(
+    table: &BTreeMap<String, f64>,
+    table_name: &str,
+    label: &str,
+) -> Result<(), TierConfigError> {
+    for (key, value) in table {
+        check_score_in_unit_interval(*value, &format!("{table_name}.{key}"), label)?;
+    }
+    Ok(())
+}
+
+fn check_score_in_unit_interval(
+    value: f64,
+    field: &str,
+    label: &str,
+) -> Result<(), TierConfigError> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(TierConfigError::Invalid {
+            path: label.to_string(),
+            message: format!("{field} must be a finite number in [0.0, 1.0]; got {value}"),
+        });
+    }
     Ok(())
 }
 
@@ -249,11 +298,16 @@ pub fn compute_score(input: &TierDatasetRow, cfg: &TierConfig) -> ComputedTier {
         .and_then(|k| cfg.update_frequency_scores.get(k).copied())
         .unwrap_or(0.0);
 
+    // A dataset may ship multiple file formats (CSV + PDF, etc.);
+    // give it credit for the best machine-readable representation
+    // it offers. Empty `formats` (fresh ETL with no files yet) →
+    // 0.0; unknown format strings score as 0.0 individually but
+    // don't suppress a sibling format that IS in the table.
     let format_signal = input
-        .format
-        .as_deref()
-        .and_then(|k| cfg.format_scores.get(k).copied())
-        .unwrap_or(0.0);
+        .formats
+        .iter()
+        .filter_map(|f| cfg.format_scores.get(f).copied())
+        .fold(0.0_f64, f64::max);
 
     let authority_signal = publisher_authority_score(input.publisher.as_deref(), cfg);
 
@@ -399,7 +453,7 @@ mod tests {
             id: Uuid::nil(),
             publisher: publisher.map(str::to_owned),
             update_frequency: update_frequency.map(str::to_owned),
-            format: format.map(str::to_owned),
+            formats: format.map(|f| vec![f.to_owned()]).unwrap_or_default(),
             access_count,
         }
     }
@@ -448,6 +502,42 @@ mod tests {
         // 0.3 · 0.4 = 0.12 → bronze
         assert!((out.score - 0.12).abs() < 1e-9, "got {}", out.score);
         assert_eq!(out.tier, TIER_BRONZE);
+    }
+
+    #[test]
+    fn compute_score_picks_best_format_from_multiple() {
+        let cfg = default_config();
+        // Dataset ships both PDF (0.2) and CSV (1.0). The scorer
+        // must reward the BEST format the publisher offers, not
+        // the worst — otherwise a token PDF dump would drag every
+        // dataset down.
+        let row = TierDatasetRow {
+            id: Uuid::nil(),
+            publisher: Some("部".into()),
+            update_frequency: Some("daily".into()),
+            formats: vec!["pdf".into(), "csv".into()],
+            access_count: 0,
+        };
+        let out = compute_score(&row, &cfg);
+        // 0.4·1.0 + 0.3·0.9 + 0.2·1.0 + 0.1·0 = 0.87 → platinum
+        assert!((out.score - 0.87).abs() < 1e-9, "got {}", out.score);
+        assert_eq!(out.tier, TIER_PLATINUM);
+    }
+
+    #[test]
+    fn compute_score_empty_formats_zeroes_signal() {
+        let cfg = default_config();
+        let row = TierDatasetRow {
+            id: Uuid::nil(),
+            publisher: Some("行政院".into()),
+            update_frequency: Some("daily".into()),
+            formats: Vec::new(),
+            access_count: 50,
+        };
+        let out = compute_score(&row, &cfg);
+        // 0.4·1.0 + 0.3·1.0 + 0.2·0 + 0.1·1 = 0.80 → gold
+        assert!((out.score - 0.80).abs() < 1e-9, "got {}", out.score);
+        assert_eq!(out.tier, TIER_GOLD);
     }
 
     #[test]
@@ -608,6 +698,120 @@ normalize_cap = 50
     }
 
     #[test]
+    fn parse_config_rejects_out_of_range_lookup_score() {
+        // A `format_scores.pdf = 1.5` would slip past the boot-
+        // time validation otherwise, and the next tier tick would
+        // crash the `NUMERIC(4,3) CHECK (tier_score <= 1)`
+        // constraint with a parse error nowhere near the bad
+        // config — catch it at load.
+        let bad = r"
+[weights]
+update_frequency = 0.4
+publisher_authority = 0.3
+format_quality = 0.2
+access_count = 0.1
+
+[thresholds]
+platinum = 0.85
+gold = 0.7
+silver = 0.5
+
+[update_frequency_scores]
+daily = 1.0
+
+[format_scores]
+csv = 1.0
+pdf = 1.5
+
+[publisher_authority]
+default = 0.4
+rules = []
+
+[access]
+window_days = 7
+normalize_cap = 50
+";
+        let err = parse_config(bad, "test").unwrap_err();
+        assert!(
+            matches!(err, TierConfigError::Invalid { ref message, .. } if message.contains("format_scores.pdf") && message.contains("1.5")),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_config_rejects_negative_publisher_default() {
+        let bad = r"
+[weights]
+update_frequency = 0.4
+publisher_authority = 0.3
+format_quality = 0.2
+access_count = 0.1
+
+[thresholds]
+platinum = 0.85
+gold = 0.7
+silver = 0.5
+
+[update_frequency_scores]
+daily = 1.0
+
+[format_scores]
+csv = 1.0
+
+[publisher_authority]
+default = -0.1
+rules = []
+
+[access]
+window_days = 7
+normalize_cap = 50
+";
+        let err = parse_config(bad, "test").unwrap_err();
+        assert!(
+            matches!(err, TierConfigError::Invalid { ref message, .. } if message.contains("publisher_authority.default")),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn parse_config_rejects_rule_score_above_one() {
+        let bad = r#"
+[weights]
+update_frequency = 0.4
+publisher_authority = 0.3
+format_quality = 0.2
+access_count = 0.1
+
+[thresholds]
+platinum = 0.85
+gold = 0.7
+silver = 0.5
+
+[update_frequency_scores]
+daily = 1.0
+
+[format_scores]
+csv = 1.0
+
+[publisher_authority]
+default = 0.4
+
+[[publisher_authority.rules]]
+match = "行政院"
+score = 5.0
+
+[access]
+window_days = 7
+normalize_cap = 50
+"#;
+        let err = parse_config(bad, "test").unwrap_err();
+        assert!(
+            matches!(err, TierConfigError::Invalid { ref message, .. } if message.contains("publisher_authority.rules[0].score")),
+            "got: {err}",
+        );
+    }
+
+    #[test]
     fn parse_config_rejects_zero_normalize_cap() {
         let bad = r"
 [weights]
@@ -690,7 +894,7 @@ normalize_cap = 0
                 id: Uuid::from_u128(1),
                 publisher: Some("行政院".into()),
                 update_frequency: Some("daily".into()),
-                format: Some("csv".into()),
+                formats: vec!["csv".into()],
                 access_count: 50,
             },
             // silver: monthly · 部 · xlsx · no access
@@ -699,15 +903,15 @@ normalize_cap = 0
                 id: Uuid::from_u128(2),
                 publisher: Some("教育部".into()),
                 update_frequency: Some("monthly".into()),
-                format: Some("xlsx".into()),
+                formats: vec!["xlsx".into()],
                 access_count: 0,
             },
-            // bronze: null everything
+            // bronze: empty everything
             TierDatasetRow {
                 id: Uuid::from_u128(3),
                 publisher: None,
                 update_frequency: None,
-                format: None,
+                formats: Vec::new(),
                 access_count: 0,
             },
         ];
