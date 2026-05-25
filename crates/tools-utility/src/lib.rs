@@ -13,6 +13,8 @@
 
 pub mod address;
 pub mod anomaly;
+pub mod big5;
+pub mod big5_tool;
 pub mod canonical;
 pub mod canonical_tool;
 pub mod date;
@@ -129,6 +131,10 @@ pub use json_path_tool::{JsonPathTool, TOOL_NAME as JSON_PATH_TOOL_NAME};
 pub use json_schema_validate_tool::{
     JsonSchemaValidateTool, TOOL_NAME as JSON_SCHEMA_VALIDATE_TOOL_NAME,
 };
+// Mozilla's `encoding_rs` powers the round-trip; pulled in here
+// because legacy data.gov.tw files commonly ship as Big5 and
+// callers shouldn't need their own decoder.
+pub use big5_tool::{TOOL_NAME as TRANSCODE_BIG5_UTF8_TOOL_NAME, TranscodeBig5Utf8Tool};
 pub use text_misc_tool::{
     HtmlSanitizeTool, RegexTestTool, SlugifyTool, TOOL_HTML_SANITIZE as HTML_SANITIZE_TOOL_NAME,
     TOOL_REGEX_TEST as TEXT_REGEX_TEST_TOOL_NAME, TOOL_SLUGIFY as TEXT_SLUGIFY_TOOL_NAME,
@@ -210,4 +216,5 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         // each pulls in a heavier dep audited in isolation.
         .register(JsonPathTool::new())
         .register(JsonSchemaValidateTool::new())
+        .register(TranscodeBig5Utf8Tool::new())
 }
