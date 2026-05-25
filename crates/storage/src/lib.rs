@@ -36,10 +36,11 @@ pub use bookmark_repo::{
 };
 pub use comment_repo::{CommentRepo, CommentRow, CommentTargetKind, NewComment};
 pub use dataset_repo::{
-    CacheCandidate, CacheHitRatio, CacheRef, CacheState, DatasetCacheLookup, DatasetFileRow,
-    DatasetFull, DatasetKey, DatasetLatestFiles, DatasetReader, DatasetRow, DatasetSearcher,
-    DatasetVersionRow, DatasetWriter, MaterializeView, NewUsageRecord, SearchHit, SearchPage,
-    SearchParams, SourceHttpState, Storage, StorageError, UsageRecorder, VersionWithFiles,
+    CacheCandidate, CacheHitRatio, CacheRef, CacheState, ComputedTier, DatasetCacheLookup,
+    DatasetFileRow, DatasetFull, DatasetKey, DatasetLatestFiles, DatasetReader, DatasetRow,
+    DatasetSearcher, DatasetVersionRow, DatasetWriter, MaterializeView, NewUsageRecord, SearchHit,
+    SearchPage, SearchParams, SourceHttpState, Storage, StorageError, TierDatasetRow, TierRepo,
+    UsageRecorder, VersionWithFiles,
 };
 pub use etl_dlq_repo::{DlqErrorKind, DlqRow, EtlDlqRepo, NewDlqEntry};
 pub use oauth_repo::{NewOAuthAccount, OAuthAccountRepo, OAuthPendingState, OAuthStateRepo};

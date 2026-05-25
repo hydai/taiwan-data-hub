@@ -262,6 +262,70 @@ impl CacheHitRatio {
     }
 }
 
+/// Inputs the #2.8 nightly tier classifier consumes per dataset.
+/// Composed in [`TierRepo::list_for_tiering`] from a single
+/// `datasets` scan plus an aggregation over `dataset_files` and
+/// a 7-day [`usage_records`] subquery so the scorer can stay
+/// pure. Optional fields are `None` (or empty `formats`) when
+/// the upstream metadata didn't provide a value; the scorer
+/// treats those as a zero signal for that dimension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierDatasetRow {
+    pub id: Uuid,
+    pub publisher: Option<String>,
+    pub update_frequency: Option<String>,
+    /// Distinct file formats the dataset ships across every
+    /// `dataset_files` row attached to its versions. Empty when
+    /// the ETL hasn't materialised any files yet (every fresh
+    /// metadata row starts here). The scorer picks the
+    /// best-scoring entry — a publisher that offers both CSV and
+    /// PDF gets credit for CSV. The `datasets` table itself has
+    /// no `format` column; format only exists on
+    /// `dataset_files`, so aggregation is mandatory.
+    pub formats: Vec<String>,
+    /// Count of `usage_records` rows in the configured window
+    /// (default 7 days). Always non-negative; `i64` matches the
+    /// Postgres COUNT(*) return type.
+    pub access_count: i64,
+}
+
+/// Output the classifier feeds back into [`TierRepo::apply_computed_tiers`].
+/// Carries the dataset id, the chosen tier label, and the raw score
+/// so callers can persist both (`datasets.tier`, `datasets.tier_score`)
+/// in one round-trip. `tier_override` is honoured by the apply
+/// method, not encoded here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedTier {
+    pub id: Uuid,
+    /// One of `platinum`, `gold`, `silver`, `bronze`. Matches the
+    /// CHECK constraint on `datasets.tier`.
+    pub tier: String,
+    /// Score in `[0.0, 1.0]`. Persisted as `NUMERIC(4,3)` (three
+    /// decimals); callers can pass any `f64` and the SQL will
+    /// round to the column's precision.
+    pub score: f64,
+}
+
+/// Object-safe surface for the #2.8 nightly tier classifier.
+/// Decoupled from [`DatasetWriter`] so the etl-worker holds the
+/// minimum trait it needs and tests can inject in-memory stubs.
+#[async_trait]
+pub trait TierRepo: Send + Sync + 'static {
+    /// Snapshot every dataset's scoring inputs in one read.
+    /// `window_days` widens the access-count window — the classifier
+    /// reads it from `config/tiers.toml`. Returned in `datasets.id`
+    /// order so successive ticks produce stable batch UPDATE plans.
+    async fn list_for_tiering(&self, window_days: i32)
+    -> Result<Vec<TierDatasetRow>, StorageError>;
+
+    /// Persist computed tiers. Each row sets `(tier, tier_score)`
+    /// **only** when `tier_override IS NULL` — curators always
+    /// win, per docs/DESIGN.md §4.5. Returns the number of rows
+    /// actually changed (skipped overrides + unchanged-tier rows
+    /// do not count).
+    async fn apply_computed_tiers(&self, computed: &[ComputedTier]) -> Result<u64, StorageError>;
+}
+
 /// Object-safe surface for the #3.6 cache pipeline. Decoupled from
 /// the materialisation traits so the etl-worker can hold a
 /// minimal Arc<dyn CacheState> instead of the full Storage.
@@ -340,6 +404,20 @@ impl CacheState for Storage {
 
     async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
         Storage::cache_hit_ratio(self, window_days).await
+    }
+}
+
+#[async_trait]
+impl TierRepo for Storage {
+    async fn list_for_tiering(
+        &self,
+        window_days: i32,
+    ) -> Result<Vec<TierDatasetRow>, StorageError> {
+        Storage::list_for_tiering(self, window_days).await
+    }
+
+    async fn apply_computed_tiers(&self, computed: &[ComputedTier]) -> Result<u64, StorageError> {
+        Storage::apply_computed_tiers(self, computed).await
     }
 }
 
@@ -1189,6 +1267,119 @@ impl Storage {
         .await
         .map_err(StorageError::from)?;
         Ok(row)
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  #2.8 nightly tier classifier
+    // ════════════════════════════════════════════════════════════
+    //
+    // Two-query split keeps the scoring decision in Rust (where
+    // it's unit-testable as a pure function) and the persistence
+    // in a single batched UPDATE…FROM. The read snapshots every
+    // dataset's scoring inputs in one round-trip; the write
+    // walks the computed batch with a parameterised UNNEST so
+    // even thousands of rows fit in one statement.
+
+    /// Snapshot the scoring inputs for every dataset. The 7-day
+    /// (configurable) `usage_records` count is computed by a
+    /// correlated subquery — cheap at current row counts; if the
+    /// catalog grows by 10× the same query rewrites cleanly to a
+    /// LATERAL join.
+    ///
+    /// `ORDER BY id` so the next-step UPDATE plan is stable
+    /// across ticks and any leaked plan-cache entries hit the
+    /// same shape.
+    pub async fn list_for_tiering(
+        &self,
+        window_days: i32,
+    ) -> Result<Vec<TierDatasetRow>, StorageError> {
+        // `format` lives on `dataset_files`, not `datasets`; aggregate
+        // distinct file formats per dataset so the scorer sees every
+        // representation the publisher offers. Datasets with no files
+        // yet (fresh ETL, metadata-only rows) get an empty array,
+        // which collapses to a 0 format signal.
+        //
+        // `COALESCE(array_agg(...) FILTER (WHERE ... IS NOT NULL), '{}')`
+        // keeps the LEFT JOIN's NULLs out of the returned array
+        // rather than emitting `{NULL}` for empty matches.
+        //
+        // Column-tuple kept narrow on purpose — a richer scoring
+        // signal (e.g. last_modified_at, schema_diff_count) just
+        // extends the SELECT and the destructure below.
+        type Row = (Uuid, Option<String>, Option<String>, Vec<String>, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT \
+                d.id, d.publisher, d.update_frequency, \
+                COALESCE( \
+                    (SELECT array_agg(DISTINCT df.format) \
+                     FROM dataset_versions dv \
+                     JOIN dataset_files df ON df.dataset_version_id = dv.id \
+                     WHERE dv.dataset_id = d.id), \
+                    '{}' \
+                ) AS formats, \
+                (SELECT COUNT(*) FROM usage_records u \
+                 WHERE u.dataset_id = d.id \
+                   AND u.requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                )::bigint AS access_count \
+             FROM datasets d \
+             ORDER BY d.id",
+        )
+        .bind(window_days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, publisher, update_frequency, formats, access_count)| TierDatasetRow {
+                    id,
+                    publisher,
+                    update_frequency,
+                    formats,
+                    access_count,
+                },
+            )
+            .collect())
+    }
+
+    /// Batch UPDATE `(tier, tier_score)` from the classifier's
+    /// output, skipping any row whose curator-pinned
+    /// `tier_override` is set. One round-trip regardless of batch
+    /// size — UNNEST + a FROM-clause join keeps the plan flat and
+    /// avoids N round-trips a per-row UPDATE loop would force.
+    ///
+    /// Returns the number of rows the UPDATE actually changed.
+    /// `computed` rows referring to dataset ids that no longer
+    /// exist (deleted between read and write) are silently
+    /// skipped — the next tick will simply not score them.
+    pub async fn apply_computed_tiers(
+        &self,
+        computed: &[ComputedTier],
+    ) -> Result<u64, StorageError> {
+        if computed.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<Uuid> = computed.iter().map(|c| c.id).collect();
+        let tiers: Vec<String> = computed.iter().map(|c| c.tier.clone()).collect();
+        let scores: Vec<f64> = computed.iter().map(|c| c.score).collect();
+        let result = sqlx::query(
+            "UPDATE datasets d \
+             SET tier = u.tier, tier_score = u.score::numeric(4,3) \
+             FROM ( \
+                SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::float8[]) \
+                AS t(id, tier, score) \
+             ) AS u \
+             WHERE d.id = u.id \
+               AND d.tier_override IS NULL \
+               AND (d.tier <> u.tier OR d.tier_score <> u.score::numeric(4,3))",
+        )
+        .bind(&ids)
+        .bind(&tiers)
+        .bind(&scores)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -2768,5 +2959,247 @@ mod tests {
         assert_eq!(ratio.hits, 3, "3 against cached=true");
         let v = ratio.ratio().expect("ratio Some");
         assert!((v - 0.6).abs() < 1e-9);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  #2.8 tier classifier — testcontainers coverage
+    // ════════════════════════════════════════════════════════════
+    //
+    // The tier_classifier orchestrator unit-tests its scoring via
+    // a stub TierRepo, so neither `list_for_tiering`'s
+    // `dataset_files → array_agg` plan nor `apply_computed_tiers`'
+    // UNNEST + `tier_override IS NULL` skip gets executed against
+    // real Postgres in `cargo test`. These ignored tests catch
+    // schema drift, type mismatches, and the override-skip
+    // invariant before the nightly cron does.
+
+    /// Insert a `dataset_files` row hanging off a fresh
+    /// `dataset_versions` row for the given dataset, so
+    /// `list_for_tiering`'s aggregation has something to fold up.
+    /// Returns the version id so the caller can attach more files
+    /// to the same version when testing the DISTINCT aggregation.
+    async fn attach_file(storage: &Storage, dataset_id: Uuid, format: &str) -> Uuid {
+        let version_id: (Uuid,) = sqlx::query_as(
+            "INSERT INTO dataset_versions (dataset_id, version) \
+             VALUES ($1, $2) RETURNING id",
+        )
+        .bind(dataset_id)
+        .bind(format!("v-{format}"))
+        .fetch_one(storage.pool())
+        .await
+        .expect("insert dataset_versions");
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(version_id.0)
+        .bind(format)
+        .bind(format!("file:///tmp/{format}.bin"))
+        .execute(storage.pool())
+        .await
+        .expect("insert dataset_files");
+        version_id.0
+    }
+
+    /// `list_for_tiering`: aggregates distinct file formats per
+    /// dataset, returns rows in `id` order, and the usage subquery
+    /// counts only the requested window.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn list_for_tiering_aggregates_formats_and_counts_recent_usage() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Three datasets: one with multi-format files + recent
+        // usage, one metadata-only (no files yet), one with a
+        // single file and zero usage.
+        let mut ids = Vec::new();
+        for (slug, publisher, freq) in [
+            ("multi", Some("行政院"), Some("daily")),
+            ("metadata-only", Some("教育部"), Some("monthly")),
+            ("single", None, None),
+        ] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: publisher.map(str::to_owned),
+                update_frequency: freq.map(str::to_owned),
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+                ..Default::default()
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push((slug, id));
+        }
+        let multi_id = ids.iter().find(|(s, _)| *s == "multi").unwrap().1;
+        let single_id = ids.iter().find(|(s, _)| *s == "single").unwrap().1;
+
+        // `multi` ships CSV + JSON + PDF (under a single version).
+        let v = attach_file(&storage, multi_id, "csv").await;
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri) \
+             VALUES ($1, 'json', 'file:///tmp/x.json'), \
+                    ($1, 'pdf',  'file:///tmp/x.pdf')",
+        )
+        .bind(v)
+        .execute(storage.pool())
+        .await
+        .expect("attach extra files");
+        // `single` ships JSON only.
+        let _ = attach_file(&storage, single_id, "json").await;
+        // `multi` has 5 query_rows hits — well inside the 7-day window.
+        insert_query_rows_usage(&storage, multi_id, 5).await;
+
+        let rows = storage.list_for_tiering(7).await.expect("list_for_tiering");
+        assert_eq!(rows.len(), 3);
+        // ORDER BY id stability — pin we get every dataset back.
+        let by_id: std::collections::HashMap<Uuid, &TierDatasetRow> =
+            rows.iter().map(|r| (r.id, r)).collect();
+
+        let m = by_id.get(&multi_id).expect("multi present");
+        let mut multi_formats = m.formats.clone();
+        multi_formats.sort();
+        assert_eq!(multi_formats, vec!["csv", "json", "pdf"]);
+        assert_eq!(m.publisher.as_deref(), Some("行政院"));
+        assert_eq!(m.update_frequency.as_deref(), Some("daily"));
+        assert_eq!(m.access_count, 5);
+
+        let metadata_only_id = ids.iter().find(|(s, _)| *s == "metadata-only").unwrap().1;
+        let mo = by_id.get(&metadata_only_id).expect("metadata-only present");
+        assert!(
+            mo.formats.is_empty(),
+            "dataset without files → empty formats vec, not NULL"
+        );
+        assert_eq!(mo.access_count, 0);
+
+        let s = by_id.get(&single_id).expect("single present");
+        assert_eq!(s.formats, vec!["json".to_owned()]);
+        assert_eq!(s.publisher, None);
+        assert_eq!(s.access_count, 0);
+    }
+
+    /// `apply_computed_tiers`: persists (tier, `tier_score`), echoes
+    /// the changed-row count, and SKIPs any row whose
+    /// `tier_override` is set — even if the computed tier disagrees.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn apply_computed_tiers_respects_tier_override() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Two datasets — one with an editor pin, one without.
+        let mut ids = std::collections::HashMap::new();
+        for slug in ["pinned-by-curator", "free-floating"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+                ..Default::default()
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.insert(slug, id);
+        }
+        // Pin the first dataset to gold via tier_override. The
+        // classifier's "platinum" verdict for this row must be
+        // ignored.
+        force_cache_state(
+            &storage,
+            ids["pinned-by-curator"],
+            false,
+            Some("bronze"),
+            Some("gold"),
+        )
+        .await;
+
+        let computed = vec![
+            ComputedTier {
+                id: ids["pinned-by-curator"],
+                tier: "platinum".into(),
+                score: 0.95,
+            },
+            ComputedTier {
+                id: ids["free-floating"],
+                tier: "gold".into(),
+                score: 0.75,
+            },
+        ];
+        let updated = storage
+            .apply_computed_tiers(&computed)
+            .await
+            .expect("apply");
+        assert_eq!(
+            updated, 1,
+            "only the non-overridden row should change; the pinned row is skipped"
+        );
+
+        // Effective state: pinned row still bronze base + gold
+        // override; free-floating row now gold with tier_score 0.75.
+        let pinned: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT tier, tier_override, tier_score::text FROM datasets WHERE id = $1",
+        )
+        .bind(ids["pinned-by-curator"])
+        .fetch_one(storage.pool())
+        .await
+        .expect("read pinned");
+        assert_eq!(pinned.0, "bronze", "base tier untouched");
+        assert_eq!(pinned.1.as_deref(), Some("gold"), "override preserved");
+
+        let free: (String, String) =
+            sqlx::query_as("SELECT tier, tier_score::text FROM datasets WHERE id = $1")
+                .bind(ids["free-floating"])
+                .fetch_one(storage.pool())
+                .await
+                .expect("read free-floating");
+        assert_eq!(free.0, "gold");
+        // NUMERIC(4,3) rounds to three decimals — 0.75 → "0.750".
+        assert_eq!(free.1, "0.750");
+    }
+
+    /// `apply_computed_tiers` skips no-op writes: re-applying the
+    /// same (tier, score) returns 0 changed rows so the boot-log
+    /// counter accurately reflects "what actually moved" rather
+    /// than "what we sent".
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn apply_computed_tiers_is_idempotent_on_unchanged_rows() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+
+        let payload = vec![ComputedTier {
+            id,
+            tier: "silver".into(),
+            score: 0.55,
+        }];
+        let first = storage
+            .apply_computed_tiers(&payload)
+            .await
+            .expect("apply 1");
+        assert_eq!(first, 1, "first write changes the row");
+        let second = storage
+            .apply_computed_tiers(&payload)
+            .await
+            .expect("apply 2");
+        assert_eq!(second, 0, "identical second write is a no-op");
     }
 }

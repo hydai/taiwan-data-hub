@@ -1,0 +1,137 @@
+# Source of truth for the nightly tier classifier (#2.8).
+#
+# Loaded once at ETL-worker boot via `tier_classifier::load_config`.
+# A malformed file panics at startup rather than producing silent
+# misclassifications; tune the values, restart the worker.
+#
+# Score formula (from docs/DESIGN.md §4.5):
+#
+#   score = w.update_frequency  · update_frequency_scores[ds.update_frequency]
+#         + w.publisher_authority · best publisher_authority_rules match
+#         + w.format_quality    · format_scores[ds.format]
+#         + w.access_count      · clamp01(7d access_count / access.normalize_cap)
+#
+# Tier label: first threshold whose RHS the score *strictly exceeds*,
+# walking platinum → gold → silver. Anything below `silver` lands
+# as `bronze`.
+#
+# `datasets.tier_override` is honoured unconditionally — the
+# `apply_computed_tiers` repo method SKIPs rows where it's non-NULL
+# so curators always have the final word.
+
+# ── Score weights ─────────────────────────────────────────────────────
+#
+# Must sum to 1.0 (validated at load with a small float epsilon).
+# Adjusting these re-shapes the entire tier distribution; do it
+# deliberately and watch the next post-tick log line for the
+# bucket counts.
+[weights]
+update_frequency    = 0.4
+publisher_authority = 0.3
+format_quality      = 0.2
+access_count        = 0.1
+
+# ── Tier thresholds (descending; score > value → that tier) ──────────
+[thresholds]
+platinum = 0.85
+gold     = 0.70
+silver   = 0.50
+
+# ── update_frequency → [0.0, 1.0] ─────────────────────────────────────
+#
+# Daily refresh signals high upstream investment; yearly the
+# opposite. Missing / unrecognised values map to 0.0 (no signal).
+[update_frequency_scores]
+daily     = 1.0
+weekly    = 0.8
+monthly   = 0.6
+quarterly = 0.4
+yearly    = 0.2
+
+# ── publisher_authority — substring rules, first match wins ──────────
+#
+# `rules` is walked in declared order; the first entry whose
+# `match` appears in `datasets.publisher` (substring,
+# case-sensitive against the upstream zh-TW name) supplies the
+# score. `default` covers the fall-through.
+#
+# The whole block lives under `[publisher_authority]` (rather
+# than as two sibling root keys) because TOML attributes any
+# naked key that follows a `[section]` header to that section —
+# a flat `publisher_authority_default` would silently bind to
+# `[format_scores]` above.
+#
+# Conservative defaults based on the seed catalog: the 中央 / 部 /
+# 署 hierarchy of central agencies dominates the upstream data
+# sources today (`config/datasets.yaml` is exclusively central
+# agencies). Local-government and law-corp values can be added by
+# operators as the catalog grows.
+[publisher_authority]
+default = 0.4
+
+[[publisher_authority.rules]]
+# Bureaus + administrations sitting directly under the Executive
+# Yuan or its top ministries (central-government core).
+match = "行政院"
+score = 1.0
+
+[[publisher_authority.rules]]
+# Ministry-level agency name. Most central ministries end in 部.
+match = "部"
+score = 0.9
+
+[[publisher_authority.rules]]
+# Sub-ministry agencies (e.g. 中央氣象署, 觀光署).
+match = "署"
+score = 0.9
+
+[[publisher_authority.rules]]
+match = "委員會"
+score = 0.8
+
+[[publisher_authority.rules]]
+# Legislative + judicial branches — high authority, narrower scope.
+match = "立法院"
+score = 0.8
+
+[[publisher_authority.rules]]
+match = "司法院"
+score = 0.8
+
+[[publisher_authority.rules]]
+# Local government catch-all (縣政府, 市政府).
+match = "政府"
+score = 0.6
+
+# ── format_quality — machine-readability ─────────────────────────────
+#
+# Open columnar / record formats > tagged > tabular spreadsheets >
+# document scans. PDF gets a deliberately low score because it
+# typically needs OCR before it's usable by downstream tools.
+# Missing / unrecognised values map to 0.0.
+#
+# Must cover every value the `dataset_files.format` CHECK
+# constraint accepts (migrations/0001_init.sql:138-139); a
+# missing entry would silently under-score datasets that ship
+# only that format.
+[format_scores]
+parquet = 1.0
+csv     = 1.0
+json    = 1.0
+jsonl   = 1.0   # streaming JSON; same machine-readability as plain JSON
+geojson = 0.9
+xml     = 0.7
+xlsx    = 0.6
+zip     = 0.4   # archive container — requires extraction before use
+pdf     = 0.2
+
+# ── recent_access normalization ──────────────────────────────────────
+#
+# 7-day count of dataset-scoped tool invocations (writes into
+# `usage_records`). The signal is `min(count / normalize_cap, 1.0)`
+# so a dataset with 50 hits in the window saturates at 1.0 — beyond
+# that we already know it's popular; further hits shouldn't outvote
+# the format/publisher dimensions.
+[access]
+window_days   = 7
+normalize_cap = 50
