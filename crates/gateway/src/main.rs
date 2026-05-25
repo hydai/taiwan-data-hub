@@ -18,6 +18,7 @@ mod api_routes;
 mod bookmarks_routes;
 mod comments_routes;
 mod llms_txt;
+mod marketplace_routes;
 mod moderation_routes;
 mod openapi;
 mod rate_limit_middleware;
@@ -94,6 +95,17 @@ const ALWAYS_ON_PUBLIC_ROUTES: &[&str] = &[
     openapi::OPENAPI_JSON_PATH,
     openapi::SWAGGER_UI_PATH,
     openapi::REDOC_PATH,
+    // #2.3 — Public read-only marketplace catalog. Backed by
+    // the embedded `config/{datasets,collections}.yaml` +
+    // `tools_data::domains::embedded`, so no runtime
+    // dependency; always-on alongside `/.well-known/*` and the
+    // OpenAPI surfaces. Detail routes (`/datasets/{slug}`,
+    // `/collections/{slug}`) intentionally omitted — operators
+    // and `doctor` watch the list endpoints; advertising every
+    // dynamic path would just be noise.
+    "/api/v1/catalog/domains",
+    "/api/v1/catalog/datasets",
+    "/api/v1/catalog/collections",
 ];
 
 /// Routes the `/llms.txt` subrouter (#7.1) adds when `Storage` is
@@ -296,7 +308,12 @@ fn build_router(
         // subrouter logs its own mount on construction so the
         // origin of each route is unambiguous in the boot log.
         .merge(well_known_router)
-        .merge(build_openapi_router());
+        .merge(build_openapi_router())
+        // `/api/v1/catalog/*` (#2.3) — public read-only REST view
+        // of the marketplace YAML catalog. Always-on; the embedded
+        // YAML loads at boot via `marketplace_routes::warm_seeds`,
+        // so first-request latency stays flat in personal mode.
+        .merge(marketplace_routes::router());
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -353,6 +370,13 @@ async fn serve() -> anyhow::Result<()> {
         gated_routes = gated_route_list(mode),
         "operating mode resolved"
     );
+
+    // Warm the marketplace YAML caches (#2.3) so a malformed
+    // `config/{domains,datasets,collections}.yaml` panics at boot
+    // rather than on the first `/api/v1/catalog/*` request. Same
+    // fail-fast posture as `tools_data::register_data_tools`'
+    // implicit warm of `domains::embedded()` below.
+    marketplace_routes::warm_seeds();
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the
@@ -1691,12 +1715,13 @@ mod tests {
         assert_eq!(entry.status, DoctorStatus::Ok);
         assert!(entry.detail.starts_with("personal "));
         // Always-on now includes all five M7 well-known
-        // surfaces (#7.2 + #7.3 + #7.4) and the OpenAPI trio
-        // (#7.5) since each derives from in-process state
-        // with no DB dependency. /llms.txt routes still don't
-        // appear without DATABASE_URL set.
+        // surfaces (#7.2 + #7.3 + #7.4), the OpenAPI trio
+        // (#7.5), and the M2 catalog list endpoints (#2.3)
+        // since each derives from in-process state with no DB
+        // dependency. /llms.txt routes still don't appear
+        // without DATABASE_URL set.
         assert!(entry.detail.contains(
-            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json,/.well-known/api-catalog,/.well-known/oauth-protected-resource,/api/openapi.json,/api/docs,/api/redoc"
+            "public: /healthz,/readyz,/mcp,/.well-known/mcp.json,/.well-known/agent-card.json,/.well-known/agent-skills.json,/.well-known/api-catalog,/.well-known/oauth-protected-resource,/api/openapi.json,/api/docs,/api/redoc,/api/v1/catalog/domains,/api/v1/catalog/datasets,/api/v1/catalog/collections"
         ));
         assert!(!entry.detail.contains("/llms.txt"));
         assert!(!entry.detail.contains("conditional"));
@@ -1748,9 +1773,10 @@ mod tests {
     fn resolved_public_routes_includes_llms_only_when_enabled() {
         let without = resolved_public_routes(false);
         // Always-on set is /healthz, /readyz, /mcp, the five
-        // M7 well-known surfaces (#7.2 + #7.3 + #7.4), and the
-        // OpenAPI trio (#7.5). The llms.txt routes must NOT
-        // appear without the storage flag set.
+        // M7 well-known surfaces (#7.2 + #7.3 + #7.4), the
+        // OpenAPI trio (#7.5), and the catalog list endpoints
+        // (#2.3). The llms.txt routes must NOT appear without
+        // the storage flag set.
         assert_eq!(
             without,
             vec![
@@ -1765,6 +1791,9 @@ mod tests {
                 "/api/openapi.json",
                 "/api/docs",
                 "/api/redoc",
+                "/api/v1/catalog/domains",
+                "/api/v1/catalog/datasets",
+                "/api/v1/catalog/collections",
             ],
         );
         let with = resolved_public_routes(true);
@@ -1777,6 +1806,9 @@ mod tests {
         assert!(with.contains(&"/api/openapi.json"));
         assert!(with.contains(&"/api/docs"));
         assert!(with.contains(&"/api/redoc"));
+        assert!(with.contains(&"/api/v1/catalog/domains"));
+        assert!(with.contains(&"/api/v1/catalog/datasets"));
+        assert!(with.contains(&"/api/v1/catalog/collections"));
         assert!(with.contains(&"/llms.txt"));
         assert!(with.contains(&"/llms-page/{n}"));
     }
