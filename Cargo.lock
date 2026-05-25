@@ -1613,6 +1613,7 @@ dependencies = [
  "polars",
  "serde",
  "serde_json",
+ "serde_yml",
  "sha2",
  "shared",
  "sqlx",

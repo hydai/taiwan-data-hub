@@ -18,6 +18,7 @@ mod api_routes;
 mod bookmarks_routes;
 mod comments_routes;
 mod llms_txt;
+mod marketplace_routes;
 mod moderation_routes;
 mod openapi;
 mod rate_limit_middleware;
@@ -296,7 +297,12 @@ fn build_router(
         // subrouter logs its own mount on construction so the
         // origin of each route is unambiguous in the boot log.
         .merge(well_known_router)
-        .merge(build_openapi_router());
+        .merge(build_openapi_router())
+        // `/api/v1/catalog/*` (#2.3) — public read-only REST view
+        // of the marketplace YAML catalog. Always-on; the embedded
+        // YAML loads at boot via `marketplace_routes::warm_seeds`,
+        // so first-request latency stays flat in personal mode.
+        .merge(marketplace_routes::router());
     if let Some(auth) = auth_router {
         router = router.merge(auth);
     }
@@ -353,6 +359,13 @@ async fn serve() -> anyhow::Result<()> {
         gated_routes = gated_route_list(mode),
         "operating mode resolved"
     );
+
+    // Warm the marketplace YAML caches (#2.3) so a malformed
+    // `config/{domains,datasets,collections}.yaml` panics at boot
+    // rather than on the first `/api/v1/catalog/*` request. Same
+    // fail-fast posture as `tools_data::register_data_tools`'
+    // implicit warm of `domains::embedded()` below.
+    marketplace_routes::warm_seeds();
 
     // Single MCP server shared by every session — Dispatcher is Arc-backed
     // so clone() in the factory is cheap. Stdio and HTTP both feed off the

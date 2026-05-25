@@ -20,6 +20,10 @@ mcp-core = { path = "../mcp-core" }
 object-store = { path = "../object-store" }
 shared = { path = "../shared" }
 storage = { path = "../storage" }
+# `tools-data` is wired in two ways here: its `domains::*` types
+# (Domain + I18nText) back the `/api/v1/catalog/domains` REST
+# handler (#2.3), and the MCP data tools register against the
+# dispatcher in `main.rs`. One path-dependency is enough.
 tools-data = { path = "../tools-data" }
 tools-utility = { path = "../tools-utility" }
 axum = { workspace = true }
@@ -32,6 +36,12 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `serde_yml` parses the three embedded marketplace catalog YAMLs
+# (`config/{domains,datasets,collections}.yaml`) at startup. Already
+# the workspace pick for YAML (etl-worker / tools-data); pulled in
+# here for #2.3 so the gateway can serve the same catalog the
+# frontend renders.
+serde_yml = { workspace = true }
 # `sha2` powers the strong ETag the /llms.txt route (#7.1) sends so
 # CDNs and well-behaved agents can revalidate cheaply. New direct dep
 # on this crate; workspace pin already exists for storage / tools-*.

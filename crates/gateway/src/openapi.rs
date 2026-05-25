@@ -21,17 +21,16 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::api_routes;
+use crate::marketplace_routes;
 
 /// Root `OpenAPI` document. `utoipa::OpenApi` walks the `paths`
 /// list to collect every annotated handler and folds in the
 /// `components(schemas(...))` list so referenced response/body
 /// types ship in the `#/components/schemas/...` section.
 ///
-/// The list is intentionally short for the M7 #7.5 landing —
-/// only `/api/v1/config` is documented today because it's the
-/// only stable, session-free REST surface. Session-gated routes
-/// (`/api/v1/me`, the api-keys CRUD) will join as future PRs
-/// teach them about authentication metadata.
+/// Session-gated routes (`/api/v1/me`, the api-keys CRUD) will
+/// join as future PRs teach them about authentication metadata;
+/// today only the public surfaces are documented.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -40,10 +39,27 @@ use crate::api_routes;
 The MCP protocol surface itself is documented separately at /.well-known/mcp.json.",
         license(name = "Apache-2.0", identifier = "Apache-2.0"),
     ),
-    paths(api_routes::get_config),
-    components(schemas(api_routes::ConfigResponse)),
+    paths(
+        api_routes::get_config,
+        marketplace_routes::list_domains,
+        marketplace_routes::list_datasets,
+        marketplace_routes::get_dataset,
+        marketplace_routes::list_collections,
+        marketplace_routes::get_collection,
+    ),
+    components(schemas(
+        api_routes::ConfigResponse,
+        marketplace_routes::DomainResource,
+        marketplace_routes::DatasetResource,
+        marketplace_routes::DatasetResourceLink,
+        marketplace_routes::CollectionResource,
+        marketplace_routes::DomainListResponse,
+        marketplace_routes::DatasetListResponse,
+        marketplace_routes::CollectionListResponse,
+    )),
     tags(
         (name = "config", description = "Gateway operating-mode discovery for the SvelteKit layout."),
+        (name = "catalog", description = "Read-only marketplace catalog (domains, datasets, curated collections)."),
     ),
 )]
 pub struct ApiDoc;
@@ -118,9 +134,9 @@ mod tests {
             version.starts_with("3.1"),
             "expected `OpenAPI` 3.1.x, got {version}",
         );
-        // The single annotated handler must appear in the
-        // paths map; the response body schema is referenced via
-        // `$ref` to `#/components/schemas/ConfigResponse`.
+        // The annotated handlers must appear in the paths map;
+        // each response body schema is referenced via `$ref` to
+        // `#/components/schemas/...`.
         assert!(
             spec["paths"]["/api/v1/config"]["get"].is_object(),
             "missing GET /api/v1/config in spec",
@@ -129,6 +145,33 @@ mod tests {
             spec["components"]["schemas"]["ConfigResponse"].is_object(),
             "missing ConfigResponse schema in components",
         );
+        // #2.3 catalog surfaces — list + detail per resource.
+        for expected in [
+            "/api/v1/catalog/domains",
+            "/api/v1/catalog/datasets",
+            "/api/v1/catalog/datasets/{slug}",
+            "/api/v1/catalog/collections",
+            "/api/v1/catalog/collections/{slug}",
+        ] {
+            assert!(
+                spec["paths"][expected]["get"].is_object(),
+                "missing GET {expected} in spec",
+            );
+        }
+        for schema in [
+            "DomainResource",
+            "DatasetResource",
+            "DatasetResourceLink",
+            "CollectionResource",
+            "DomainListResponse",
+            "DatasetListResponse",
+            "CollectionListResponse",
+        ] {
+            assert!(
+                spec["components"]["schemas"][schema].is_object(),
+                "missing {schema} schema in components",
+            );
+        }
     }
 
     #[tokio::test]
