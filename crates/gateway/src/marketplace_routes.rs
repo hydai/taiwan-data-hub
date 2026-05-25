@@ -387,8 +387,13 @@ fn project_collection(c: &SeedCollection, locale: &str) -> CollectionResource {
 }
 
 /// Apply the dataset filter quartet. Each `Option<&str>` is
-/// short-circuited so the request that passes none of them
-/// allocates nothing for filtering.
+/// short-circuited at the predicate level: when a filter is
+/// `None` the closure returns `true` without comparing strings,
+/// so the per-row cost is minimal. The returned `Vec` of
+/// references is always allocated (a few hundred bytes at the
+/// current seed size); that's a deliberate trade for the
+/// simpler pagination path in `list_datasets`, which slices
+/// the result regardless of whether any filter was applied.
 fn filter_datasets<'a>(
     pool: &'a [SeedDataset],
     domain: Option<&str>,
@@ -723,7 +728,7 @@ mod tests {
             .map(|d| d["slug"].as_str().unwrap())
             .collect();
         for s in &p1_slugs {
-            assert!(!p2_slugs.contains(s), "slug {s:?} appeared on both pages",);
+            assert!(!p2_slugs.contains(s), "slug {s:?} appeared on both pages");
         }
     }
 
