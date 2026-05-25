@@ -262,6 +262,61 @@ impl CacheHitRatio {
     }
 }
 
+/// Inputs the #2.8 nightly tier classifier consumes per dataset.
+/// Composed in [`TierRepo::list_for_tiering`] from a single
+/// `datasets` scan plus a 7-day [`usage_records`] subquery so the
+/// scorer can stay pure. Optional fields are `None` when the
+/// upstream metadata didn't provide a value; the scorer treats
+/// `None` as a zero signal for that dimension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierDatasetRow {
+    pub id: Uuid,
+    pub publisher: Option<String>,
+    pub update_frequency: Option<String>,
+    pub format: Option<String>,
+    /// Count of `usage_records` rows in the configured window
+    /// (default 7 days). Always non-negative; `i64` matches the
+    /// Postgres COUNT(*) return type.
+    pub access_count: i64,
+}
+
+/// Output the classifier feeds back into [`TierRepo::apply_computed_tiers`].
+/// Carries the dataset id, the chosen tier label, and the raw score
+/// so callers can persist both (`datasets.tier`, `datasets.tier_score`)
+/// in one round-trip. `tier_override` is honoured by the apply
+/// method, not encoded here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedTier {
+    pub id: Uuid,
+    /// One of `platinum`, `gold`, `silver`, `bronze`. Matches the
+    /// CHECK constraint on `datasets.tier`.
+    pub tier: String,
+    /// Score in `[0.0, 1.0]`. Persisted as `NUMERIC(4,3)` (three
+    /// decimals); callers can pass any `f64` and the SQL will
+    /// round to the column's precision.
+    pub score: f64,
+}
+
+/// Object-safe surface for the #2.8 nightly tier classifier.
+/// Decoupled from [`DatasetWriter`] so the etl-worker holds the
+/// minimum trait it needs and tests can inject in-memory stubs.
+#[async_trait]
+pub trait TierRepo: Send + Sync + 'static {
+    /// Snapshot every dataset's scoring inputs in one read.
+    /// `window_days` widens the access-count window — the classifier
+    /// reads it from `config/tiers.toml`. Returned in `datasets.id`
+    /// order so successive ticks produce stable batch UPDATE plans.
+    async fn list_for_tiering(&self, window_days: i32)
+    -> Result<Vec<TierDatasetRow>, StorageError>;
+
+    /// Persist computed tiers. Each row sets `(tier, tier_score)`
+    /// **only** when `tier_override IS NULL` — curators always
+    /// win, per docs/DESIGN.md §4.5. Returns the number of rows
+    /// actually changed (skipped overrides + unchanged-tier rows
+    /// do not count).
+    async fn apply_computed_tiers(&self, computed: &[ComputedTier]) -> Result<u64, StorageError>;
+}
+
 /// Object-safe surface for the #3.6 cache pipeline. Decoupled from
 /// the materialisation traits so the etl-worker can hold a
 /// minimal Arc<dyn CacheState> instead of the full Storage.
@@ -340,6 +395,20 @@ impl CacheState for Storage {
 
     async fn cache_hit_ratio(&self, window_days: i32) -> Result<CacheHitRatio, StorageError> {
         Storage::cache_hit_ratio(self, window_days).await
+    }
+}
+
+#[async_trait]
+impl TierRepo for Storage {
+    async fn list_for_tiering(
+        &self,
+        window_days: i32,
+    ) -> Result<Vec<TierDatasetRow>, StorageError> {
+        Storage::list_for_tiering(self, window_days).await
+    }
+
+    async fn apply_computed_tiers(&self, computed: &[ComputedTier]) -> Result<u64, StorageError> {
+        Storage::apply_computed_tiers(self, computed).await
     }
 }
 
@@ -1189,6 +1258,102 @@ impl Storage {
         .await
         .map_err(StorageError::from)?;
         Ok(row)
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  #2.8 nightly tier classifier
+    // ════════════════════════════════════════════════════════════
+    //
+    // Two-query split keeps the scoring decision in Rust (where
+    // it's unit-testable as a pure function) and the persistence
+    // in a single batched UPDATE…FROM. The read snapshots every
+    // dataset's scoring inputs in one round-trip; the write
+    // walks the computed batch with a parameterised UNNEST so
+    // even thousands of rows fit in one statement.
+
+    /// Snapshot the scoring inputs for every dataset. The 7-day
+    /// (configurable) `usage_records` count is computed by a
+    /// correlated subquery — cheap at current row counts; if the
+    /// catalog grows by 10× the same query rewrites cleanly to a
+    /// LATERAL join.
+    ///
+    /// `ORDER BY id` so the next-step UPDATE plan is stable
+    /// across ticks and any leaked plan-cache entries hit the
+    /// same shape.
+    pub async fn list_for_tiering(
+        &self,
+        window_days: i32,
+    ) -> Result<Vec<TierDatasetRow>, StorageError> {
+        // Column-tuple kept narrow on purpose — a richer scoring
+        // signal (e.g. last_modified_at, schema_diff_count) just
+        // extends the SELECT and the destructure below.
+        type Row = (Uuid, Option<String>, Option<String>, Option<String>, i64);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT \
+                d.id, d.publisher, d.update_frequency, d.format, \
+                (SELECT COUNT(*) FROM usage_records u \
+                 WHERE u.dataset_id = d.id \
+                   AND u.requested_at >= now() - ($1::int * INTERVAL '1 day') \
+                )::bigint AS access_count \
+             FROM datasets d \
+             ORDER BY d.id",
+        )
+        .bind(window_days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, publisher, update_frequency, format, access_count)| TierDatasetRow {
+                    id,
+                    publisher,
+                    update_frequency,
+                    format,
+                    access_count,
+                },
+            )
+            .collect())
+    }
+
+    /// Batch UPDATE `(tier, tier_score)` from the classifier's
+    /// output, skipping any row whose curator-pinned
+    /// `tier_override` is set. One round-trip regardless of batch
+    /// size — UNNEST + a FROM-clause join keeps the plan flat and
+    /// avoids N round-trips a per-row UPDATE loop would force.
+    ///
+    /// Returns the number of rows the UPDATE actually changed.
+    /// `computed` rows referring to dataset ids that no longer
+    /// exist (deleted between read and write) are silently
+    /// skipped — the next tick will simply not score them.
+    pub async fn apply_computed_tiers(
+        &self,
+        computed: &[ComputedTier],
+    ) -> Result<u64, StorageError> {
+        if computed.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<Uuid> = computed.iter().map(|c| c.id).collect();
+        let tiers: Vec<String> = computed.iter().map(|c| c.tier.clone()).collect();
+        let scores: Vec<f64> = computed.iter().map(|c| c.score).collect();
+        let result = sqlx::query(
+            "UPDATE datasets d \
+             SET tier = u.tier, tier_score = u.score::numeric(4,3) \
+             FROM ( \
+                SELECT * FROM UNNEST($1::uuid[], $2::text[], $3::float8[]) \
+                AS t(id, tier, score) \
+             ) AS u \
+             WHERE d.id = u.id \
+               AND d.tier_override IS NULL \
+               AND (d.tier <> u.tier OR d.tier_score <> u.score::numeric(4,3))",
+        )
+        .bind(&ids)
+        .bind(&tiers)
+        .bind(&scores)
+        .execute(&self.pool)
+        .await
+        .map_err(StorageError::from)?;
+        Ok(result.rows_affected())
     }
 }
 

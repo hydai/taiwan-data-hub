@@ -28,6 +28,7 @@ mod cache_pipeline;
 mod driver;
 mod retry;
 mod sources;
+mod tier_classifier;
 
 use std::env;
 use std::sync::Arc;
@@ -40,7 +41,7 @@ use connectors::{
 };
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
-use storage::{CacheState, DlqErrorKind, EtlDlqRepo, NewDlqEntry, Storage};
+use storage::{CacheState, DlqErrorKind, EtlDlqRepo, NewDlqEntry, Storage, TierRepo};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing_subscriber::EnvFilter;
 
@@ -48,12 +49,26 @@ use crate::cache_pipeline::{CacheTickConfig, run_cache_tick};
 use crate::driver::{CrawlError, run_one_pass};
 use crate::retry::{RetryConfig, RetryOutcome, dlq_error_kind, log_friendly, with_retry};
 use crate::sources::SourceConfig;
+use crate::tier_classifier::{TierConfig, load_config as load_tier_config, run_tier_tick};
 
 /// #3.6 hot-cache pipeline tick: every 6 hours at the top of the
 /// hour (UTC 00:00 / 06:00 / 12:00 / 18:00). Independent of the
 /// source-registry cadence — promotion / demotion catches up to
 /// query traffic without churning the catalog.
 const CACHE_TICK_CRON: &str = "0 0 0,6,12,18 * * * *";
+
+/// Nightly tier-classifier tick (#2.8). 18:00 UTC = 02:00
+/// Asia/Taipei (UTC+8 year-round, no DST), matching the
+/// `docs/DESIGN.md §4.5` "nightly 02:00 Asia/Taipei" call-out.
+/// Sec / min / hour / day / month / dow / year — 7 fields per
+/// the scheduler's expected shape (same as `CACHE_TICK_CRON`).
+const TIER_TICK_CRON: &str = "0 0 18 * * * *";
+
+/// Repo-root-relative path to the tier config. Mirrors the
+/// `DEFAULT_SOURCES_PATH` pattern; an operator can drop a custom
+/// `tiers.toml` next to the binary and override via env if a
+/// later issue adds a knob.
+const TIER_CONFIG_PATH: &str = "config/tiers.toml";
 
 const DEFAULT_SOURCES_PATH: &str = "config/sources.toml";
 
@@ -167,6 +182,8 @@ async fn main() -> Result<()> {
         .await
         .context("failed to register cache tick job")?;
 
+    register_tier_classifier(&mut scheduler, storage.clone()).await?;
+
     scheduler
         .start()
         .await
@@ -174,6 +191,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         cache_cron_utc = CACHE_TICK_CRON,
+        tier_cron_utc = TIER_TICK_CRON,
         "ETL worker scheduled; waiting for shutdown signal"
     );
 
@@ -232,6 +250,68 @@ async fn build_connector_for(id: SourceId, sources_path: &str) -> Result<Arc<dyn
             anyhow::bail!("user_contrib is not ETL-driven; remove it from {sources_path}")
         }
     }
+}
+
+/// Load `config/tiers.toml`, register the nightly tier-classifier
+/// cron job, and (when `ETL_RUN_AT_STARTUP=true`) run one
+/// immediate pass so the first DB snapshot of `(tier, tier_score)`
+/// reflects the boot-time state.
+///
+/// Extracted from `main` to keep that function under
+/// `clippy::too_many_lines` — the config loading, cron registration,
+/// and startup pass all share the same `Arc<TierConfig>` +
+/// `Arc<dyn TierRepo>` setup that doesn't compose cleanly inline.
+async fn register_tier_classifier(scheduler: &mut JobScheduler, storage: Storage) -> Result<()> {
+    let tier_config: Arc<TierConfig> = Arc::new(
+        load_tier_config(TIER_CONFIG_PATH)
+            .with_context(|| format!("could not load {TIER_CONFIG_PATH}"))?,
+    );
+    tracing::info!(
+        path = TIER_CONFIG_PATH,
+        window_days = tier_config.access.window_days,
+        normalize_cap = tier_config.access.normalize_cap,
+        "tier classifier config loaded",
+    );
+    let tier_repo: Arc<dyn TierRepo> = Arc::new(storage);
+    let tier_repo_for_cron = tier_repo.clone();
+    let tier_config_for_cron = tier_config.clone();
+    let tier_job = Job::new_async_tz(TIER_TICK_CRON, Utc, move |_uuid, _l| {
+        let repo = tier_repo_for_cron.clone();
+        let cfg = tier_config_for_cron.clone();
+        Box::pin(async move {
+            tracing::info!("cron tick: running tier classifier (#2.8)");
+            match run_tier_tick(repo.as_ref(), cfg.as_ref()).await {
+                Ok(report) => tracing::info!(
+                    scanned = report.scanned,
+                    platinum = report.platinum,
+                    gold = report.gold,
+                    silver = report.silver,
+                    bronze = report.bronze,
+                    updated = report.updated,
+                    "tier tick complete",
+                ),
+                Err(e) => tracing::error!(error = %e, "tier tick failed"),
+            }
+        })
+    })
+    .context("failed to construct tier tick job")?;
+    scheduler
+        .add(tier_job)
+        .await
+        .context("failed to register tier tick job")?;
+
+    if run_at_startup()? {
+        tracing::info!("ETL_RUN_AT_STARTUP=true; running one immediate tier tick (#2.8)");
+        match run_tier_tick(tier_repo.as_ref(), tier_config.as_ref()).await {
+            Ok(report) => tracing::info!(
+                scanned = report.scanned,
+                updated = report.updated,
+                "startup tier tick complete",
+            ),
+            Err(e) => tracing::error!(error = %e, "startup tier tick failed"),
+        }
+    }
+    Ok(())
 }
 
 /// Register one cron job for an enabled source. The closure
