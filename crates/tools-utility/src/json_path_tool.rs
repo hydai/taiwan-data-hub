@@ -22,6 +22,21 @@ pub const TOOL_NAME: &str = "json_path";
 /// it at the wrapper boundary so we never reach the parser.
 const MAX_EXPRESSION_BYTES: usize = 4 * 1024;
 
+/// Cap on `data` size (serialised UTF-8 byte count of the JSON
+/// argument). Matches the encoders' 4 MiB ceiling so the whole
+/// crate enforces one body-size contract. A document an order of
+/// magnitude larger should be paginated upstream or queried via
+/// the MCP `query_rows` tool against a database.
+const MAX_DATA_BYTES: usize = 4 * 1024 * 1024;
+
+/// Hard cap on the number of matches returned. `$..*` on a deeply
+/// nested document can yield tens of thousands of nodes; cloning
+/// every one of them into the response would create unbounded
+/// memory pressure and an unmanageably large JSON-RPC body.
+/// 10k is generous for any introspection use case; oversized
+/// results are truncated and flagged via the `truncated` field.
+const MAX_MATCHES: usize = 10_000;
+
 #[derive(Debug, Default, Clone)]
 pub struct JsonPathTool;
 impl JsonPathTool {
@@ -47,7 +62,7 @@ impl ToolHandler for JsonPathTool {
             output_schema: Some(
                 json!({
                     "type": "object",
-                    "required": ["matches", "count"],
+                    "required": ["matches", "count", "truncated"],
                     "properties": {
                         "matches": {
                             "type": "array",
@@ -60,6 +75,14 @@ impl ToolHandler for JsonPathTool {
                             "description": "Length of `matches` — provided so \
                                 clients can pre-allocate / short-circuit on \
                                 empty results without reading the array."
+                        },
+                        "truncated": {
+                            "type": "boolean",
+                            "description": "True when the underlying match \
+                                count exceeded the server cap (10 000) and \
+                                only the first N matches are returned. \
+                                Narrow the expression and retry to see the \
+                                rest."
                         }
                     },
                     "additionalProperties": false
@@ -76,11 +99,33 @@ impl ToolHandler for JsonPathTool {
             .get("data")
             .cloned()
             .ok_or_else(|| ToolError::InvalidArguments("missing `data`".into()))?;
+        check_data_size(&data)?;
         let expression = parse_expression(&args)?;
-        let matches = json_path::query(&data, &expression).map_err(ToolError::InvalidArguments)?;
+        let mut matches =
+            json_path::query(&data, &expression).map_err(ToolError::InvalidArguments)?;
+        let truncated = matches.len() > MAX_MATCHES;
+        if truncated {
+            matches.truncate(MAX_MATCHES);
+        }
         let count = matches.len();
-        Ok(json!({ "matches": matches, "count": count }))
+        Ok(json!({ "matches": matches, "count": count, "truncated": truncated }))
     }
+}
+
+/// Reject `data` values whose serialised form would exceed
+/// [`MAX_DATA_BYTES`]. Serialise once (the validator needs the
+/// byte count anyway) and discard — `JSONPath` operates on the
+/// in-memory `Value`, not the string form.
+fn check_data_size(data: &Value) -> Result<(), ToolError> {
+    let serialised = serde_json::to_vec(data)
+        .map_err(|e| ToolError::InvalidArguments(format!("could not measure `data` size: {e}")))?;
+    if serialised.len() > MAX_DATA_BYTES {
+        return Err(ToolError::InvalidArguments(format!(
+            "`data` is {} bytes; maximum is {MAX_DATA_BYTES}",
+            serialised.len()
+        )));
+    }
+    Ok(())
 }
 
 fn parse_expression(args: &Value) -> Result<String, ToolError> {
@@ -209,6 +254,64 @@ mod tests {
         })))
         .expect_err("empty expression");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn happy_path_reports_truncated_false_when_under_cap() {
+        let result = block_on(JsonPathTool::new().call(json!({
+            "data": [1, 2, 3],
+            "expression": "$[*]"
+        })))
+        .expect("query");
+        assert_eq!(
+            result["truncated"], false,
+            "small result must not flag truncation"
+        );
+        assert_eq!(result["count"], 3);
+    }
+
+    #[test]
+    fn unbounded_match_explosion_is_truncated_with_flag() {
+        // `$..*` returns every node + every descendant; for a
+        // doc of N leaves the count is N*(depth) which blows up
+        // fast. Build a doc that produces well over MAX_MATCHES
+        // descendants, then assert the cap kicked in and the
+        // truncation flag is set.
+        let big_array: Vec<i64> = (0..i64::try_from(MAX_MATCHES + 100).unwrap()).collect();
+        let result = block_on(JsonPathTool::new().call(json!({
+            "data": { "items": big_array },
+            "expression": "$..*"
+        })))
+        .expect("query");
+        assert_eq!(
+            result["truncated"], true,
+            "oversized result must flag truncation"
+        );
+        assert_eq!(
+            result["count"], MAX_MATCHES,
+            "matches must be truncated to exactly MAX_MATCHES",
+        );
+        assert_eq!(result["matches"].as_array().unwrap().len(), MAX_MATCHES,);
+    }
+
+    #[test]
+    fn oversize_data_payload_is_rejected_before_query() {
+        // Pad an array with a long string so its serialised
+        // form exceeds the 4 MiB cap. The cap fires at the
+        // wrapper boundary before serde_json_path runs.
+        let payload = "x".repeat(MAX_DATA_BYTES);
+        let err = block_on(JsonPathTool::new().call(json!({
+            "data": [payload],
+            "expression": "$[*]"
+        })))
+        .expect_err("must fail");
+        match err {
+            ToolError::InvalidArguments(msg) => assert!(
+                msg.contains("data") && msg.contains("maximum"),
+                "expected `data` size-cap message, got {msg:?}",
+            ),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
     }
 
     #[test]

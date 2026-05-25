@@ -10,6 +10,20 @@ use crate::json_schema::{self, SchemaDraft};
 
 pub const TOOL_NAME: &str = "json_schema_validate";
 
+/// Cap on serialised UTF-8 byte count of `data` and `schema`
+/// (independent caps; each must fit). 4 MiB matches the rest of
+/// the crate's body-size contract; a document or schema an
+/// order of magnitude larger should be paginated upstream.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Hard cap on the validation-error list. A pathological schema
+/// (say `"not": true`) can yield as many errors as the document
+/// has leaves; capping keeps the response bounded and prevents a
+/// runaway error walk from chewing the async runtime. The agent
+/// only needs to see "enough" errors to know the document is
+/// invalid; the rest are noise.
+const MAX_ERRORS: usize = 200;
+
 #[derive(Debug, Default, Clone)]
 pub struct JsonSchemaValidateTool;
 impl JsonSchemaValidateTool {
@@ -36,16 +50,18 @@ impl ToolHandler for JsonSchemaValidateTool {
             output_schema: Some(
                 json!({
                     "type": "object",
-                    "required": ["valid", "errors"],
+                    "required": ["valid", "errors", "truncated"],
                     "properties": {
                         "valid": {
                             "type": "boolean",
-                            "description": "True iff `errors` is empty. Mirrors \
-                                the array length so clients can branch on a \
-                                single bool without reading the array."
+                            "description": "True iff `errors` is empty AND \
+                                `truncated` is false. Mirrors the array \
+                                length so clients can branch on a single \
+                                bool without reading the array."
                         },
                         "errors": {
                             "type": "array",
+                            "maxItems": 200,
                             "items": {
                                 "type": "object",
                                 "required": ["instance_path", "message"],
@@ -66,6 +82,13 @@ impl ToolHandler for JsonSchemaValidateTool {
                                 },
                                 "additionalProperties": false
                             }
+                        },
+                        "truncated": {
+                            "type": "boolean",
+                            "description": "True when the validator produced \
+                                more than 200 errors and only the first 200 \
+                                are returned. `valid` is also false in that \
+                                case — the document didn't pass."
                         }
                     },
                     "additionalProperties": false
@@ -82,15 +105,21 @@ impl ToolHandler for JsonSchemaValidateTool {
             .get("data")
             .cloned()
             .ok_or_else(|| ToolError::InvalidArguments("missing `data`".into()))?;
+        check_body_size(&data, "data")?;
         let schema = args
             .get("schema")
             .cloned()
             .ok_or_else(|| ToolError::InvalidArguments("missing `schema`".into()))?;
+        check_body_size(&schema, "schema")?;
         let draft = parse_draft(&args)?;
 
-        let errors =
+        let mut errors =
             json_schema::validate(&data, &schema, draft).map_err(ToolError::InvalidArguments)?;
-        let valid = errors.is_empty();
+        let truncated = errors.len() > MAX_ERRORS;
+        if truncated {
+            errors.truncate(MAX_ERRORS);
+        }
+        let valid = errors.is_empty() && !truncated;
         let errors_json: Vec<Value> = errors
             .into_iter()
             .map(|e| {
@@ -100,8 +129,28 @@ impl ToolHandler for JsonSchemaValidateTool {
                 })
             })
             .collect();
-        Ok(json!({ "valid": valid, "errors": errors_json }))
+        Ok(json!({
+            "valid": valid,
+            "errors": errors_json,
+            "truncated": truncated,
+        }))
     }
+}
+
+/// Reject `data` / `schema` values whose serialised form exceeds
+/// [`MAX_BODY_BYTES`]. Serialised independently for each field
+/// so a single oversized one can be named in the error.
+fn check_body_size(value: &Value, field: &str) -> Result<(), ToolError> {
+    let bytes = serde_json::to_vec(value).map_err(|e| {
+        ToolError::InvalidArguments(format!("could not measure `{field}` size: {e}"))
+    })?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(ToolError::InvalidArguments(format!(
+            "`{field}` is {} bytes; maximum is {MAX_BODY_BYTES}",
+            bytes.len()
+        )));
+    }
+    Ok(())
 }
 
 fn parse_draft(args: &Value) -> Result<SchemaDraft, ToolError> {
@@ -140,12 +189,20 @@ fn input_schema() -> Map<String, Value> {
                     not a validation failure."
             },
             "draft": {
-                "type": "string",
+                // `["string", "null"]` so a client that serialises
+                // `undefined → null` (e.g. JS layers between agent
+                // and gateway) gets the documented default-fallback
+                // behaviour rather than a schema-layer rejection.
+                // The runtime handler treats `null` and "absent" as
+                // synonymous; pinning that here keeps the contract
+                // and the implementation in step.
+                "type": ["string", "null"],
                 "enum": ["7", "2019-09", "2020-12",
                          "draft7", "draft-07",
                          "draft2019-09", "draft-2019-09",
-                         "draft2020-12", "draft-2020-12"],
-                "description": "Optional. Default is `2020-12`."
+                         "draft2020-12", "draft-2020-12",
+                         null],
+                "description": "Optional. Default (also when sent as `null`) is `2020-12`."
             }
         },
         "additionalProperties": false
@@ -273,6 +330,83 @@ mod tests {
         })))
         .expect_err("missing schema");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
+    }
+
+    #[test]
+    fn happy_path_reports_truncated_false() {
+        let out = block_on(JsonSchemaValidateTool::new().call(json!({
+            "data": { "name": "Alice", "age": 30 },
+            "schema": user_schema()
+        })))
+        .expect("call");
+        assert_eq!(out["truncated"], false);
+    }
+
+    #[test]
+    fn over_max_errors_truncates_and_flags() {
+        // `{"not": {}}` matches everything (since {} accepts anything),
+        // so `not {}` rejects everything; for an array of N items
+        // requiring `not` matching at every position, the validator
+        // emits one error per element. Build an array of MAX_ERRORS+1
+        // elements to overflow the cap.
+        let big: Vec<i32> = (0..i32::try_from(MAX_ERRORS + 50).unwrap()).collect();
+        let schema = json!({
+            "type": "array",
+            "items": { "not": {} }
+        });
+        let out = block_on(JsonSchemaValidateTool::new().call(json!({
+            "data": big,
+            "schema": schema
+        })))
+        .expect("call");
+        let errors = out["errors"].as_array().expect("errors");
+        assert_eq!(
+            errors.len(),
+            MAX_ERRORS,
+            "must truncate to exactly MAX_ERRORS"
+        );
+        assert_eq!(out["truncated"], true);
+        assert_eq!(
+            out["valid"], false,
+            "truncated implies validation failed; `valid` is false even though `errors` was capped",
+        );
+    }
+
+    #[test]
+    fn oversize_data_is_rejected_before_validation() {
+        let huge = "x".repeat(MAX_BODY_BYTES);
+        let err = block_on(JsonSchemaValidateTool::new().call(json!({
+            "data": [huge],
+            "schema": { "type": "array" }
+        })))
+        .expect_err("must fail");
+        match err {
+            ToolError::InvalidArguments(msg) => assert!(
+                msg.contains("data") && msg.contains("maximum"),
+                "expected `data` size-cap message, got {msg:?}",
+            ),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversize_schema_is_rejected_before_validation() {
+        // Pad the schema's description until it exceeds the body
+        // cap. The actual schema content is valid; only the size
+        // matters for this check.
+        let huge_desc = "x".repeat(MAX_BODY_BYTES);
+        let err = block_on(JsonSchemaValidateTool::new().call(json!({
+            "data": {},
+            "schema": { "type": "object", "description": huge_desc }
+        })))
+        .expect_err("must fail");
+        match err {
+            ToolError::InvalidArguments(msg) => assert!(
+                msg.contains("schema") && msg.contains("maximum"),
+                "expected `schema` size-cap message, got {msg:?}",
+            ),
+            other => panic!("expected InvalidArguments, got {other:?}"),
+        }
     }
 
     #[test]
