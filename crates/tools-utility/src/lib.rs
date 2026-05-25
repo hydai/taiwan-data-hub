@@ -208,12 +208,12 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(RegexTestTool::new())
         .register(HtmlSanitizeTool::new())
         .register(TimezoneConvertTool::new())
-        // #6.10 batch B follow-up — JSON tooling. Two more of the
-        // 20 misc tools the wave-2 DoD asks for; the remaining
-        // 6 (pdf_extract, url_to_markdown, language_detect,
-        // big5_utf8_transcode, tw_traditional_simplified,
-        // holiday_between_dates) ship in later batches because
-        // each pulls in a heavier dep audited in isolation.
+        // #6.10 batch B follow-ups — JSON tooling + Big5 transcode.
+        // Three more of the 20 misc tools the wave-2 DoD asks for;
+        // the remaining 5 (pdf_extract, url_to_markdown,
+        // language_detect, tw_traditional_simplified,
+        // holiday_between_dates) ship in later PRs because each
+        // pulls in a heavier dep audited in isolation.
         .register(JsonPathTool::new())
         .register(JsonSchemaValidateTool::new())
         .register(TranscodeBig5Utf8Tool::new())
