@@ -1,7 +1,7 @@
 //! Pure `JSONPath` query helper (RFC 9535) shared by the
 //! `json_path` MCP tool wrapper.
 //!
-//! ``JSONPath`` (RFC 9535, finalised in 2024) is the canonical query
+//! `JSONPath` (RFC 9535, finalised in 2024) is the canonical query
 //! language for `JSON` documents — agents tend to know it from the
 //! `XPath` / `JMESPath` family. We use `serde_json_path` because it
 //! tracks the RFC and operates directly on `serde_json::Value`

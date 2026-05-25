@@ -33,7 +33,7 @@ pub enum SchemaDraft {
 impl SchemaDraft {
     /// Default draft when the caller doesn't specify one. 2020-12
     /// is the latest published standard and the format-vocabulary
-    /// shape every new spec is now authored against.
+    /// shapes every new spec is now authored against.
     #[must_use]
     pub fn default_draft() -> Self {
         Self::Draft202012
