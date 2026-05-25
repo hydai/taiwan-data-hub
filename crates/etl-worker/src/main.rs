@@ -18,6 +18,7 @@
 //! | `DATABASE_URL`            | yes      | —                                        |
 //! | `DATA_GOV_TW_URL`         | no       | `https://data.gov.tw`                    |
 //! | `SOURCES_CONFIG_PATH`     | no       | `config/sources.toml`                    |
+//! | `TIER_CONFIG_PATH`        | no       | `config/tiers.toml`                      |
 //! | `ETL_DB_MAX_CONNECTIONS`  | no       | `20` (must be a positive integer if set) |
 //! | `ETL_RUN_AT_STARTUP`      | no       | `false`                                  |
 //!
@@ -64,11 +65,16 @@ const CACHE_TICK_CRON: &str = "0 0 0,6,12,18 * * * *";
 /// the scheduler's expected shape (same as `CACHE_TICK_CRON`).
 const TIER_TICK_CRON: &str = "0 0 18 * * * *";
 
-/// Repo-root-relative path to the tier config. Mirrors the
-/// `DEFAULT_SOURCES_PATH` pattern; an operator can drop a custom
-/// `tiers.toml` next to the binary and override via env if a
-/// later issue adds a knob.
-const TIER_CONFIG_PATH: &str = "config/tiers.toml";
+/// Default repo-root-relative path to the tier config. Mirrors
+/// the `DEFAULT_SOURCES_PATH` pattern: this is the path the
+/// worker resolves when the operator hasn't set the
+/// `TIER_CONFIG_PATH` env var (e.g. dev runs from the repo root,
+/// or a packaged image that bind-mounts `config/` to the same
+/// place). For containerised deployments that don't ship
+/// `config/` next to the binary, set `TIER_CONFIG_PATH=/etc/td-hub/tiers.toml`
+/// (or wherever the orchestrator mounts it) and the loader picks
+/// it up.
+const DEFAULT_TIER_CONFIG_PATH: &str = "config/tiers.toml";
 
 const DEFAULT_SOURCES_PATH: &str = "config/sources.toml";
 
@@ -262,12 +268,19 @@ async fn build_connector_for(id: SourceId, sources_path: &str) -> Result<Arc<dyn
 /// and startup pass all share the same `Arc<TierConfig>` +
 /// `Arc<dyn TierRepo>` setup that doesn't compose cleanly inline.
 async fn register_tier_classifier(scheduler: &mut JobScheduler, storage: Storage) -> Result<()> {
+    // Same env-then-default resolution the source registry uses
+    // (`SOURCES_CONFIG_PATH`), so a packaged deploy can mount the
+    // tier config wherever its orchestrator prefers without
+    // patching the binary.
+    let tier_path = read_optional_env("TIER_CONFIG_PATH")?
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_TIER_CONFIG_PATH.to_owned());
     let tier_config: Arc<TierConfig> = Arc::new(
-        load_tier_config(TIER_CONFIG_PATH)
-            .with_context(|| format!("could not load {TIER_CONFIG_PATH}"))?,
+        load_tier_config(&tier_path).with_context(|| format!("could not load {tier_path}"))?,
     );
     tracing::info!(
-        path = TIER_CONFIG_PATH,
+        path = %tier_path,
         window_days = tier_config.access.window_days,
         normalize_cap = tier_config.access.normalize_cap,
         "tier classifier config loaded",

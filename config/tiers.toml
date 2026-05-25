@@ -109,13 +109,20 @@ score = 0.6
 # document scans. PDF gets a deliberately low score because it
 # typically needs OCR before it's usable by downstream tools.
 # Missing / unrecognised values map to 0.0.
+#
+# Must cover every value the `dataset_files.format` CHECK
+# constraint accepts (migrations/0001_init.sql:138-139); a
+# missing entry would silently under-score datasets that ship
+# only that format.
 [format_scores]
 parquet = 1.0
 csv     = 1.0
 json    = 1.0
+jsonl   = 1.0   # streaming JSON; same machine-readability as plain JSON
 geojson = 0.9
 xml     = 0.7
 xlsx    = 0.6
+zip     = 0.4   # archive container — requires extraction before use
 pdf     = 0.2
 
 # ── recent_access normalization ──────────────────────────────────────

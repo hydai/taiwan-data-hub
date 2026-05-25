@@ -2960,4 +2960,246 @@ mod tests {
         let v = ratio.ratio().expect("ratio Some");
         assert!((v - 0.6).abs() < 1e-9);
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  #2.8 tier classifier — testcontainers coverage
+    // ════════════════════════════════════════════════════════════
+    //
+    // The tier_classifier orchestrator unit-tests its scoring via
+    // a stub TierRepo, so neither `list_for_tiering`'s
+    // `dataset_files → array_agg` plan nor `apply_computed_tiers`'
+    // UNNEST + `tier_override IS NULL` skip gets executed against
+    // real Postgres in `cargo test`. These ignored tests catch
+    // schema drift, type mismatches, and the override-skip
+    // invariant before the nightly cron does.
+
+    /// Insert a `dataset_files` row hanging off a fresh
+    /// `dataset_versions` row for the given dataset, so
+    /// `list_for_tiering`'s aggregation has something to fold up.
+    /// Returns the version id so the caller can attach more files
+    /// to the same version when testing the DISTINCT aggregation.
+    async fn attach_file(storage: &Storage, dataset_id: Uuid, format: &str) -> Uuid {
+        let version_id: (Uuid,) = sqlx::query_as(
+            "INSERT INTO dataset_versions (dataset_id, version) \
+             VALUES ($1, $2) RETURNING id",
+        )
+        .bind(dataset_id)
+        .bind(format!("v-{format}"))
+        .fetch_one(storage.pool())
+        .await
+        .expect("insert dataset_versions");
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(version_id.0)
+        .bind(format)
+        .bind(format!("file:///tmp/{format}.bin"))
+        .execute(storage.pool())
+        .await
+        .expect("insert dataset_files");
+        version_id.0
+    }
+
+    /// `list_for_tiering`: aggregates distinct file formats per
+    /// dataset, returns rows in `id` order, and the usage subquery
+    /// counts only the requested window.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn list_for_tiering_aggregates_formats_and_counts_recent_usage() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Three datasets: one with multi-format files + recent
+        // usage, one metadata-only (no files yet), one with a
+        // single file and zero usage.
+        let mut ids = Vec::new();
+        for (slug, publisher, freq) in [
+            ("multi", Some("行政院"), Some("daily")),
+            ("metadata-only", Some("教育部"), Some("monthly")),
+            ("single", None, None),
+        ] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: publisher.map(str::to_owned),
+                update_frequency: freq.map(str::to_owned),
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+                ..Default::default()
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.push((slug, id));
+        }
+        let multi_id = ids.iter().find(|(s, _)| *s == "multi").unwrap().1;
+        let single_id = ids.iter().find(|(s, _)| *s == "single").unwrap().1;
+
+        // `multi` ships CSV + JSON + PDF (under a single version).
+        let v = attach_file(&storage, multi_id, "csv").await;
+        sqlx::query(
+            "INSERT INTO dataset_files (dataset_version_id, format, uri) \
+             VALUES ($1, 'json', 'file:///tmp/x.json'), \
+                    ($1, 'pdf',  'file:///tmp/x.pdf')",
+        )
+        .bind(v)
+        .execute(storage.pool())
+        .await
+        .expect("attach extra files");
+        // `single` ships JSON only.
+        let _ = attach_file(&storage, single_id, "json").await;
+        // `multi` has 5 query_rows hits — well inside the 7-day window.
+        insert_query_rows_usage(&storage, multi_id, 5).await;
+
+        let rows = storage.list_for_tiering(7).await.expect("list_for_tiering");
+        assert_eq!(rows.len(), 3);
+        // ORDER BY id stability — pin we get every dataset back.
+        let by_id: std::collections::HashMap<Uuid, &TierDatasetRow> =
+            rows.iter().map(|r| (r.id, r)).collect();
+
+        let m = by_id.get(&multi_id).expect("multi present");
+        let mut multi_formats = m.formats.clone();
+        multi_formats.sort();
+        assert_eq!(multi_formats, vec!["csv", "json", "pdf"]);
+        assert_eq!(m.publisher.as_deref(), Some("行政院"));
+        assert_eq!(m.update_frequency.as_deref(), Some("daily"));
+        assert_eq!(m.access_count, 5);
+
+        let metadata_only_id = ids.iter().find(|(s, _)| *s == "metadata-only").unwrap().1;
+        let mo = by_id.get(&metadata_only_id).expect("metadata-only present");
+        assert!(
+            mo.formats.is_empty(),
+            "dataset without files → empty formats vec, not NULL"
+        );
+        assert_eq!(mo.access_count, 0);
+
+        let s = by_id.get(&single_id).expect("single present");
+        assert_eq!(s.formats, vec!["json".to_owned()]);
+        assert_eq!(s.publisher, None);
+        assert_eq!(s.access_count, 0);
+    }
+
+    /// `apply_computed_tiers`: persists (tier, `tier_score`), echoes
+    /// the changed-row count, and SKIPs any row whose
+    /// `tier_override` is set — even if the computed tier disagrees.
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn apply_computed_tiers_respects_tier_override() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+
+        // Two datasets — one with an editor pin, one without.
+        let mut ids = std::collections::HashMap::new();
+        for slug in ["pinned-by-curator", "free-floating"] {
+            let m = DatasetMetadata {
+                source_id: slug.into(),
+                slug: slug.into(),
+                title_i18n: BTreeMap::from([("zh-TW".into(), slug.to_owned())]),
+                description_i18n: BTreeMap::new(),
+                license: "CC0".into(),
+                publisher: None,
+                update_frequency: None,
+                original_url: None,
+                last_modified_at: None,
+                upstream_categories: vec![],
+                ..Default::default()
+            };
+            let id = storage
+                .upsert_dataset(domain_id, SourceId::DataGovTw, &m)
+                .await
+                .expect("upsert");
+            ids.insert(slug, id);
+        }
+        // Pin the first dataset to gold via tier_override. The
+        // classifier's "platinum" verdict for this row must be
+        // ignored.
+        force_cache_state(
+            &storage,
+            ids["pinned-by-curator"],
+            false,
+            Some("bronze"),
+            Some("gold"),
+        )
+        .await;
+
+        let computed = vec![
+            ComputedTier {
+                id: ids["pinned-by-curator"],
+                tier: "platinum".into(),
+                score: 0.95,
+            },
+            ComputedTier {
+                id: ids["free-floating"],
+                tier: "gold".into(),
+                score: 0.75,
+            },
+        ];
+        let updated = storage
+            .apply_computed_tiers(&computed)
+            .await
+            .expect("apply");
+        assert_eq!(
+            updated, 1,
+            "only the non-overridden row should change; the pinned row is skipped"
+        );
+
+        // Effective state: pinned row still bronze base + gold
+        // override; free-floating row now gold with tier_score 0.75.
+        let pinned: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT tier, tier_override, tier_score::text FROM datasets WHERE id = $1",
+        )
+        .bind(ids["pinned-by-curator"])
+        .fetch_one(storage.pool())
+        .await
+        .expect("read pinned");
+        assert_eq!(pinned.0, "bronze", "base tier untouched");
+        assert_eq!(pinned.1.as_deref(), Some("gold"), "override preserved");
+
+        let free: (String, String) =
+            sqlx::query_as("SELECT tier, tier_score::text FROM datasets WHERE id = $1")
+                .bind(ids["free-floating"])
+                .fetch_one(storage.pool())
+                .await
+                .expect("read free-floating");
+        assert_eq!(free.0, "gold");
+        // NUMERIC(4,3) rounds to three decimals — 0.75 → "0.750".
+        assert_eq!(free.1, "0.750");
+    }
+
+    /// `apply_computed_tiers` skips no-op writes: re-applying the
+    /// same (tier, score) returns 0 changed rows so the boot-log
+    /// counter accurately reflects "what actually moved" rather
+    /// than "what we sent".
+    #[tokio::test]
+    #[ignore = "requires docker; run with `cargo test -p storage -- --ignored`"]
+    async fn apply_computed_tiers_is_idempotent_on_unchanged_rows() {
+        let (storage, _container) = fresh_storage().await;
+        let domain_id = realestate_land_id(&storage).await;
+        let id = storage
+            .upsert_dataset(domain_id, SourceId::DataGovTw, &sample_metadata())
+            .await
+            .expect("upsert");
+
+        let payload = vec![ComputedTier {
+            id,
+            tier: "silver".into(),
+            score: 0.55,
+        }];
+        let first = storage
+            .apply_computed_tiers(&payload)
+            .await
+            .expect("apply 1");
+        assert_eq!(first, 1, "first write changes the row");
+        let second = storage
+            .apply_computed_tiers(&payload)
+            .await
+            .expect("apply 2");
+        assert_eq!(second, 0, "identical second write is a no-op");
+    }
 }
