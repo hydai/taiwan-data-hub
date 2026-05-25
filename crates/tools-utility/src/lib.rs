@@ -121,13 +121,13 @@ pub use hashers_tool::{
 // #6.10 batch B follow-up — JSON Path (RFC 9535) + JSON Schema
 // validation. Two of the eight bullets the original batch
 // deferred for their heavy crates.
-pub use json_path_tool::{JsonPathTool, TOOL_NAME as JSON_PATH_TOOL_NAME};
-pub use json_schema_validate_tool::{
-    JsonSchemaValidateTool, TOOL_NAME as JSON_SCHEMA_VALIDATE_TOOL_NAME,
-};
 pub use ids_tool::{
     TOOL_ULID as GENERATE_ULID_TOOL_NAME, TOOL_UUID_V4 as GENERATE_UUID_V4_TOOL_NAME,
     TOOL_UUID_V7 as GENERATE_UUID_V7_TOOL_NAME, UlidTool, UuidV4Tool, UuidV7Tool,
+};
+pub use json_path_tool::{JsonPathTool, TOOL_NAME as JSON_PATH_TOOL_NAME};
+pub use json_schema_validate_tool::{
+    JsonSchemaValidateTool, TOOL_NAME as JSON_SCHEMA_VALIDATE_TOOL_NAME,
 };
 pub use text_misc_tool::{
     HtmlSanitizeTool, RegexTestTool, SlugifyTool, TOOL_HTML_SANITIZE as HTML_SANITIZE_TOOL_NAME,

@@ -25,12 +25,7 @@ use serde_json_path::JsonPath;
 /// `Value` to put into its response envelope.
 pub fn query(input: &Value, expression: &str) -> Result<Vec<Value>, String> {
     let path = JsonPath::parse(expression).map_err(|e| e.to_string())?;
-    Ok(path
-        .query(input)
-        .all()
-        .into_iter()
-        .cloned()
-        .collect())
+    Ok(path.query(input).all().into_iter().cloned().collect())
 }
 
 #[cfg(test)]
@@ -76,8 +71,7 @@ mod tests {
     #[test]
     fn filter_expression_works() {
         // Every book over $10 — uses RFC 9535 filter syntax.
-        let matches =
-            query(&sample(), "$.store.book[?@.price > 10]").expect("filter query");
+        let matches = query(&sample(), "$.store.book[?@.price > 10]").expect("filter query");
         assert_eq!(matches.len(), 2);
         // Both expensive titles are present.
         let titles: Vec<&str> = matches

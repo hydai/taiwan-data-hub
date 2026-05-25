@@ -103,9 +103,7 @@ fn parse_expression(args: &Value) -> Result<String, ToolError> {
             "`expression` must be a string, got {}",
             kind_of(other)
         ))),
-        None => Err(ToolError::InvalidArguments(
-            "missing `expression`".into(),
-        )),
+        None => Err(ToolError::InvalidArguments("missing `expression`".into())),
     }
 }
 
@@ -191,8 +189,7 @@ mod tests {
 
     #[test]
     fn missing_or_wrong_type_args_are_invalid_arguments() {
-        let err = block_on(JsonPathTool::new().call(json!({})))
-            .expect_err("missing both");
+        let err = block_on(JsonPathTool::new().call(json!({}))).expect_err("missing both");
         assert!(matches!(err, ToolError::InvalidArguments(_)));
 
         let err = block_on(JsonPathTool::new().call(json!({"expression": "$"})))
