@@ -13,6 +13,8 @@
 
 pub mod address;
 pub mod anomaly;
+pub mod big5;
+pub mod big5_tool;
 pub mod canonical;
 pub mod canonical_tool;
 pub mod date;
@@ -129,6 +131,10 @@ pub use json_path_tool::{JsonPathTool, TOOL_NAME as JSON_PATH_TOOL_NAME};
 pub use json_schema_validate_tool::{
     JsonSchemaValidateTool, TOOL_NAME as JSON_SCHEMA_VALIDATE_TOOL_NAME,
 };
+// Mozilla's `encoding_rs` powers the round-trip; pulled in here
+// because legacy data.gov.tw files commonly ship as Big5 and
+// callers shouldn't need their own decoder.
+pub use big5_tool::{TOOL_NAME as TRANSCODE_BIG5_UTF8_TOOL_NAME, TranscodeBig5Utf8Tool};
 pub use text_misc_tool::{
     HtmlSanitizeTool, RegexTestTool, SlugifyTool, TOOL_HTML_SANITIZE as HTML_SANITIZE_TOOL_NAME,
     TOOL_REGEX_TEST as TEXT_REGEX_TEST_TOOL_NAME, TOOL_SLUGIFY as TEXT_SLUGIFY_TOOL_NAME,
@@ -178,14 +184,15 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(AutocorrelationTool::new())
         .register(DecomposeSeasonalTool::new())
         .register(AnomalyIsolationTool::new())
-        // #6.10 batch B — 10 of the 20 misc tools the DoD lists.
-        // Remaining 8 DoD bullets (pdf_extract, url_to_markdown,
-        // json_path, json_schema_validate, language_detect,
-        // big5_utf8_transcode, tw_traditional_simplified,
-        // holiday_between_dates) are deferred to a follow-up
-        // because each needs a heavy new crate (e.g. pdf-extract,
-        // html2md, jsonpath_lib, jsonschema, whatlang,
-        // encoding_rs, opencc-rs). See the #70 thread.
+        // #6.10 batch B — 10 of the 20 misc tools the DoD lists,
+        // shipped in PR #155. Three more (json_path,
+        // json_schema_validate, transcode_big5_utf8) land in the
+        // follow-up block below this one; the remaining 5
+        // (pdf_extract, url_to_markdown, language_detect,
+        // tw_traditional_simplified, holiday_between_dates) are
+        // still deferred because each needs a heavier new crate
+        // (e.g. pdf-extract, html2md, whatlang, opencc-rs)
+        // audited in isolation. See the #70 thread.
         .register(Base64EncodeTool::new())
         .register(Base64DecodeTool::new())
         .register(UrlEncodeTool::new())
@@ -202,12 +209,13 @@ pub fn register_utility_tools(builder: DispatcherBuilder) -> DispatcherBuilder {
         .register(RegexTestTool::new())
         .register(HtmlSanitizeTool::new())
         .register(TimezoneConvertTool::new())
-        // #6.10 batch B follow-up — JSON tooling. Two more of the
-        // 20 misc tools the wave-2 DoD asks for; the remaining
-        // 6 (pdf_extract, url_to_markdown, language_detect,
-        // big5_utf8_transcode, tw_traditional_simplified,
-        // holiday_between_dates) ship in later batches because
-        // each pulls in a heavier dep audited in isolation.
+        // #6.10 batch B follow-ups — JSON tooling + Big5 transcode.
+        // Three more of the 20 misc tools the wave-2 DoD asks for;
+        // the remaining 5 (pdf_extract, url_to_markdown,
+        // language_detect, tw_traditional_simplified,
+        // holiday_between_dates) ship in later PRs because each
+        // pulls in a heavier dep audited in isolation.
         .register(JsonPathTool::new())
         .register(JsonSchemaValidateTool::new())
+        .register(TranscodeBig5Utf8Tool::new())
 }

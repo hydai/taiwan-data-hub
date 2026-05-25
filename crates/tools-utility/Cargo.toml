@@ -52,6 +52,13 @@ jsonschema = "0.30"
 mcp-core = { path = "../mcp-core" }
 regex = { workspace = true }
 serde_json_path = "0.7"
+# #6.10 batch B follow-up — Big5 ↔ UTF-8 transcoding for the
+# `transcode_big5_utf8` tool. `encoding_rs` is Mozilla's
+# implementation of the WHATWG Encoding Standard (the same code
+# Firefox uses for charset decoding); pinned to ≥ 0.8 for the
+# `encode/decode` API stability and the `unmappable` reporting
+# we use to flag lossy round-trips.
+encoding_rs = "0.8"
 sha2 = { workspace = true }
 slug = "0.1"
 # `std` feature pulls in `Ulid::new()` (uses SystemTime + rand);
